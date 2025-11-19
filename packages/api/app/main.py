@@ -1,35 +1,23 @@
+# packages/api/app/main.py
+
 from fastapi import FastAPI
+from app.routers import datasets, women_in_mathematics
 
 app = FastAPI(
     title="Storywrangler API",
-    description="API for Storywrangler text analysis platform",
-    version="0.0.1"
+    version="0.0.1",
+    description="Text analysis platform API"
 )
+
+# Register routers
+app.include_router(datasets.router)
+app.include_router(women_in_mathematics.router)
+
 
 @app.get("/")
 async def root():
     return {
         "message": "Storywrangler API",
         "version": "0.0.1",
-        "specification": {
-            "version": "0.0.1",
-            "url": "https://github.com/vermont-complex-systems/Storywrangler-Specification"
-        }
+        "specification": "https://github.com/vermont-complex-systems/Storywrangler-Specification"
     }
-
-@app.get("/specification")
-async def get_specification():
-    """Return information about supported entity standards"""
-    return {
-        "version": "0.0.1",
-        "spec_url": "https://github.com/vermont-complex-systems/Storywrangler-Specification/blob/main/versions/0.0.1.md",
-        "repository": "https://github.com/vermont-complex-systems/Storywrangler-Specification",
-        "supported_entities": {
-            "identifiers": ["wikidata", "orcid", "ror", "ipeds", "doi", "isbn"],
-            "taxonomies": ["wikidata", "arxiv", "mag"]
-        }
-    }
-
-@app.get("/health")
-async def health():
-    return {"status": "healthy"}
