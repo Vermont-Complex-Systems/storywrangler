@@ -1,0 +1,17 @@
+[project]
+name = "storywrangler-workspace"
+version = "0.1.0"
+requires-python = ">=3.11"
+
+[tool.uv.workspace]
+members = [
+    "packages/sdk",
+    "packages/text",
+    "packages/api"
+]
+
+[tool.uv]
+dev-dependencies = [
+    "pytest>=8.0.0",
+    "ruff>=0.1.0"
+]
