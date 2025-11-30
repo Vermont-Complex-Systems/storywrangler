@@ -30,6 +30,18 @@ class Standards_v0_0_1:
     # Local Identifiers (Section 3.5)
     LOCAL_PATTERN = re.compile(r'^local:[a-z0-9_-]+:[a-z0-9_-]+$')
     
+    # API Endpoint Schemas (Section 3.6)
+    ENDPOINT_SCHEMAS = {
+        'top-ngrams': {
+            'required_columns': {
+                'types': 'varchar',    # The n-gram text content
+                'counts': 'integer'    # Frequency count for the n-gram
+            },
+            'response_format': 'json_array',
+            'ordering': 'counts DESC'
+        }
+    }
+
     @staticmethod
     def get_spec_url(section: str = "") -> str:
         """Get URL to specification section"""

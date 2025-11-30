@@ -1,5 +1,6 @@
-"""Entity and taxonomy validation"""
+"""Entity and endpoint validation"""
 
 from .entities import EntityValidator
+from .endpoints import EndpointValidator
 
-__all__ = ["EntityValidator"]
+__all__ = ["EntityValidator", "EndpointValidator"]
