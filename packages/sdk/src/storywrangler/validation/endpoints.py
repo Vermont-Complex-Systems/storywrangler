@@ -23,13 +23,13 @@ class EndpointValidator:
     def __init__(self):
         self.standards = Standards_v0_0_1()
 
-    def validate_top_ngrams_schema(self, schema: Dict[str, Any]) -> Dict[str, Any]:
+    def validate_types_counts_schema(self, schema: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Validates top-ngrams endpoint schema against Standards v0.0.1 Section 3.6.1
+        Validates types-counts endpoint schema against Standards v0.0.1 Section 3.6.1
 
         Spec: Column names MUST be exactly 'types' and 'counts'
-        - types (VARCHAR): The n-gram text content
-        - counts (INTEGER): Frequency count for the n-gram
+        - types (VARCHAR): The item text (ngram, name, institution, ...)
+        - counts (INTEGER): Frequency/occurrence count
         """
         result = {
             'valid': False,
@@ -73,8 +73,8 @@ class EndpointValidator:
 
     def validate_endpoint_schema(self, endpoint_name: str, schema: Dict[str, Any]) -> Dict[str, Any]:
         """Validates any supported endpoint schema"""
-        if endpoint_name == 'top-ngrams':
-            return self.validate_top_ngrams_schema(schema)
+        if endpoint_name == 'types-counts':
+            return self.validate_types_counts_schema(schema)
         else:
             return {
                 'valid': False,
@@ -101,7 +101,7 @@ class EndpointValidator:
         allowed_types = type_mappings.get(required_type, [required_type])
         return actual_type in allowed_types
 
-    def validate_query_response(self, response_data: List[Dict[str, Any]], endpoint_name: str = 'top-ngrams') -> Dict[str, Any]:
+    def validate_query_response(self, response_data: List[Dict[str, Any]], endpoint_name: str = 'types-counts') -> Dict[str, Any]:
         """
         Validate actual query response format
 

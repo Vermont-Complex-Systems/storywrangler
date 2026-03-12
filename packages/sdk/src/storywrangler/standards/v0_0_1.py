@@ -32,10 +32,10 @@ class Standards_v0_0_1:
     
     # API Endpoint Schemas (Section 3.6)
     ENDPOINT_SCHEMAS = {
-        'top-ngrams': {
+        'types-counts': {
             'required_columns': {
-                'types': 'varchar',    # The n-gram text content
-                'counts': 'integer'    # Frequency count for the n-gram
+                'types': 'varchar',    # The item text (ngram, name, institution, ...)
+                'counts': 'integer'    # Frequency/occurrence count
             },
             'response_format': 'json_array',
             'ordering': 'counts DESC'
