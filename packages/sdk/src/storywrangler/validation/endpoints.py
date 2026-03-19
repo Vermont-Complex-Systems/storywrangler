@@ -47,7 +47,7 @@ class EndpointValidator:
             result['errors'].append("Schema must contain 'columns' dictionary")
             return result
 
-        required_schema = self.standards.ENDPOINT_SCHEMAS['top-ngrams']['required_columns']
+        required_schema = self.standards.ENDPOINT_SCHEMAS['types-counts']['required_columns']
 
         # Strict validation - column names must be exactly 'types' and 'counts'
         for required_col, required_type in required_schema.items():

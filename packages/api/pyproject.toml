@@ -4,14 +4,12 @@ version = "1.0.0"
 requires-python = ">=3.11"
 dependencies = [
     "storywrangler-sdk",
-    "storywrangler-text",
     "fastapi[standard]>=0.115.0",
     "uvicorn[standard]>=0.30.0"
 ]
 
 [tool.uv.sources]
 storywrangler-sdk = { workspace = true }
-storywrangler-text = { workspace = true }
 
 # Simplified build - just point to app/
 [build-system]

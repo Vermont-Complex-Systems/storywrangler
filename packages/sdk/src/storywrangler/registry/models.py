@@ -17,23 +17,80 @@ from ..validation.endpoints import EndpointValidator
 
 
 class EntityMappingConfig(BaseModel):
-    """How to map canonical entity IDs (e.g. Wikidata QIDs) to dataset-local identifiers."""
+    """Schema declaration for entity ID resolution.
 
-    table: Optional[str] = Field(
-        None,
-        description="DuckLake table name holding the adapter (ducklake format only)",
-    )
-    path: Optional[str] = Field(
-        None,
-        description="Absolute path to the adapter parquet file (parquet_hive format only)",
+    Describes entity_type and local_id_column. The actual mapping rows (local_id →
+    entity_id) are submitted separately via the 'entities' field in DatasetCreate or
+    via the POST /admin/registry/{domain}/{dataset_id}/entities batch endpoint.
+    """
+
+    entity_type: str = Field(
+        ...,
+        description="Entity identifier system (e.g. 'wikidata', 'orcid', 'ror')",
     )
     local_id_column: str = Field(
         ...,
-        description="Column in the adapter that holds the dataset-local identifier",
+        description="Column in the dataset holding the dataset-local identifier",
     )
-    entity_id_column: str = Field(
+
+
+class EntityRow(BaseModel):
+    """One row in the entity mapping table."""
+
+    local_id: str = Field(
         ...,
-        description="Column in the adapter that holds the canonical entity ID, e.g. 'wikidata:Q30'",
+        description="Dataset-local identifier (e.g. country code, author ID)",
+    )
+    entity_id: str = Field(
+        ...,
+        description="Canonical entity ID conforming to the entity_type format (e.g. 'wikidata:Q30')",
+    )
+    entity_name: str = Field(
+        ...,
+        description="Human-readable name for the entity",
+    )
+    entity_ids: Optional[List[str]] = Field(
+        None,
+        description="Alternate identifiers (e.g. ['iso:US', 'local:babynames:united_states'])",
+    )
+
+
+class FormatConfig(BaseModel):
+    """Storage-format-specific metadata.
+
+    parquet_hive: tables_metadata + partitioning
+    ducklake:     tables_metadata + ducklake_data_path + data_schema + partitioning
+    duckdb:       (no subfields needed)
+
+    Adapter parquet paths for query-time DuckDB JOINs go in
+    tables_metadata['adapter'], unifying both parquet_hive and ducklake.
+    """
+
+    tables_metadata: Optional[Dict[str, List[str]]] = Field(
+        None,
+        description=(
+            "Maps logical table names to lists of file paths. "
+            "Keys must match physical directory names under data_location (parquet_hive), "
+            "or table names inside the lake (ducklake). "
+            "Include 'adapter' key for entity-mapping parquet files used in query-time JOINs. "
+            "Example: {\"daily\": [], \"weekly\": [], \"monthly\": [], \"adapter\": []}"
+        ),
+    )
+    ducklake_data_path: Optional[str] = Field(
+        None,
+        description="ducklake only. Path to the DuckLake catalog .duckdb file",
+    )
+    data_schema: Optional[Dict[str, str]] = Field(
+        None,
+        description="Column name → DuckDB type. e.g. {\"ngram\": \"VARCHAR\", \"count\": \"BIGINT\"}",
+    )
+    partitioning: Optional[Dict] = Field(
+        None,
+        description="Partitioning scheme. e.g. {\"keys\": [\"date\", \"country\"], \"granularity\": \"daily\"}",
+    )
+    availability: Optional[Dict] = Field(
+        None,
+        description="Coverage metadata. e.g. {\"daily\": {\"available\": {\"Q30\": {\"min\": \"2010-01-01\", \"max\": \"2024-12-31\"}}}} or {\"available\": [\"town_a\", \"town_b\"]} for snapshot data.",
     )
 
 
@@ -100,38 +157,34 @@ class DatasetCreate(BaseModel):
         ...,
         description="Absolute path to the root of the dataset on disk, or connection string",
     )
-    data_format: Literal["parquet_hive", "duckdb", "ducklake"] = Field(
+    data_format: Literal["parquet", "parquet_hive", "duckdb", "ducklake"] = Field(
         "parquet_hive",
-        description="Storage format.",
+        description="Storage format. Use 'parquet' for a single flat file, 'parquet_hive' for partitioned directories.",
     )
     description: Optional[str] = Field(
         None,
         description="Human-readable description of the dataset",
     )
-    tables_metadata: Optional[Dict[str, List[str]]] = Field(
+    format_config: Optional[FormatConfig] = Field(
         None,
         description=(
-            "Maps logical table names to lists of file paths. "
-            "Keys must match physical directory names under data_location (parquet_hive), "
-            "or table names inside the lake (ducklake). "
-            "Example: {\"daily\": [], \"weekly\": [], \"monthly\": []}"
+            "Storage-format-specific metadata. "
+            "parquet_hive: tables_metadata + partitioning. "
+            "ducklake: tables_metadata + ducklake_data_path + data_schema + partitioning. "
+            "Adapter parquet paths go in tables_metadata['adapter']."
         ),
-    )
-    ducklake_data_path: Optional[str] = Field(
-        None,
-        description="ducklake only. Path to the DuckLake catalog .duckdb file",
-    )
-    data_schema: Optional[Dict[str, str]] = Field(
-        None,
-        description="Column name → DuckDB type. e.g. {\"ngram\": \"VARCHAR\", \"count\": \"BIGINT\"}",
-    )
-    partitioning: Optional[Dict] = Field(
-        None,
-        description="Partitioning scheme. e.g. {\"keys\": [\"date\", \"country\"], \"granularity\": \"daily\"}",
     )
     entity_mapping: Optional[EntityMappingConfig] = Field(
         None,
-        description="Entity ID resolution config. Required for geo/entity filtering endpoints.",
+        description="Schema declaration for entity ID resolution. Required when entity_dimensions are declared.",
+    )
+    entities: Optional[List[EntityRow]] = Field(
+        None,
+        description=(
+            "Entity mapping rows to upsert into the entity_mappings table. "
+            "Each row maps a dataset-local ID to a canonical entity ID. "
+            "Can also be submitted separately via POST /admin/registry/{domain}/{dataset_id}/entities."
+        ),
     )
     sources: Optional[Dict[str, Dict[str, Union[str, List[str]]]]] = Field(
         None,
@@ -149,6 +202,18 @@ class DatasetCreate(BaseModel):
             "Each entry declares a response format type plus the time, entity, and filter "
             "dimensions available for querying. Data shape validation happens in prepare.py."
         ),
+    )
+    catalog: Optional[str] = Field(
+        "vcsi",
+        description="Producer identity — the organisation or group registering this dataset. Defaults to 'vcsi'.",
+    )
+    ownership: Optional[Dict] = Field(
+        None,
+        description="Ownership and succession metadata: {owner_group, contact, status, storage_risk}.",
+    )
+    lineage: Optional[Dict] = Field(
+        None,
+        description="Lineage metadata: {derived_from, produced_by, consumers}.",
     )
 
     @model_validator(mode="after")
