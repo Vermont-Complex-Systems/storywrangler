@@ -20,6 +20,8 @@
 		return `${method}-${path}`.replace(/[^a-z0-9]+/gi, '-').toLowerCase();
 	}
 
+	const HIDDEN_TAGS = new Set(['admin']);
+
 	const groups = $derived(
 		(() => {
 			const map = new SvelteMap<string, { method: string; path: string; op: Operation }[]>();
@@ -31,6 +33,7 @@
 					if (!op) continue;
 					const tags: string[] = (op.tags as string[]) ?? ['other'];
 					for (const tag of tags) {
+						if (HIDDEN_TAGS.has(tag)) continue;
 						if (!map.has(tag)) map.set(tag, []);
 						map.get(tag)!.push({ method, path, op });
 					}

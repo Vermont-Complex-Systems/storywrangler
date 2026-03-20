@@ -20,7 +20,52 @@ _WikimediaEntry = select(RegistryEntry).where(RegistryEntry.domain == "wikimedia
 
 # ── top-ngrams ─────────────────────────────────────────────────────────────────
 
-@router.get("/top-ngrams")
+@router.get(
+    "/top-ngrams",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "description": "Successful response",
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "data": {
+                                    "type": "array",
+                                    "description": "N-gram frequency entries sorted by count descending.",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "types": {"type": "string", "description": "The n-gram string"},
+                                            "counts": {"type": "integer", "description": "Total occurrence count over the date range"},
+                                        },
+                                    },
+                                },
+                                "metadata": {
+                                    "type": "object",
+                                    "description": "Request metadata echoed back",
+                                    "properties": {
+                                        "granularity": {"type": "string", "description": "Granularity used (daily/weekly/monthly)"},
+                                        "location": {"type": "string", "description": "Entity ID used"},
+                                    },
+                                },
+                            },
+                        },
+                        "example": {
+                            "data": [
+                                {"types": "the", "counts": 12345678},
+                                {"types": "of", "counts": 9876543},
+                                {"types": "a", "counts": 8234567},
+                            ],
+                            "metadata": {"granularity": "daily", "location": "wikidata:Q30"},
+                        },
+                    }
+                },
+            }
+        }
+    },
+)
 async def get_top_ngrams(
     dates: str = Query(default="2024-11-01,2024-11-07"),
     dates2: Optional[str] = Query(default=None),
@@ -88,7 +133,44 @@ async def get_top_ngrams(
 
 # ── revisions ──────────────────────────────────────────────────────────────────
 
-@router.get("/revisions")
+@router.get(
+    "/revisions",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "description": "Successful response",
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "articles": {
+                                    "type": "array",
+                                    "description": "Articles with extracted revision histories",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "identifier": {"type": "string", "description": "Article identifier (slug)"},
+                                            "revision_count": {"type": "integer", "description": "Number of revisions extracted"},
+                                        },
+                                    },
+                                },
+                                "total": {"type": "integer", "description": "Total number of matching articles returned"},
+                            },
+                        },
+                        "example": {
+                            "articles": [
+                                {"identifier": "Cat", "revision_count": 142},
+                                {"identifier": "Dog", "revision_count": 98},
+                            ],
+                            "total": 2,
+                        },
+                    }
+                },
+            }
+        }
+    },
+)
 async def list_revision_articles(
     min_revisions: int = Query(default=1, description="Minimum revision count filter"),
     limit: int = Query(default=100, description="Max articles to return"),
@@ -113,7 +195,52 @@ async def list_revision_articles(
     return {"articles": articles, "total": len(articles)}
 
 
-@router.get("/revisions/{identifier}")
+@router.get(
+    "/revisions/{identifier}",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "description": "Successful response",
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "revisions": {
+                                    "type": "array",
+                                    "description": "Ordered revision history (oldest first). First entry is the full token map; subsequent entries contain only changed tokens.",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "revision_id": {"type": "string", "description": "Wikipedia revision ID"},
+                                            "name": {"type": "string", "description": "Article title"},
+                                            "date_modified": {"type": "string", "description": "ISO 8601 modification date"},
+                                            "revision_comment": {"type": "string", "description": "Edit summary"},
+                                            "categories": {"type": "array", "description": "List of article categories"},
+                                            "token_diff": {"type": "string", "description": "JSON-encoded delta map: token → new count (0 = removed)"},
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                        "example": {
+                            "revisions": [
+                                {
+                                    "revision_id": "1234567890",
+                                    "name": "Cat",
+                                    "date_modified": "2024-01-15",
+                                    "revision_comment": "/* Breeds */ Added Persian section",
+                                    "categories": ["Cats", "Mammals", "Pets"],
+                                    "token_diff": '{"cat": 3, "breed": 5, "persian": 1}',
+                                }
+                            ]
+                        },
+                    }
+                },
+            }
+        }
+    },
+)
 async def get_revision_deltas(
     identifier: str,
     db: AsyncSession = Depends(get_session),

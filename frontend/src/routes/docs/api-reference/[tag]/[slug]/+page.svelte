@@ -162,6 +162,13 @@
 
 	const statusCodes = $derived(Object.keys(responses));
 
+	// ── 200 response schema for left-column display ─────────
+	const successResp = $derived((responses['200'] as Operation) ?? null);
+	const successRespContent = $derived(
+		(successResp?.content as Record<string, Operation> | undefined)?.['application/json'] ?? null
+	);
+	const successRespSchema = $derived(schema(successRespContent?.schema));
+
 	const currentResp = $derived(selectedStatus ? (responses[selectedStatus] ?? null) : null);
 
 	const currentRespContent = $derived(
@@ -194,27 +201,35 @@
 		<div class="min-w-0 overflow-hidden px-8 py-10 lg:px-14">
 			<div class="max-w-2xl mx-auto">
 			
-			<h3 class="text-foreground mt-2 mb-1 text-xl font-semibold">
-				{(endpoint.op.summary as string) ?? endpoint.path}
-			</h3>
-			{#if endpoint.op.description && endpoint.op.description !== endpoint.op.summary}
-			<p class="text-muted-foreground mb-4 text-sm">{endpoint.op.description as string}</p>
-			{/if}
-			
+			<div class="flex items-center gap-2 mt-2 mb-1">
+				<h3 class="text-foreground text-xl font-semibold">
+					{(endpoint.op.summary as string) ?? endpoint.path}
+				</h3>
+				{#if endpoint.op['x-powered-by'] === 'rust'}
+					<span class="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-xs font-medium bg-orange-100 text-orange-800 dark:bg-orange-900/30 dark:text-orange-300">
+						<img src="/logos/rust.png" class="h-3 w-3 dark:invert" alt="" />
+						Rust
+					</span>
+				{/if}
+			</div>
 			<div class="group font-mono text-sm mb-1 flex items-center gap-2">
 				<span
 					class="rounded px-1.5 py-0.5 text-xs font-semibold uppercase {METHOD_BADGE[
 						endpoint.method
 					]}"
-				>
+					>
 					{endpoint.method}
 				</span>
 				<span class="text-foreground">{endpoint.path}</span>
 				<CopyButton
-					text="https://api.storywrangler.uvm.edu{endpoint.path}"
-					class="h-6 w-6 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity [&_svg]:h-3 [&_svg]:w-3"
+				text="https://api.storywrangler.uvm.edu{endpoint.path}"
+				class="h-6 w-6 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity [&_svg]:h-3 [&_svg]:w-3"
 				/>
 			</div>
+			{#if endpoint.op.description && endpoint.op.description !== endpoint.op.summary}
+			<div class="text-muted-foreground mb-4 text-sm [&_p]:my-1.5 [&_ul]:my-1.5 [&_ul]:list-disc [&_ul]:pl-5 [&_li]:my-0.5 [&_code]:rounded [&_code]:bg-muted [&_code]:px-1 [&_code]:py-0.5 [&_code]:text-xs [&_strong]:text-foreground [&_blockquote]:my-3 [&_blockquote]:border-l-2 [&_blockquote]:border-blue-400 [&_blockquote]:bg-blue-50 [&_blockquote]:dark:bg-blue-950/20 [&_blockquote]:rounded-r [&_blockquote]:px-3 [&_blockquote]:py-2 [&_blockquote_p]:my-0 [&_blockquote_p]:leading-relaxed"><Markdown md={endpoint.op.description as string} plugins={mdPlugins} /></div>
+			{/if}
+			
 
 			<!-- Authorizations -->
 			{#if needsAuth(endpoint.op)}
@@ -343,6 +358,71 @@
 								</div>
 							{/if}
 						{/if}
+						</div>
+					{/each}
+				</div>
+			{/if}
+				<!-- Response (200) schema -->
+			{#if successRespSchema?.properties}
+				<h4 class="mt-8 mb-0 text-xs font-semibold uppercase tracking-wider text-muted-foreground">Response</h4>
+				<div class="mt-2 divide-y divide-border border-t border-border">
+					{#each Object.entries(successRespSchema.properties as Record<string, unknown>) as [name, prop] (name)}
+						{@const ps = schema(prop)}
+						{@const isArr = ps?.type === 'array'}
+						{@const typeLabel = ps?.type ?? (ps?.anyOf ? 'any' : ps?.properties ? 'object' : '—')}
+						<div class="py-4">
+							<div class="flex flex-wrap items-baseline gap-x-1.5 gap-y-1">
+								<span class="font-mono text-sm font-semibold text-foreground">{name}</span>
+								<code class="rounded bg-muted px-1 py-0.5 text-xs text-muted-foreground">{typeLabel}</code>
+							</div>
+							{#if ps?.description}
+								<div class="mt-1 text-sm text-muted-foreground [&_p]:m-0 [&_code]:rounded [&_code]:bg-muted [&_code]:px-1 [&_code]:py-0.5 [&_code]:text-xs [&_a]:underline [&_a]:text-foreground"><Markdown md={ps.description as string} plugins={mdPlugins} /></div>
+							{/if}
+							<!-- Nested object or array-item sub-properties -->
+							{#if ps?.properties || (isArr && (ps?.items as Operation)?.properties)}
+								{@const itemsSchema = isArr ? schema(ps?.items as unknown) : null}
+								{@const subProps = (ps?.properties ?? itemsSchema?.properties) as Record<string, unknown> | undefined}
+								{@const subCount = Object.keys(subProps ?? {}).length}
+								{@const expandKey = `__resp_${name}`}
+								{@const isExpanded = expandedFields[expandKey] ?? false}
+								<button
+									onclick={() => (expandedFields[expandKey] = !isExpanded)}
+									class="mt-2 flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
+								>
+									<span class="font-mono">{isExpanded ? '\u00d7' : '+'}</span>
+									<span>{isExpanded ? `Hide ${subCount} properties` : `Show ${subCount} ${isArr ? 'item ' : ''}properties`}</span>
+								</button>
+								{#if isExpanded}
+									<div class="mt-2 border-l-2 border-border pl-4">
+										<table class="w-full text-sm">
+											<thead>
+												<tr class="border-b border-border">
+													<th class="py-2 pr-3 text-left font-medium text-muted-foreground">Name</th>
+													<th class="py-2 pr-3 text-left font-medium text-muted-foreground">Type</th>
+													<th class="py-2 text-left font-medium text-muted-foreground">Description</th>
+												</tr>
+											</thead>
+											<tbody class="divide-y divide-border">
+												{#each Object.entries(subProps ?? {}) as [subName, subProp] (subName)}
+													{@const sps = schema(subProp)}
+													{@const subType = sps?.type ?? (sps?.anyOf ? 'any' : sps?.properties ? 'object' : '\u2014')}
+													<tr class="align-top">
+														<td class="py-2.5 pr-3 font-mono font-semibold text-foreground">{subName}</td>
+														<td class="py-2.5 pr-3">
+															<code class="rounded bg-muted px-1 py-0.5 text-xs text-muted-foreground">{subType}</code>
+														</td>
+														<td class="py-2.5 text-muted-foreground [&_p]:m-0 [&_code]:rounded [&_code]:bg-muted [&_code]:px-1 [&_code]:py-0.5 [&_code]:text-xs [&_a]:underline [&_a]:text-foreground">
+															{#if sps?.description}
+																<Markdown md={sps.description as string} plugins={mdPlugins} />
+															{/if}
+														</td>
+													</tr>
+												{/each}
+											</tbody>
+										</table>
+									</div>
+								{/if}
+							{/if}
 						</div>
 					{/each}
 				</div>

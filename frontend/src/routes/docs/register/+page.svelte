@@ -1,67 +1,3 @@
-<script lang="ts">
-	import * as Code from '$lib/components/ui/code';
-
-	const skeleton = `from storywrangler.registry import register
-
-register({
-    # ── Identity ──────────────────────────────────────────────────────
-    "catalog":    "vcsi",          # producer org; vcsi is the default
-    "domain":     "your-lab",      # top-level namespace (lab or project name)
-    "dataset_id": "your-dataset",  # unique within the domain
-
-    # ── Location ──────────────────────────────────────────────────────
-    "data_location": "/netfiles/yourlab/dataset/",
-    "data_format":   "parquet_hive",  # parquet | parquet_hive | duckdb | ducklake
-
-    # ── Format-specific metadata ───────────────────────────────────────
-    "format_config": {
-        # tables_metadata, ducklake_data_path, partitioning, availability go here
-        # (parquet_hive: tables_metadata + partitioning;
-        #  ducklake:     tables_metadata + ducklake_data_path)
-    },
-
-    # ── Entity mapping (optional) ─────────────────────────────────────
-    # Declares which column holds filter-dimension entities (countries,
-    # researchers, topics). Omit if your dataset has no crosslinkable
-    # dimensions. See "Entity mapping" section below.
-    "entity_mapping": {
-        "local_id_column": "country",
-    },
-    "entities": [
-        {
-            "local_id":    "united_states",   # value in your column
-            "entity_id":   "wikidata:Q30",     # canonical identifier
-            "entity_name": "United States",
-            "entity_ids":  ["iso:US"],          # additional aliases
-        },
-    ],
-
-    # ── Provenance ────────────────────────────────────────────────────
-    "lineage": {
-        "sources": {
-            "main": {"your-source": "https://example.org/data/"},
-        },
-        "derived_from": [],             # ["domain/dataset_id"] if built on Silver data
-        "consumers":    [],             # downstream users, stories, or scripts
-    },
-
-    # ── Ownership ─────────────────────────────────────────────────────
-    "ownership": {
-        "owner_group":  "your-lab",
-        "contact":      "you@uvm.edu",
-        "storage_risk": "institutional",  # managed | institutional | cloud | personal
-    },
-
-    # ── Instrument contract (optional) ────────────────────────────────
-    # Required if you want this dataset queryable by allotaxonometer,
-    # wordshift, or other instruments. Declares what query types it supports.
-    "endpoint_schema": {
-        "type": "types-counts",
-        "time_dimension": "year",
-        "filter_dimensions": ["country"],  # optional categorical filter columns
-    },
-})`;
-</script>
 
 <h1>Registering a dataset</h1>
 
@@ -114,10 +50,6 @@ register({
 		instruments can determine compatibility without hardcoding dataset-specific logic.
 	</li>
 </ul>
-
-<Code.Root code={skeleton} lang="python">
-	<Code.CopyButton />
-</Code.Root>
 
 <h2>Entity mapping</h2>
 

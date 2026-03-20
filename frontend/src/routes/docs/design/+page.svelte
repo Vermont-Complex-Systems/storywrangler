@@ -72,12 +72,3 @@
 	datasets where DuckDB can still query via the PostgreSQL scanner extension). For now all
 	datasets are expected to be external.
 </p>
-
-<h2>Project boundaries</h2>
-
-<p>
-	<strong>complex-stories-dev</strong> is a pure SvelteKit frontend. The registry and instruments
-	live in <strong>storywrangler</strong> (<code>backend/</code>). Complex Stories is a
-	first-party consumer of the storywrangler API — it calls the same endpoints any external group
-	would, with no special privileges.
-</p>

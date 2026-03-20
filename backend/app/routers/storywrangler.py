@@ -20,8 +20,85 @@ from ..models.registry import RegistryEntry
 router = APIRouter()
 
 
-@router.get("/allotax")
-async def allotax_endpoint(
+@router.get(
+    "/allotax",
+    openapi_extra={
+        "x-powered-by": "rust",
+        "responses": {
+            "200": {
+                "description": "Successful response",
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "normalization": {"type": "number", "description": "Normalization constant for the rank-turbulence divergence"},
+                                "diamond_counts": {"type": "array", "description": "2D rank-space histogram used to render the diamond plot"},
+                                "max_delta_loss": {"type": "number", "description": "Maximum delta-loss value (used for color-scale normalization)"},
+                                "alpha": {"type": "number", "description": "Alpha parameter used in the computation"},
+                                "balance": {"type": "number", "description": "Balance measure between the two systems (0.5 = equal, >0.5 = system 2 dominates)"},
+                                "wordshift": {
+                                    "type": "array",
+                                    "description": "Top contributing types, sorted by absolute divergence contribution.",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "type": {"type": "string", "description": "The n-gram / token"},
+                                            "rank1": {"type": "integer", "description": "Rank in system 1 (0 = absent)"},
+                                            "rank2": {"type": "integer", "description": "Rank in system 2 (0 = absent)"},
+                                            "score": {"type": "number", "description": "Signed divergence contribution (positive = system 2 favours this type)"},
+                                        },
+                                    },
+                                },
+                                "meta": {
+                                    "type": "object",
+                                    "description": "Request metadata echoed back",
+                                    "properties": {
+                                        "system1": {"type": "object", "description": "System 1 parameters: entity, dates, filters, type count"},
+                                        "system2": {"type": "object", "description": "System 2 parameters: entity, dates, filters, type count"},
+                                        "domain": {"type": "string", "description": "Dataset domain"},
+                                        "dataset": {"type": "string", "description": "Dataset ID"},
+                                        "granularity": {"type": "string", "description": "Granularity used"},
+                                    },
+                                },
+                            },
+                        },
+                        "example": {
+                            "normalization": 0.9871,
+                            "diamond_counts": [[0, 1, 0], [2, 5, 3], [1, 4, 2]],
+                            "max_delta_loss": 0.0421,
+                            "alpha": 1.0,
+                            "balance": 0.523,
+                            "wordshift": [
+                                {"type": "COVID", "rank1": 850, "rank2": 45, "score": 0.0189},
+                                {"type": "election", "rank1": 1200, "rank2": 78, "score": 0.0142},
+                                {"type": "the", "rank1": 1, "rank2": 2, "score": -0.0021},
+                            ],
+                            "meta": {
+                                "system1": {
+                                    "entity": "wikidata:Q30",
+                                    "dates": "2024-10-01,2024-10-31",
+                                    "filters": {},
+                                    "types": 50000,
+                                },
+                                "system2": {
+                                    "entity": "wikidata:Q145",
+                                    "dates": "2024-11-01,2024-11-30",
+                                    "filters": {},
+                                    "types": 48000,
+                                },
+                                "domain": "wikimedia",
+                                "dataset": "ngrams",
+                                "granularity": "daily",
+                            },
+                        },
+                    }
+                },
+            }
+        }
+    },
+)
+async def allotaxonometer(
     request: Request,
     domain: str = Query("wikimedia", description="Domain owning the dataset"),
     dataset: str = Query("ngrams", description="Dataset ID within the domain"),
@@ -37,28 +114,21 @@ async def allotax_endpoint(
     n: int = Query(1, description="N-gram size (1 = unigrams, 2 = bigrams). Only used when endpoint_schema.ngram_sizes is set."),
     db: AsyncSession = Depends(get_session),
 ):
-    """Allotaxonometer (rank-turbulence divergence) between two types-counts distributions.
+    """Compares two type-frequency systems using the allotaxonometer (rank-turbulence divergence).
 
-    Generic — driven entirely by the dataset's registered endpoint_schema and entity_mapping.
-    Works for any dataset with endpoint_schema.type='types-counts'.
+    Each system is defined by a dataset, an optional entity, a date range, and optional filter values.
+    The two systems may differ on any combination of axes:
 
-    Comparison axes — any two systems differing on at least one dimension:
-      entity vs entity     ?domain=wikimedia&dataset=ngrams&entity=wikidata:Q30&entity2=wikidata:Q16
-      time vs time         ?entity=wikidata:Q30&dates=2020&dates2=2010
-      entity x time        ?entity=wikidata:Q30&dates=2024-01&entity2=wikidata:Q16&dates2=2023-01
-      filter-only          ?geo=US&geo2=CA  (no entity param needed when dataset has no entity_mapping)
+    - **entity vs entity** — e.g. US Wikipedia vs UK Wikipedia
+    - **dates vs dates** — e.g. October vs November
+    - **entity × dates** — different entity *and* different period
+    - **filter-only** — e.g. `sex=M` vs `sex2=F` (skipping entity registry)
 
-    For parquet_hive datasets (e.g. ngrams), granularity is required:
-      &granularity=daily
-
-    Filter dimensions (e.g. sex in babynames, geo for datasets without entity_mapping) are declared
-    in endpoint_schema.filter_dimensions and passed as extra query params: ?sex=M&sex2=F
-
-    Entity registration is optional. Datasets that register geo (or any comparison axis) as a
-    filter_dimension can skip entity_mapping entirely — pass the raw column value directly.
-
-    Alpha slider pattern — precompute a discrete set of alphas in one call:
-      &alphas=0.33,0.5,1.0,2.0,3.0
+    > **Filter dimensions** — look up a dataset's available filter dimensions via
+    > `GET /registry/{domain}/{dataset_id}` (`endpoint_schema.filter_dimensions`).
+    > Pass them as extra query params using the `dim` / `dim2` suffix convention:
+    > `?sex=M&sex2=F` compares boy vs girl babynames, `?geo=US&geo2=CA` compares countries.
+    > Entity registration is optional when a filter dimension serves as the comparison axis.
     """
     result = await db.execute(
         select(RegistryEntry).where(

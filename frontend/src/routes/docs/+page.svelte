@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { Snippet } from '$lib/components/ui/snippet';
+	import SimpleDiagram from '$lib/components/SimpleDiagram.svelte';
 </script>
 
 <h1>Introduction</h1>
@@ -7,6 +8,13 @@
 <p>
 	Storywrangler is a research data registry for computational social science, built for a federated
 	ecosystem of academic groups. It is meant to reduce friction between all kinds of datasets and complex systems instruments developped at the <a href="https://vermontcomplexsystems.org/">Vermont Complex Systems Institute</a>. 
+</p>
+
+
+<SimpleDiagram />
+
+<p>
+	In this example, the submitter declare in the JSON body that the dataset conforms to the <code>types-counts</code> endpoint schema (see available <a href="/docs/reference#endpoint-schema">endpoint-schema</a>), with filterable columns <code>sex</code> and <code>country</code>. Upon registering, the platform will lookup the submitted dataset to the provided <code>data_location</code>, enforcing the contract. If accepted, the allotaxonometer instrument will just know how to work with it. The instrument is callable from <code>/storywrangler/allotax</code> endpoint and work out of the box.
 </p>
 
 <p>

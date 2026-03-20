@@ -18,7 +18,52 @@ router = APIRouter()
 _BabynamesEntry = select(RegistryEntry).where(RegistryEntry.domain == "babynames")
 
 
-@router.get("/ngrams")
+@router.get(
+    "/ngrams",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "description": "Successful response",
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "data": {
+                                    "type": "array",
+                                    "description": "Baby name frequency entries sorted by count descending.",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "types": {"type": "string", "description": "The baby name"},
+                                            "counts": {"type": "integer", "description": "Number of babies given this name in the date range"},
+                                        },
+                                    },
+                                },
+                                "metadata": {
+                                    "type": "object",
+                                    "description": "Request metadata echoed back",
+                                    "properties": {
+                                        "location": {"type": "string", "description": "Entity ID used"},
+                                        "sex": {"type": "string", "description": "Sex filter applied (M, F, or null)"},
+                                    },
+                                },
+                            },
+                        },
+                        "example": {
+                            "data": [
+                                {"types": "James", "counts": 85234},
+                                {"types": "John", "counts": 79102},
+                                {"types": "Robert", "counts": 75680},
+                            ],
+                            "metadata": {"location": "wikidata:Q30", "sex": "M"},
+                        },
+                    }
+                },
+            }
+        }
+    },
+)
 async def get_babynames_top_ngrams(
     dates: str = Query(default="1991,1993", description="Year range for system 1. Single value '1991' or range '1991,1993'"),
     dates2: Optional[str] = Query(default=None, description="Optional second year range for temporal comparison"),
