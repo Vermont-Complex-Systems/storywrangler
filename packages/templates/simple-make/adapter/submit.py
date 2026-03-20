@@ -18,7 +18,7 @@ import yaml
 from pathlib import Path
 
 from pyprojroot import here
-from storywrangler.registry import register
+from storywrangler import Storywrangler
 from dotenv import load_dotenv
 
 load_dotenv(override=True)
@@ -63,38 +63,36 @@ def main():
         "data_format": "ducklake",          # ducklake | parquet_hive | duckdb
         "description": "...",
         "format_config": {
-            # "data_schema": ...,
             # "availability": availability,
             # ducklake only:
             # "ducklake_data_path": ...,
             # "tables_metadata": ...,
         },
         "entity_mapping": {
-            "entity_type": "wikidata",
             "local_id_column": "geo",       # column in your data holding the local entity ID
         },
         "entities": entities,
-        "sources": {
-            # "main": {"source_name": "https://..."}
-        },
-        "endpoint_schemas": [{
+        "endpoint_schema": {
             "type": "types-counts",         # endpoint type this dataset supports
-            "time_dimension": "year",       # time column name
-            "entity_dimensions": ["geo"],   # entity column name(s)
+            "time_dimension": "year",       # time column name (non-hive)
+            # "granularities": {"daily": "date"},  # hive-partitioned only
             # "filter_dimensions": ["sex"], # optional filter columns
-        }],
+        },
         "ownership": {
             "owner_group": "vcsi",
             "contact": "your@email.edu",
             "storage_risk": "institutional",
         },
         "lineage": {
+            "sources": {
+                # "geo": {"US": "https://..."}
+            },
             "derived_from": [],
-            "produced_by": "adapter/submit.py",
         },
     }
 
-    success = register(dataset_metadata)
+    client = Storywrangler()  # reads API_KEY (and optionally API_URL) from .env
+    success = client.registry.register(dataset_metadata)
     if success:
         print(f"\n{dataset_id} registered successfully")
     else:

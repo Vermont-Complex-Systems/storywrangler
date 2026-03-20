@@ -54,16 +54,13 @@ API_KEY=your-api-key
 """
 
 MAKEFILE = """\
-.PHONY: extract transform prepare submit test
+.PHONY: extract transform submit test
 
 extract:
 \tuv run python extract/src/scrape.py
 
 transform:
 \tuv run python transform/src/process.py
-
-prepare:
-\tuv run python adapter/prepare.py
 
 submit:
 \tuv run python adapter/submit.py
@@ -78,7 +75,7 @@ configfile: "config/config.yaml"
 DATA_PATH = config["data_path"]
 
 
-localrules: all, prepare, submit, test
+localrules: all, submit, test
 
 
 rule all:
@@ -110,11 +107,6 @@ rule transform:
         uv run python transform/src/process.py 2>&1 | tee {log}
         touch {output.sentinel}
         \"\"\"
-
-
-rule prepare:
-    shell:
-        "uv run python adapter/prepare.py"
 
 
 rule submit:
@@ -205,273 +197,6 @@ def test_no_null_entities(db):
 
 # ── Format-specific files ─────────────────────────────────────
 
-PREPARE = {
-
-"ducklake": """\
-\"\"\"
-Adapter — Prepare (ducklake)
-
-Validates entity IDs and schema conformance before submission.
-Entity coverage is tested in tests/.
-\"\"\"
-
-import os
-import yaml
-from pathlib import Path
-
-from storywrangler.validation import EntityValidator, EndpointValidator
-from pyprojroot import here
-from dotenv import load_dotenv
-import duckdb
-
-load_dotenv(override=True)
-
-
-class MyDatasetValidator:
-
-    def __init__(self):
-        self.project_root = here()
-        self.dataset_id = os.getenv("DATASET_ID")
-        self.entity_validator = EntityValidator()
-        self.endpoint_validator = EndpointValidator()
-        self.entities_path = self.project_root / "config" / "entities.yaml"
-        self.ducklake_path = self.project_root / "metadata.ducklake"  # TODO: adjust
-
-    def get_entities(self) -> list[dict]:
-        with open(self.entities_path) as f:
-            mappings = yaml.safe_load(f)
-        return [{{"local_id": k, **v}} for k, v in mappings.items()]
-
-    def validate_entities(self) -> list[dict]:
-        entities = self.get_entities()
-        for e in entities:
-            if not self.entity_validator.validate(e["entity_id"]):
-                raise ValueError(f"Invalid entity_id for '{{e['local_id']}}': {{e['entity_id']}}")
-        print(f"Entity validation passed ({{len(entities)}} entities)")
-        return entities
-
-    def connect(self) -> duckdb.DuckDBPyConnection:
-        if not self.ducklake_path.exists():
-            raise FileNotFoundError(f"Ducklake not found: {{self.ducklake_path}}")
-        conn = duckdb.connect()
-        conn.execute(f"ATTACH 'ducklake:{{self.ducklake_path}}' AS my_lake;")
-        conn.execute("USE my_lake;")
-        return conn
-
-    def validate_schema(self, conn: duckdb.DuckDBPyConnection):
-        schema_result = conn.execute("DESCRIBE my_table").fetchall()  # TODO: table name
-        columns = {{row[0]: {{"type": row[1]}} for row in schema_result}}
-        validation = self.endpoint_validator.validate_types_counts_schema({{"columns": columns}})
-        if not validation["valid"]:
-            for error in validation["errors"]:
-                print(f"  - {{error}}")
-            raise ValueError("Schema does not conform to endpoint requirements")
-        print("Schema validation passed")
-
-    def validate(self):
-        \"\"\"Validate entity IDs and schema conformance.\"\"\"
-        print(f"Validating {{self.dataset_id}}\\n")
-        self.validate_entities()
-        conn = self.connect()
-        try:
-            self.validate_schema(conn)
-            print("\\nValidation complete")
-        finally:
-            conn.close()
-
-
-def main():
-    validator = MyDatasetValidator()
-    print(f"  Dataset ID: {{validator.dataset_id}}")
-    print(f"  Ducklake:   {{validator.ducklake_path}}")
-    print(f"  Entities:   {{validator.entities_path}}\\n")
-    if not validator.ducklake_path.exists():
-        print(f"Ducklake not found: {{validator.ducklake_path}}")
-        print("Run the transform pipeline first.")
-        return
-    validator.validate()
-
-
-if __name__ == "__main__":
-    main()
-""",
-
-"parquet_hive": """\
-\"\"\"
-Adapter — Prepare (parquet_hive)
-
-Validates entity IDs and schema conformance before submission.
-Entity coverage is tested in tests/.
-\"\"\"
-
-import os
-import yaml
-from pathlib import Path
-
-from storywrangler.validation import EntityValidator, EndpointValidator
-from pyprojroot import here
-from dotenv import load_dotenv
-import duckdb
-
-load_dotenv(override=True)
-
-# Map dataset column names → Storywrangler spec column names if they differ
-COLUMN_MAPPING = {{
-    # "my_col": "types",
-    # "my_count": "counts",
-}}
-
-
-class MyDatasetValidator:
-
-    def __init__(self):
-        self.project_root = here()
-        self.dataset_id = os.getenv("DATASET_ID")
-        self.data_path = Path(os.getenv("DATA_PATH"))
-        self.entity_validator = EntityValidator()
-        self.endpoint_validator = EndpointValidator()
-        self.entities_path = self.project_root / "config" / "entities.yaml"
-
-    def get_entities(self) -> list[dict]:
-        with open(self.entities_path) as f:
-            mappings = yaml.safe_load(f)
-        return [{{"local_id": k, **v}} for k, v in mappings.items()]
-
-    def validate_entities(self) -> list[dict]:
-        entities = self.get_entities()
-        for e in entities:
-            if not self.entity_validator.validate(e["entity_id"]):
-                raise ValueError(f"Invalid entity_id for '{{e['local_id']}}': {{e['entity_id']}}")
-        print(f"Entity validation passed ({{len(entities)}} entities)")
-        return entities
-
-    def validate_schema(self, conn: duckdb.DuckDBPyConnection):
-        parquet_glob = self.data_path / "**" / "*.parquet"  # TODO: adjust glob
-        schema_result = conn.execute(f\"\"\"
-            DESCRIBE SELECT * FROM read_parquet('{{parquet_glob}}', hive_partitioning=true)
-        \"\"\").fetchall()
-        columns = {{row[0]: {{"type": row[1]}} for row in schema_result}}
-        remapped = {{COLUMN_MAPPING.get(col, col): info for col, info in columns.items()}}
-        validation = self.endpoint_validator.validate_types_counts_schema({{"columns": remapped}})
-        if not validation["valid"]:
-            for error in validation["errors"]:
-                print(f"  - {{error}}")
-            raise ValueError("Schema does not conform to endpoint requirements")
-        print("Schema validation passed")
-
-    def validate(self):
-        \"\"\"Validate entity IDs and schema conformance.\"\"\"
-        print(f"Validating {{self.dataset_id}}\\n")
-        self.validate_entities()
-        conn = duckdb.connect()
-        try:
-            self.validate_schema(conn)
-            print("\\nValidation complete")
-        finally:
-            conn.close()
-
-
-def main():
-    validator = MyDatasetValidator()
-    print(f"  Dataset ID: {{validator.dataset_id}}")
-    print(f"  Data path:  {{validator.data_path}}")
-    print(f"  Entities:   {{validator.entities_path}}\\n")
-    parquet_dir = validator.data_path
-    if not parquet_dir.exists():
-        print(f"Data not found: {{parquet_dir}}")
-        print("Run the transform pipeline first.")
-        return
-    validator.validate()
-
-
-if __name__ == "__main__":
-    main()
-""",
-
-"duckdb": """\
-\"\"\"
-Adapter — Prepare (duckdb)
-
-Validates entity IDs and schema conformance before submission.
-Entity coverage is tested in tests/.
-\"\"\"
-
-import os
-import yaml
-from pathlib import Path
-
-from storywrangler.validation import EntityValidator, EndpointValidator
-from pyprojroot import here
-from dotenv import load_dotenv
-import duckdb
-
-load_dotenv(override=True)
-
-
-class MyDatasetValidator:
-
-    def __init__(self):
-        self.project_root = here()
-        self.dataset_id = os.getenv("DATASET_ID")
-        self.db_path = Path(os.getenv("DATA_PATH"))  # path to .duckdb file
-        self.entity_validator = EntityValidator()
-        self.endpoint_validator = EndpointValidator()
-        self.entities_path = self.project_root / "config" / "entities.yaml"
-
-    def get_entities(self) -> list[dict]:
-        with open(self.entities_path) as f:
-            mappings = yaml.safe_load(f)
-        return [{{"local_id": k, **v}} for k, v in mappings.items()]
-
-    def validate_entities(self) -> list[dict]:
-        entities = self.get_entities()
-        for e in entities:
-            if not self.entity_validator.validate(e["entity_id"]):
-                raise ValueError(f"Invalid entity_id for '{{e['local_id']}}': {{e['entity_id']}}")
-        print(f"Entity validation passed ({{len(entities)}} entities)")
-        return entities
-
-    def validate_schema(self, conn: duckdb.DuckDBPyConnection):
-        schema_result = conn.execute("DESCRIBE my_table").fetchall()  # TODO: table name
-        columns = {{row[0]: {{"type": row[1]}} for row in schema_result}}
-        validation = self.endpoint_validator.validate_types_counts_schema({{"columns": columns}})
-        if not validation["valid"]:
-            for error in validation["errors"]:
-                print(f"  - {{error}}")
-            raise ValueError("Schema does not conform to endpoint requirements")
-        print("Schema validation passed")
-
-    def validate(self):
-        \"\"\"Validate entity IDs and schema conformance.\"\"\"
-        print(f"Validating {{self.dataset_id}}\\n")
-        self.validate_entities()
-        conn = duckdb.connect(str(self.db_path))
-        try:
-            self.validate_schema(conn)
-            print("\\nValidation complete")
-        finally:
-            conn.close()
-
-
-def main():
-    validator = MyDatasetValidator()
-    print(f"  Dataset ID: {{validator.dataset_id}}")
-    print(f"  DB path:    {{validator.db_path}}")
-    print(f"  Entities:   {{validator.entities_path}}\\n")
-    if not validator.db_path.exists():
-        print(f"Database not found: {{validator.db_path}}")
-        print("Run the transform pipeline first.")
-        return
-    validator.validate()
-
-
-if __name__ == "__main__":
-    main()
-""",
-
-}
-
-
 SUBMIT = {
 
 "ducklake": """\
@@ -482,7 +207,7 @@ import yaml
 from pathlib import Path
 
 from pyprojroot import here
-from storywrangler.registry import register
+from storywrangler import Storywrangler
 from dotenv import load_dotenv
 import duckdb
 
@@ -513,20 +238,27 @@ def get_availability(conn, entities: list[dict]) -> dict:
 
 
 def get_ducklake_metadata(conn):
-    \"\"\"Extract file paths and data_path from ducklake metadata tables.\"\"\"
-    data_path = conn.execute(\"\"\"
+    \"\"\"Extract absolute file paths from ducklake metadata tables.
+
+    df.path is relative to data_path, stored under schema_name/table_name/.
+    We resolve everything to absolute paths so the API can find files
+    regardless of which directory uvicorn runs from.
+    \"\"\"
+    raw = conn.execute(\"\"\"
         SELECT value FROM __ducklake_metadata_my_lake.ducklake_metadata WHERE key = 'data_path'
     \"\"\").fetchone()[0]
-    tables = [x[0] for x in conn.execute("SHOW tables").fetchall()]
+    data_path = str(Path(raw).resolve())
+    rows = conn.execute(\"\"\"
+        SELECT s.schema_name, t.table_name, df.path
+        FROM __ducklake_metadata_my_lake.ducklake_data_file df
+        JOIN __ducklake_metadata_my_lake.ducklake_table t ON df.table_id = t.table_id
+        JOIN __ducklake_metadata_my_lake.ducklake_schema s ON t.schema_id = s.schema_id
+        WHERE df.end_snapshot IS NULL
+    \"\"\").fetchall()
     tables_metadata = {{}}
-    for table in tables:
-        rows = conn.execute(f\"\"\"
-            SELECT df.path FROM __ducklake_metadata_my_lake.ducklake_data_file df
-            JOIN __ducklake_metadata_my_lake.ducklake_table t ON df.table_id = t.table_id
-            WHERE t.table_name = '{{table}}' AND df.end_snapshot IS NULL
-        \"\"\").fetchall()
-        if rows:
-            tables_metadata[table] = [r[0] for r in rows]
+    for schema_name, table_name, rel_path in rows:
+        abs_path = str(Path(data_path) / schema_name / table_name / rel_path.lstrip("/"))
+        tables_metadata.setdefault(table_name, []).append(abs_path)
     return tables_metadata, data_path
 
 
@@ -541,7 +273,6 @@ def main():
 
     entities = get_entities()
     tables_metadata, ducklake_data_path = get_ducklake_metadata(conn)
-    schema = {{row[0]: row[1] for row in conn.execute("DESCRIBE my_table").fetchall()}}
     availability = get_availability(conn, entities)
     conn.close()
 
@@ -555,22 +286,21 @@ def main():
         "format_config": {{
             "ducklake_data_path": ducklake_data_path,
             "tables_metadata": tables_metadata,
-            "data_schema": schema,
             "availability": availability,
         }},
-        "entity_mapping": {{"entity_type": "wikidata", "local_id_column": "geo"}},  # TODO
+        "entity_mapping": {{"local_id_column": "geo"}},  # TODO: adjust column name
         "entities": entities,
-        "sources": {{}},
-        "endpoint_schemas": [{{
+        "endpoint_schema": {{
             "type": "types-counts",
             "time_dimension": "year",       # TODO
-            "entity_dimensions": ["geo"],   # TODO
-        }}],
+            # "filter_dimensions": ["sex"], # optional
+        }},
         "ownership": {{"owner_group": "vcsi", "contact": "your@email.edu", "storage_risk": "institutional"}},
-        "lineage": {{"derived_from": [], "produced_by": "adapter/submit.py"}},
+        "lineage": {{"sources": {{}}, "derived_from": []}},
     }}
 
-    success = register(dataset_metadata)
+    client = Storywrangler()  # reads API_KEY (and optionally API_URL) from .env
+    success = client.registry.register(dataset_metadata)
     print(f"\\n{{dataset_id}} registered" if success else "\\nRegistration failed")
 
 
@@ -586,7 +316,7 @@ import yaml
 from pathlib import Path
 
 from pyprojroot import here
-from storywrangler.registry import register
+from storywrangler import Storywrangler
 from dotenv import load_dotenv
 import duckdb
 
@@ -615,20 +345,6 @@ def get_availability(data_path: Path) -> dict:
         conn.close()
 
 
-def get_schema(data_path: Path) -> dict:
-    conn = duckdb.connect()
-    pq = data_path / "**" / "*.parquet"
-    rows = conn.execute(f\"\"\"
-        DESCRIBE SELECT * FROM read_parquet('{{pq}}', hive_partitioning=true)
-    \"\"\").fetchall()
-    conn.close()
-    return {{row[0]: row[1] for row in rows}}
-
-
-def get_table_files(data_path: Path) -> list[str]:
-    return sorted(str(f) for f in data_path.rglob("*.parquet"))
-
-
 def main():
     dataset_id = os.getenv("DATASET_ID")
     domain = os.getenv("DOMAIN")
@@ -644,23 +360,21 @@ def main():
         "data_format": "parquet_hive",
         "description": "TODO",
         "format_config": {{
-            "data_schema": get_schema(data_path),
-            "tables_metadata": {{"data": get_table_files(data_path)}},
             "availability": get_availability(data_path),
         }},
-        "entity_mapping": {{"entity_type": "wikidata", "local_id_column": "geo"}},  # TODO
+        "entity_mapping": {{"local_id_column": "geo"}},  # TODO: adjust column name
         "entities": entities,
-        "sources": {{}},
-        "endpoint_schemas": [{{
+        "endpoint_schema": {{
             "type": "types-counts",
-            "time_dimension": "date",       # TODO
-            "entity_dimensions": ["geo"],   # TODO
-        }}],
+            "granularities": {{"daily": "date"}},  # TODO: adjust
+            # "ngram_sizes": [1, 2],                # uncomment if data has {n}grams/ subdirs
+        }},
         "ownership": {{"owner_group": "vcsi", "contact": "your@email.edu", "storage_risk": "institutional"}},
-        "lineage": {{"derived_from": [], "produced_by": "adapter/submit.py"}},
+        "lineage": {{"sources": {{}}, "derived_from": []}},
     }}
 
-    success = register(dataset_metadata)
+    client = Storywrangler()  # reads API_KEY (and optionally API_URL) from .env
+    success = client.registry.register(dataset_metadata)
     print(f"\\n{{dataset_id}} registered" if success else "\\nRegistration failed")
 
 
@@ -676,7 +390,7 @@ import yaml
 from pathlib import Path
 
 from pyprojroot import here
-from storywrangler.registry import register
+from storywrangler import Storywrangler
 from dotenv import load_dotenv
 import duckdb
 
@@ -704,7 +418,6 @@ def main():
     db_path = Path(os.getenv("DATA_PATH"))
 
     conn = duckdb.connect(str(db_path))
-    schema = {{row[0]: row[1] for row in conn.execute("DESCRIBE my_table").fetchall()}}
     entities = get_entities()
     availability = get_availability(conn)
     conn.close()
@@ -717,22 +430,21 @@ def main():
         "data_format": "duckdb",
         "description": "TODO",
         "format_config": {{
-            "data_schema": schema,
             "availability": availability,
         }},
-        "entity_mapping": {{"entity_type": "wikidata", "local_id_column": "geo"}},  # TODO
+        "entity_mapping": {{"local_id_column": "geo"}},  # TODO: adjust column name
         "entities": entities,
-        "sources": {{}},
-        "endpoint_schemas": [{{
+        "endpoint_schema": {{
             "type": "types-counts",
             "time_dimension": "year",       # TODO
-            "entity_dimensions": ["geo"],   # TODO
-        }}],
+            # "filter_dimensions": ["sex"], # optional
+        }},
         "ownership": {{"owner_group": "vcsi", "contact": "your@email.edu", "storage_risk": "institutional"}},
-        "lineage": {{"derived_from": [], "produced_by": "adapter/submit.py"}},
+        "lineage": {{"sources": {{}}, "derived_from": []}},
     }}
 
-    success = register(dataset_metadata)
+    client = Storywrangler()  # reads API_KEY (and optionally API_URL) from .env
+    success = client.registry.register(dataset_metadata)
     print(f"\\n{{dataset_id}} registered" if success else "\\nRegistration failed")
 
 
@@ -867,7 +579,6 @@ def scaffold(name: str, fmt: str, orch: str):
         "config/entities.yaml":     ENTITIES_YAML,
         "extract/src/scrape.py":    SCRAPE_PY,
         "transform/src/process.py": PROCESS_PY,
-        "adapter/prepare.py":       PREPARE[fmt],
         "adapter/submit.py":        SUBMIT[fmt],
         "tests/conftest.py":        CONFTEST[fmt],
         "tests/test_coverage.py":   TEST_COVERAGE,
@@ -875,11 +586,11 @@ def scaffold(name: str, fmt: str, orch: str):
 
     if orch == "make":
         files["Makefile"] = MAKEFILE
-        run_cmd = "make prepare && make submit"
+        run_cmd = "make submit"
     else:
         files["Snakefile"] = SNAKEFILE
         files["config/config.yaml"] = SNAKEMAKE_CONFIG.format(name=name)
-        run_cmd = "snakemake prepare && snakemake submit"
+        run_cmd = "snakemake submit"
 
     for path, content in files.items():
         (root / path).write_text(content)

@@ -5,8 +5,9 @@ requires-python = ">=3.11"
 
 [tool.uv.workspace]
 members = [
+    "backend",
+    "packages/schemas",
     "packages/sdk",
-    "packages/api"
 ]
 
 [tool.uv]
