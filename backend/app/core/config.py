@@ -1,3 +1,5 @@
+from typing import List
+
 from pydantic import computed_field
 from pydantic_settings import BaseSettings
 
@@ -9,6 +11,13 @@ class Settings(BaseSettings):
     postgres_db: str = "storywrangler"
     postgres_user: str = "postgres"
     postgres_password: str = "changethis"
+
+    # CORS — override via ALLOWED_ORIGINS env var (comma-separated) in production
+    allowed_origins: List[str] = [
+        "http://localhost:5173",
+        "http://localhost:4173",
+        "https://storywrangler.uvm.edu",
+    ]
 
     # Admin user seeded on startup
     admin_username: str = "admin"
