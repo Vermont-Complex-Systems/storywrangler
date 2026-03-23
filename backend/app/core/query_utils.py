@@ -46,16 +46,23 @@ async def resolve_entity(
 def resolve_flat_path(dataset_obj) -> str:
     """Return a DuckDB read_parquet() expression for non-hive datasets.
 
-    - parquet:         reads data_location directly (single flat file)
-    - ducklake/duckdb: reads the parquet files listed in the first non-adapter
-                       entry of format_config.tables_metadata
+    - parquet:   reads data_location directly (single flat file or glob)
+    - ducklake:  reads parquet files via convention:
+                 {data_location}/data/main/{domain}/*.parquet
+                 Override the base path with format_config.ducklake_data_path.
+    - duckdb:    reads files listed in format_config.tables_metadata
 
     Raises 400 for parquet_hive — those use path-based loading in load_system.
     """
     fmt = dataset_obj.data_format
     if fmt == "parquet":
         return f"'{dataset_obj.data_location}'"
-    if fmt in ("ducklake", "duckdb"):
+    if fmt == "ducklake":
+        fc = dataset_obj.format_config or {}
+        data_path = fc.get("ducklake_data_path") or f"{dataset_obj.data_location}/data"
+        glob = f"{data_path}/main/{dataset_obj.domain}/*.parquet"
+        return f"'{glob}'"
+    if fmt == "duckdb":
         fc = dataset_obj.format_config or {}
         tm = fc.get("tables_metadata", {})
         for key, files in tm.items():
@@ -66,10 +73,7 @@ def resolve_flat_path(dataset_obj) -> str:
                 return f"[{files_expr}]"
     raise HTTPException(
         status_code=400,
-        detail=(
-            f"Cannot resolve path for data_format '{fmt}'. "
-            "Ensure format_config.tables_metadata has a non-adapter key with file paths."
-        ),
+        detail=f"Cannot resolve path for data_format '{fmt}'.",
     )
 
 
@@ -141,6 +145,7 @@ def load_system(
     else:
         time_col = ep.get("time_dimension")
         path_expr = resolve_flat_path(dataset_obj)
+        from_clause = f"read_parquet({path_expr})"
 
         conditions, params = [], []
         if entity_col and local_id is not None:
@@ -157,7 +162,7 @@ def load_system(
         rows = conn.execute(
             f"""
             SELECT {type_col}, SUM({count_col}) AS counts
-            FROM read_parquet({path_expr})
+            FROM {from_clause}
             {where}
             GROUP BY {type_col}
             ORDER BY counts DESC

@@ -70,11 +70,20 @@ class FormatConfig(BaseModel):
             "See [format reference](/docs/specification#storage-formats)."
         ),
     )
+    ducklake_catalog_schema: Optional[str] = Field(
+        None,
+        description=(
+            "Same-instance DuckLake. PostgreSQL schema name for the submitter's "
+            "DuckLake catalog tables, e.g. `'babynames_lake'`. "
+            "Platform attaches READ_ONLY. For frozen file-based catalogs use "
+            "`ducklake_data_path` instead."
+        ),
+    )
     ducklake_data_path: Optional[str] = Field(
         None,
         description=(
-            "`ducklake` format only. Absolute path to the DuckLake catalog `.duckdb` file. "
-            "Example: `/data/wikimedia/catalog.duckdb`. "
+            "Frozen/external DuckLake. Absolute path to a portable DuckLake catalog `.duckdb` file. "
+            "Example: `/data/storylake/babynames_v1.duckdb`. "
             "See [format reference](/docs/specification#storage-formats)."
         ),
     )

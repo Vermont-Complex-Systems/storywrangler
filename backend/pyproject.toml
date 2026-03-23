@@ -12,6 +12,7 @@ dependencies = [
     "pydantic-settings>=2.0.0",
     "duckdb>=1.2.0",
     "passlib[bcrypt]>=1.7.4",
+    "bcrypt>=3.0,<4.0",
 ]
 
 [tool.uv.sources]

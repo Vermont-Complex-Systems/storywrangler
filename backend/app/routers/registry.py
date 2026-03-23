@@ -206,15 +206,7 @@ async def register_dataset(
         entities_count = await _upsert_entities(db, dataset.domain, dataset.dataset_id, dataset.entities)
         await db.commit()
 
-    # Derive entity_type from entity_id prefixes if not explicitly provided.
     entry = existing if existing else db_entry
-    if dataset.entity_mapping and not dataset.entity_mapping.entity_type and dataset.entities:
-        prefix = dataset.entities[0].entity_id.split(":")[0]
-        em = dict(entry.entity_mapping or {})
-        em["entity_type"] = prefix
-        entry.entity_mapping = em
-        await db.commit()
-        msg.setdefault("derived", []).append("entity_type")
 
     # Persist introspection results derived before the DB write.
     if derived:
