@@ -69,7 +69,7 @@ _WikimediaEntry = select(RegistryEntry).where(RegistryEntry.domain == "wikimedia
 async def get_top_ngrams(
     dates: str = Query(default="2024-11-01,2024-11-07"),
     dates2: Optional[str] = Query(default=None),
-    locations: str = Query(default="wikidata:Q30"),
+    locations: str = Query(default="wikidata:Q30", description="Entity ID (e.g. 'wikidata:Q30') or local ID (e.g. 'en')"),
     granularity: str = Query(default="daily"),
     n: int = Query(default=1, description="N-gram size (1 = unigrams, 2 = bigrams). Only used when endpoint_schema.ngram_sizes is set."),
     limit: int = Query(default=100),

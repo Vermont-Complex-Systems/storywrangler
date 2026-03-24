@@ -60,20 +60,34 @@ class EntityValidator:
             return self._validate_isbn10_checksum(entity_id)
         return False
     
+    def validate_openalex(self, entity_id: str) -> bool:
+        """
+        Validates OpenAlex identifier format (Spec: Section 3.1.3)
+
+        Covers all OpenAlex entity types:
+          A — author, W — work, I — institution, C — concept,
+          S — source, F — funder, P — publisher
+
+        Format: openalex:[AWICSFP][0-9]+
+        Example: openalex:A5002034958
+        """
+        return bool(self.standards.OPENALEX.match(entity_id))
+
     def validate_local(self, entity_id: str) -> bool:
         """Validates local identifier format (Spec: Section 3.5.1)"""
         return bool(self.standards.LOCAL.match(entity_id))
-    
+
     def validate(self, entity_id: str) -> bool:
         """Validates any supported entity identifier"""
         validators = [
             self.validate_wikidata,
             self.validate_orcid,
+            self.validate_openalex,
             self.validate_ror,
             self.validate_ipeds,
             self.validate_doi,
             self.validate_isbn,
-            self.validate_local
+            self.validate_local,
         ]
         return any(validator(entity_id) for validator in validators)
     

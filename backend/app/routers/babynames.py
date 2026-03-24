@@ -67,7 +67,7 @@ _BabynamesEntry = select(RegistryEntry).where(RegistryEntry.domain == "babynames
 async def get_babynames_top_ngrams(
     dates: str = Query(default="1991,1993", description="Year range for system 1. Single value '1991' or range '1991,1993'"),
     dates2: Optional[str] = Query(default=None, description="Optional second year range for temporal comparison"),
-    locations: str = Query(default="wikidata:Q30", description="Global entity ID, e.g. 'wikidata:Q30' (United States)"),
+    locations: str = Query(default="wikidata:Q30", description="Entity ID (e.g. 'wikidata:Q30') or local ID (e.g. 'united_states')"),
     sex: Optional[str] = Query(default="M", description="Sex filter: M | F | None to omit"),
     limit: int = Query(default=100),
     db: AsyncSession = Depends(get_session),

@@ -17,6 +17,8 @@ class Standards:
     Entity identifier formats (§3.1):
       wikidata:Q30            — Wikidata Q-code
       orcid:0000-0000-0000-0000 — ORCID (format check; checksum in EntityValidator)
+      openalex:A123456789     — OpenAlex author (A), work (W), institution (I),
+                                concept (C), source (S), funder (F), publisher (P)
       ror:abc123xyz           — ROR
       ipeds:123456            — IPEDS unit ID
       doi:10.1234/...         — DOI
@@ -30,16 +32,38 @@ class Standards:
     """
 
     # §3.1 — Entity identifier patterns
-    WIKIDATA = re.compile(r"^wikidata:Q[0-9]+$")
-    ORCID    = re.compile(r"^orcid:[0-9]{4}-[0-9]{4}-[0-9]{4}-[0-9]{3}[0-9X]$")
-    ROR      = re.compile(r"^ror:[a-z0-9]{9}$")
-    IPEDS    = re.compile(r"^ipeds:[0-9]{6}$")
-    DOI      = re.compile(r"^doi:10\.[0-9]{4,}/[^\s]+$")
-    ISBN_13  = re.compile(r"^isbn:[0-9]{13}$")
-    ISBN_10  = re.compile(r"^isbn:[0-9]{9}[0-9X]$")
-    LOCAL    = re.compile(r"^local:[a-z0-9_-]+:[a-z0-9_-]+$")
+    WIKIDATA   = re.compile(r"^wikidata:Q[0-9]+$")
+    ORCID      = re.compile(r"^orcid:[0-9]{4}-[0-9]{4}-[0-9]{4}-[0-9]{3}[0-9X]$")
+    OPENALEX   = re.compile(r"^openalex:[AWICSFP][0-9]+$")
+    ROR        = re.compile(r"^ror:[a-z0-9]{9}$")
+    IPEDS      = re.compile(r"^ipeds:[0-9]{6}$")
+    DOI        = re.compile(r"^doi:10\.[0-9]{4,}/[^\s]+$")
+    ISBN_13    = re.compile(r"^isbn:[0-9]{13}$")
+    ISBN_10    = re.compile(r"^isbn:[0-9]{9}[0-9X]$")
+    LOCAL      = re.compile(r"^local:[a-z0-9_-]+:[a-z0-9_-]+$")
 
-    ENTITY_PATTERNS = [WIKIDATA, ORCID, ROR, IPEDS, DOI, ISBN_13, ISBN_10, LOCAL]
+    ENTITY_PATTERNS = [WIKIDATA, ORCID, OPENALEX, ROR, IPEDS, DOI, ISBN_13, ISBN_10, LOCAL]
+
+    # §3.1 — Accepted entity namespaces (must match prefixes in ENTITY_PATTERNS)
+    NAMESPACES: frozenset = frozenset({
+        "wikidata", "orcid", "openalex", "ror", "ipeds", "doi", "isbn", "local",
+    })
+
+    # §3.1 — Namespaces where the dataset column stores a full URL rather than the
+    # canonical "namespace:id" short form.  Used by Pattern 2 entity resolution
+    # (resolve_entity fallback in query_utils) — no explicit entity rows needed.
+    #   openalex:A5002034958  →  https://openalex.org/A5002034958
+    #   orcid:0000-0001-2345-6789  →  https://orcid.org/0000-0001-2345-6789
+    #   ror:04aj4c181         →  https://ror.org/04aj4c181
+    #   doi:10.1234/xyz       →  https://doi.org/10.1234/xyz
+    # Namespaces absent here (wikidata, ipeds, isbn, local) have no standard URL
+    # form stored in column data and always require explicit entity rows (Pattern 1).
+    NAMESPACE_URL_PREFIXES: dict = {
+        "openalex": "https://openalex.org/",
+        "orcid":    "https://orcid.org/",
+        "ror":      "https://ror.org/",
+        "doi":      "https://doi.org/",
+    }
 
     # §3.6 — Endpoint schemas
     ENDPOINT_SCHEMAS = {

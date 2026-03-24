@@ -10,6 +10,7 @@ Three time cases handled by load_system:
   3. Hive-partitioned time (parquet_hive, granularities) — path-level entity+time
 """
 
+from types import SimpleNamespace
 from typing import List, Optional
 from urllib.parse import quote
 
@@ -17,30 +18,84 @@ from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
-from ..models.registry import EntityMapping
+from storywrangler_schemas.standards import Standards
+from ..models.registry import EntityMapping, RegistryEntry
+
+
+def _derive_local_id(namespace: Optional[str], canonical_id: str) -> Optional[str]:
+    """Derive the stored local_id from a canonical entity_id.
+
+    Returns None when no known transform exists for the namespace, meaning an
+    explicit entity row is still required.
+
+    Examples:
+        openalex  openalex:A5002034958  →  https://openalex.org/A5002034958
+        doi       doi:10.1234/xyz       →  https://doi.org/10.1234/xyz
+    """
+    if not namespace:
+        return None
+    url_base = Standards.NAMESPACE_URL_PREFIXES.get(namespace)
+    if not url_base:
+        return None
+    prefix = f"{namespace}:"
+    if canonical_id.startswith(prefix):
+        return url_base + canonical_id[len(prefix):]
+    return None
 
 
 async def resolve_entity(
-    db: AsyncSession, domain: str, dataset: str, entity_id: str
+    db: AsyncSession, domain: str, dataset: str, identifier: str
 ) -> EntityMapping:
-    """Resolve a global entity_id → EntityMapping row.
+    """Resolve an identifier → EntityMapping row.
 
-    Raises 400 if the entity is not found in the mapping table for this dataset.
+    Accepts either a canonical entity_id (e.g. 'wikidata:Q675558') or a
+    local_id (e.g. 'Arlington'). Tries entity_id first, then local_id.
+
+    Fallback for global-identifier columns: if no entity row exists but the
+    dataset declares entity_namespace (e.g. "openalex"), the local_id is
+    derived from the canonical ID without requiring explicit entity rows.
+    Raises 400 if no resolution path is found.
     """
     result = await db.execute(
         select(EntityMapping).where(
             EntityMapping.domain == domain,
             EntityMapping.dataset_id == dataset,
-            EntityMapping.entity_id == entity_id,
+            EntityMapping.entity_id == identifier,
         )
     )
     em = result.scalar_one_or_none()
-    if not em:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Entity '{entity_id}' not found in entity mappings for {domain}/{dataset}",
+    if em:
+        return em
+
+    result = await db.execute(
+        select(EntityMapping).where(
+            EntityMapping.domain == domain,
+            EntityMapping.dataset_id == dataset,
+            EntityMapping.local_id == identifier,
         )
-    return em
+    )
+    em = result.scalar_one_or_none()
+    if em:
+        return em
+
+    # Namespace-aware fallback: no entity row needed when the column already
+    # holds globally-typed values (e.g. OpenAlex URLs, DOI URLs).
+    reg_result = await db.execute(
+        select(RegistryEntry).where(
+            RegistryEntry.domain == domain,
+            RegistryEntry.dataset_id == dataset,
+        )
+    )
+    ds = reg_result.scalar_one_or_none()
+    namespace = ((ds.entity_mapping or {}) if ds else {}).get("entity_namespace")
+    local_id = _derive_local_id(namespace, identifier)
+    if local_id:
+        return SimpleNamespace(local_id=local_id)  # type: ignore[return-value]
+
+    raise HTTPException(
+        status_code=400,
+        detail=f"Entity '{identifier}' not found in entity mappings for {domain}/{dataset}",
+    )
 
 
 def resolve_flat_path(dataset_obj) -> str:
@@ -170,5 +225,25 @@ def load_system(
             """,
             [*params, limit],
         ).fetchall()
+
+    if not rows and entity_col and local_id is not None and dataset_obj.data_format != "parquet_hive":
+        # Distinguish "entity not found" from "entity exists but no data in range".
+        # Only needed for flat formats (parquet, ducklake, duckdb) — for parquet_hive
+        # a missing partition directory already results in an empty/error response.
+        # Catches Pattern 2 misconfiguration: column stores short IDs like "A5002034958"
+        # but derived local_id is "https://openalex.org/A5002034958".
+        exists = conn.execute(
+            f"SELECT COUNT(*) FROM {from_clause} WHERE {entity_col} = ? LIMIT 1",
+            [local_id],
+        ).fetchone()[0]
+        if not exists:
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f"Entity '{local_id}' not found in column '{entity_col}'. "
+                    "If this dataset uses entity_namespace (Pattern 2), verify the column "
+                    "stores full URL values (e.g. https://openalex.org/ID, not just A...)."
+                ),
+            )
 
     return {"types": [r[0] for r in rows], "counts": [float(r[1]) for r in rows]}

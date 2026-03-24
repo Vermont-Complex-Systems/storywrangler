@@ -10,7 +10,7 @@ from app.core.auth import get_password_hash
 from app.core.config import settings
 from app.core.database import async_session_factory, init_db
 from app.models.auth import User
-from app.routers import auth, babynames, open_academic_analytics, registry, storywrangler, wikimedia
+from app.routers import auth, babynames, open_academic_analytics, registry, storywrangler, wikimedia, zoning_bylaws
 
 log = logging.getLogger(__name__)
 
@@ -66,6 +66,7 @@ app.include_router(babynames.router, prefix="/babynames", tags=["babynames"])
 app.include_router(storywrangler.router, prefix="/storywrangler", tags=["storywrangler"])
 app.include_router(wikimedia.router, prefix="/wikimedia", tags=["wikimedia"])
 app.include_router(open_academic_analytics.router, prefix="/open-academic-analytics", tags=["open-academic-analytics"])
+app.include_router(zoning_bylaws.router, prefix="/vt-zoning-atlas", tags=["vt-zoning-atlas"])
 
 
 @app.get("/")

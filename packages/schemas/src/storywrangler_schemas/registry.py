@@ -17,13 +17,58 @@ from .standards import Standards
 _SUPPORTED_ENDPOINT_TYPES: frozenset[str] = frozenset(Standards.ENDPOINT_SCHEMAS)
 
 
+_KNOWN_NAMESPACES: frozenset[str] = Standards.NAMESPACES
+
+
 class EntityMappingConfig(BaseModel):
-    """Declares how a dataset-local column maps to canonical entity IDs (e.g. Wikidata QIDs). Actual mapping rows are submitted via the `entities` field or the batch upsert endpoint."""
+    """Declares how a dataset-local column maps to canonical entity IDs.
+
+    Two usage patterns:
+
+    1. **Opaque local keys** — column holds non-standard values (e.g. state abbreviation,
+       snake_case name) that need a lookup table.  Provide `entities` rows to supply
+       the local_id → entity_id mappings.  `entity_namespace` is optional but recommended
+       so the platform knows what kind of entity the column represents.
+
+    2. **Global-identifier column** — column already holds values from a recognised
+       namespace (e.g. DOIs, OpenAlex author URLs, ORCID iDs).  Set `entity_namespace`
+       to declare the namespace; the `entities` list is then optional — useful only
+       when you also want display names stored, or when the stored format differs from
+       the canonical ID format (e.g. full URLs vs `openalex:A...`).
+
+    `entity_namespace` is the prerequisite for cross-dataset entity graph traversal:
+    it tells the platform which resolution rules and external APIs apply (OpenAlex,
+    Wikidata SPARQL, ORCID, …) so entities can be enriched and joined across datasets.
+    """
 
     local_id_column: str = Field(
         ...,
-        description="Column in the dataset holding the dataset-local identifier",
+        description="Column in the dataset holding the dataset-local identifier.",
     )
+    entity_namespace: Optional[str] = Field(
+        None,
+        description=(
+            "Canonical namespace for identifiers in `local_id_column`. "
+            "Declares the entity type for discovery, enrichment, and cross-dataset "
+            "graph traversal — e.g. the platform can follow openalex:A → openalex:I → "
+            "wikidata:Q to join OAA authors with a babynames dataset keyed on Wikidata. "
+            f"Supported: {', '.join(sorted(_KNOWN_NAMESPACES))}. "
+            "See §3.1 of the Storywrangler Specification."
+        ),
+    )
+
+    @field_validator("entity_namespace")
+    @classmethod
+    def validate_entity_namespace(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        if v not in _KNOWN_NAMESPACES:
+            raise ValueError(
+                f"Unknown entity_namespace '{v}'. "
+                f"Supported: {', '.join(sorted(_KNOWN_NAMESPACES))}. "
+                f"See {Standards.spec_url('31-entity-identifiers')} for the full spec."
+            )
+        return v
 
 
 class EntityRow(BaseModel):
@@ -52,7 +97,7 @@ class EntityRow(BaseModel):
         if not Standards.valid_entity_id(v):
             raise ValueError(
                 f"Unrecognized entity_id format: '{v}'. "
-                f"Supported namespaces: wikidata, orcid, ror, ipeds, doi, isbn, local. "
+                f"Supported namespaces: wikidata, orcid, openalex, ror, ipeds, doi, isbn, local. "
                 f"See {Standards.spec_url('31-entity-identifiers')} for the full spec."
             )
         return v
@@ -201,7 +246,7 @@ class DatasetCreate(BaseModel):
         DatasetCreate(
             dataset_id="zoning_bylaws", domain="Vermont-Zoning-Atlas",
             data_location="/data/vt/zoning_bylaws.parquet", data_format="parquet",
-            entity_mapping={"entity_type": "wikidata", "local_id_column": "town"},
+            entity_mapping={"local_id_column": "town", "entity_namespace": "wikidata"},
             endpoint_schema={"type": "types-counts"},
         )
     """

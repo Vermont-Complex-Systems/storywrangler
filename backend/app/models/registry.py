@@ -9,7 +9,7 @@ The legacy tables are untouched — this new backend reads/writes only to "regis
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import Column, DateTime, ForeignKeyConstraint, JSON, String
+from sqlalchemy import Column, DateTime, ForeignKeyConstraint, JSON, String, UniqueConstraint
 from sqlalchemy.sql import func
 from sqlmodel import Field, SQLModel
 
@@ -84,3 +84,46 @@ class EntityMapping(SQLModel, table=True):
 
     def __repr__(self) -> str:
         return f"<EntityMapping(local='{self.local_id}', entity='{self.entity_id}')>"
+
+
+class EntityGraph(SQLModel, table=True):
+    """Cross-namespace entity relationships for dataset federation.
+
+    Stores directed edges of the form:
+        subject_id --[predicate]--> object_id
+
+    Predicates (controlled vocabulary):
+        affiliated_with — author belongs to institution   (openalex:A → openalex:I)
+        same_as         — cross-namespace identity         (openalex:I → wikidata:Q)
+        country         — institution is in country        (openalex:I → wikidata:Q)
+        broader         — concept hierarchy                (openalex:C → openalex:C)
+
+    Together these edges enable multi-hop graph traversal, e.g.:
+        openalex:A5002034958
+          --affiliated_with--> openalex:I26873012   (UVM)
+          --same_as----------> wikidata:Q1068        (UVM on Wikidata)
+          --country----------> wikidata:Q30          (United States)
+          ↕ shared namespace
+        babynames entity_id: wikidata:Q30
+
+    source: who asserted this edge — "openalex" | "wikidata" | "manual"
+    """
+
+    __tablename__ = "entity_graph"
+    __table_args__ = (
+        UniqueConstraint("subject_id", "predicate", "object_id", name="uq_entity_graph_edge"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    subject_id: str = Field(index=True)    # e.g. "openalex:A5002034958"
+    predicate: str                          # e.g. "affiliated_with"
+    object_id: str = Field(index=True)     # e.g. "openalex:I26873012"
+    source: str                             # e.g. "openalex"
+
+    created_at: Optional[datetime] = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), server_default=func.now()),
+    )
+
+    def __repr__(self) -> str:
+        return f"<EntityGraph('{self.subject_id}' --{self.predicate}--> '{self.object_id}')>"

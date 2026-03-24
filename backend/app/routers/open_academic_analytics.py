@@ -32,7 +32,7 @@ router = APIRouter()
 _OAAEntry = (
     select(RegistryEntry)
     .where(RegistryEntry.domain == "open-academic-analytics")
-    .where(RegistryEntry.dataset_id == "oaa")
+    .where(RegistryEntry.dataset_id == "papers")
 )
 
 
@@ -47,7 +47,7 @@ async def _get_dataset(db: AsyncSession) -> RegistryEntry:
     if not dataset:
         raise HTTPException(
             status_code=404,
-            detail="Dataset 'open-academic-analytics/oaa' not found. Register it first.",
+            detail="Dataset 'open-academic-analytics/papers' not found. Register it first.",
         )
     return dataset
 
@@ -71,7 +71,7 @@ async def get_papers_for_author(
 
     sql = f"""
         SELECT *
-        FROM papers
+        FROM oaa.papers
         {where}
         ORDER BY publication_date DESC
         {"LIMIT ?" if limit else ""}
@@ -81,8 +81,9 @@ async def get_papers_for_author(
 
     try:
         conn = _conn(dataset.data_location)
-        rows = conn.execute(sql, params).fetchall()
-        cols = [d[0] for d in conn.execute(f"DESCRIBE SELECT * FROM papers LIMIT 0").description]
+        result = conn.execute(sql, params)
+        cols = [d[0] for d in result.description]
+        rows = result.fetchall()
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Query failed: {e}")
 
@@ -104,8 +105,8 @@ async def get_all_authors(
             MAX(c.ego_age)          AS current_age,
             MAX(c.publication_year) AS last_pub_year,
             COALESCE(MAX(CAST(t.has_research_group AS INTEGER)), 0) AS has_research_group
-        FROM coauthors c
-        LEFT JOIN training t ON c.ego_display_name = t.name
+        FROM oaa.coauthors c
+        LEFT JOIN oaa.training t ON c.ego_display_name = t.name
         WHERE c.ego_display_name IS NOT NULL
           AND c.ego_age IS NOT NULL
         GROUP BY c.ego_display_name
@@ -148,7 +149,7 @@ async def get_coauthors_for_author(
 
     sql = f"""
         SELECT *
-        FROM coauthors
+        FROM oaa.coauthors
         {where}
         ORDER BY publication_date DESC
         {"LIMIT ?" if limit else ""}
@@ -158,8 +159,9 @@ async def get_coauthors_for_author(
 
     try:
         conn = _conn(dataset.data_location)
-        rows = conn.execute(sql, params).fetchall()
-        cols = [d[0] for d in conn.execute("DESCRIBE SELECT * FROM coauthors LIMIT 0").description]
+        result = conn.execute(sql, params)
+        cols = [d[0] for d in result.description]
+        rows = result.fetchall()
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Query failed: {e}")
 
@@ -184,7 +186,7 @@ async def get_embeddings_data(
                 t.has_research_group,
                 trim(unnest(string_split(t.host_dept, ';'))) AS host_dept,
                 t.college
-            FROM training t
+            FROM oaa.training t
             WHERE t.oa_uid IS NOT NULL
         )
         SELECT
@@ -204,7 +206,7 @@ async def get_embeddings_data(
             p.coauthor_names,
             e.host_dept,
             e.college
-        FROM papers p
+        FROM oaa.papers p
         LEFT JOIN exploded_depts e ON (
             p.ego_author_id = 'https://openalex.org/' || e.oa_uid
             OR p.ego_author_id = e.oa_uid
@@ -259,17 +261,17 @@ async def get_training_data(
         WITH age_data AS (
             SELECT author_age AS pub_year, older  AS counts, 'older'   AS age_category,
                    has_research_group, college, changing_rate
-            FROM training WHERE name = ? AND older > 0
+            FROM oaa.training WHERE name = ? AND older > 0
 
             UNION ALL
 
             SELECT author_age, same,    'same',    has_research_group, college, changing_rate
-            FROM training WHERE name = ? AND same > 0
+            FROM oaa.training WHERE name = ? AND same > 0
 
             UNION ALL
 
             SELECT author_age, younger, 'younger', has_research_group, college, changing_rate
-            FROM training WHERE name = ? AND younger > 0
+            FROM oaa.training WHERE name = ? AND younger > 0
         )
         SELECT pub_year, counts, age_category, has_research_group, college,
                COALESCE(changing_rate, 0) AS changing_rate
@@ -344,10 +346,9 @@ async def get_academic_research_groups(
 
     try:
         conn = duckdb.connect()
-        rows = conn.execute(sql, params).fetchall()
-        cols = [d[0] for d in conn.execute(
-            f"DESCRIBE SELECT * FROM read_parquet('{dataset.data_location}') LIMIT 0"
-        ).description]
+        result = conn.execute(sql, params)
+        cols = [d[0] for d in result.description]
+        rows = result.fetchall()
         conn.close()
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Query failed: {e}")

@@ -8,6 +8,7 @@ from typing import Any, Dict, List
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import load_only
 from sqlmodel import select
 
 from storywrangler_schemas.registry import DatasetCreate, EntityRow
@@ -16,7 +17,7 @@ from ..core.database import get_session
 from ..core.duckdb_client import get_duckdb_client
 from ..core.parquet_introspect import introspect
 from ..models.auth import User
-from ..models.registry import RegistryEntry, EntityMapping
+from ..models.registry import RegistryEntry, EntityMapping, EntityGraph
 from .auth import get_admin_user, get_current_user
 
 log = logging.getLogger(__name__)
@@ -46,7 +47,8 @@ VALID_DOMAINS = {
     "storywrangler",
     "babynames",
     "open-academic-analytics",
-    "scisciDB"
+    "scisciDB",
+    "vt-zoning-atlas",
 }
 
 async def _upsert_entities(
@@ -117,6 +119,8 @@ async def register_dataset(
         ep = dataset.endpoint_schema
 
         # 1. Require at least one comparison axis.
+        # entity_mapping counts if it declares a local_id_column (with or without
+        # entity_namespace / entities rows — namespace-only registrations are valid).
         has_entity = bool(dataset.entity_mapping)
         has_filter = bool(ep.filter_dimensions)
         if not has_entity and not has_filter:
@@ -273,6 +277,16 @@ async def list_registered_datasets(db: AsyncSession = Depends(get_session)):
     }
 
 
+_SUMMARY_COLUMNS = [
+    RegistryEntry.domain, RegistryEntry.dataset_id,
+    RegistryEntry.data_location, RegistryEntry.data_format,
+    RegistryEntry.description, RegistryEntry.catalog,
+    RegistryEntry.entity_mapping, RegistryEntry.lineage,
+    RegistryEntry.endpoint_schema,
+    RegistryEntry.created_at, RegistryEntry.updated_at,
+]
+
+
 @router.get(
     "/{domain}/{dataset_id}",
     openapi_extra=_ex({
@@ -289,6 +303,8 @@ async def list_registered_datasets(db: AsyncSession = Depends(get_session)):
         "updated_at": "2024-01-15T10:00:00Z",
     }),
 )
+
+
 async def get_dataset_info(
     domain: str,
     dataset_id: str,
@@ -296,24 +312,47 @@ async def get_dataset_info(
     db: AsyncSession = Depends(get_session),
 ):
     """Get metadata for a specific registered dataset. """
+    where = (RegistryEntry.domain == domain, RegistryEntry.dataset_id == dataset_id)
+
+    if full:
+        result = await db.execute(select(RegistryEntry).where(*where))
+        ds = result.scalar_one_or_none()
+        if not ds:
+            raise HTTPException(status_code=404, detail=f"RegistryEntry '{domain}/{dataset_id}' not found")
+        return {
+            "domain": ds.domain,
+            "dataset_id": ds.dataset_id,
+            "data_location": ds.data_location,
+            "data_format": ds.data_format,
+            "description": ds.description,
+            "format_config": ds.format_config or {},
+            "entity_mapping": ds.entity_mapping,
+            "lineage": ds.lineage,
+            "endpoint_schema": ds.endpoint_schema,
+            "created_at": ds.created_at,
+            "updated_at": ds.updated_at,
+        }
+
+    # Non-full: skip format_config (can be MB-sized) and strip filter_values
+    # from endpoint_schema so the summary response stays lightweight.
     result = await db.execute(
-        select(RegistryEntry).where(RegistryEntry.domain == domain, RegistryEntry.dataset_id == dataset_id)
+        select(RegistryEntry).options(load_only(*_SUMMARY_COLUMNS)).where(*where)
     )
     ds = result.scalar_one_or_none()
     if not ds:
         raise HTTPException(status_code=404, detail=f"RegistryEntry '{domain}/{dataset_id}' not found")
 
-    fc = ds.format_config or {}
+    ep = ds.endpoint_schema or {}
     return {
         "domain": ds.domain,
         "dataset_id": ds.dataset_id,
         "data_location": ds.data_location,
         "data_format": ds.data_format,
         "description": ds.description,
-        "format_config": fc if full else {k: v for k, v in fc.items() if k != "tables_metadata"},
+        "format_config": {},
         "entity_mapping": ds.entity_mapping,
         "lineage": ds.lineage,
-        "endpoint_schema": ds.endpoint_schema,
+        "endpoint_schema": {k: v for k, v in ep.items() if k != "filter_values"},
         "created_at": ds.created_at,
         "updated_at": ds.updated_at,
     }
@@ -430,3 +469,126 @@ async def validate_dataset_sources(
         },
         "sources": validation_results,
     }
+
+
+# ── Entity graph endpoints ─────────────────────────────────────────────────────
+
+_KNOWN_PREDICATES = {"affiliated_with", "same_as", "country", "broader"}
+
+
+@router.get(
+    "/entity-graph/path",
+    openapi_extra=_ex({
+        "from_id": "openalex:A5002034958",
+        "to_namespace": "wikidata",
+        "path": [
+            {"subject": "openalex:A5002034958", "predicate": "affiliated_with", "object": "openalex:I26873012"},
+            {"subject": "openalex:I26873012",   "predicate": "same_as",         "object": "wikidata:Q1068"},
+            {"subject": "wikidata:Q1068",        "predicate": "country",         "object": "wikidata:Q30"},
+        ],
+        "hops": 3,
+    }),
+)
+async def find_entity_path(
+    from_id: str,
+    to_namespace: str,
+    max_hops: int = 6,
+    db: AsyncSession = Depends(get_session),
+):
+    """BFS traversal of the entity graph from `from_id` until reaching `to_namespace`.
+
+    Example: from_id=openalex:A5002034958 & to_namespace=wikidata
+    returns the chain openalex:A → openalex:I → wikidata:Q (institution country)
+    which is the join path into any dataset keyed on Wikidata entities (e.g. babynames).
+    """
+    visited = {from_id}
+    # queue entries: (current_id, path_so_far)
+    queue: list[tuple[str, list[dict]]] = [(from_id, [])]
+
+    while queue:
+        current_id, path = queue.pop(0)
+
+        # Reached the target namespace (and moved at least one hop)
+        if path and current_id.startswith(f"{to_namespace}:"):
+            return {"from_id": from_id, "to_namespace": to_namespace, "path": path, "hops": len(path)}
+
+        if len(path) >= max_hops:
+            continue
+
+        result = await db.execute(
+            select(EntityGraph).where(EntityGraph.subject_id == current_id)
+        )
+        for edge in result.scalars().all():
+            if edge.object_id not in visited:
+                visited.add(edge.object_id)
+                queue.append((
+                    edge.object_id,
+                    path + [{"subject": current_id, "predicate": edge.predicate, "object": edge.object_id}],
+                ))
+
+    raise HTTPException(
+        status_code=404,
+        detail=f"No path found from '{from_id}' to namespace '{to_namespace}' within {max_hops} hops.",
+    )
+
+
+@router.get("/entity-graph/neighbors")
+async def get_entity_neighbors(
+    entity_id: str,
+    db: AsyncSession = Depends(get_session),
+):
+    """Return all direct edges from entity_id in the graph."""
+    result = await db.execute(
+        select(EntityGraph).where(EntityGraph.subject_id == entity_id)
+    )
+    edges = result.scalars().all()
+    return {
+        "entity_id": entity_id,
+        "edges": [
+            {"predicate": e.predicate, "object": e.object_id, "source": e.source}
+            for e in edges
+        ],
+    }
+
+
+@admin_router.post("/entity-graph")
+async def upsert_entity_graph_edges(
+    edges: List[Dict[str, str]],
+    _: None = Depends(get_admin_user),
+    db: AsyncSession = Depends(get_session),
+):
+    """Upsert edges into the entity graph. Each edge: {subject_id, predicate, object_id, source}.
+
+    Predicates: affiliated_with | same_as | country | broader
+    """
+    upserted = 0
+    for edge in edges:
+        subject_id = edge.get("subject_id", "")
+        predicate   = edge.get("predicate", "")
+        object_id   = edge.get("object_id", "")
+        source      = edge.get("source", "manual")
+
+        if not (subject_id and predicate and object_id):
+            raise HTTPException(status_code=422, detail=f"Missing fields in edge: {edge}")
+        if predicate not in _KNOWN_PREDICATES:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Unknown predicate '{predicate}'. Supported: {sorted(_KNOWN_PREDICATES)}",
+            )
+
+        result = await db.execute(
+            select(EntityGraph).where(
+                EntityGraph.subject_id == subject_id,
+                EntityGraph.predicate  == predicate,
+                EntityGraph.object_id  == object_id,
+            )
+        )
+        existing = result.scalar_one_or_none()
+        if existing:
+            existing.source = source
+        else:
+            db.add(EntityGraph(subject_id=subject_id, predicate=predicate, object_id=object_id, source=source))
+        upserted += 1
+
+    await db.commit()
+    return {"edges_upserted": upserted}
