@@ -6,16 +6,12 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlmodel import select
-
 from ..core.database import get_session
 from ..core.duckdb_client import get_duckdb_client
 from ..core.query_utils import load_system, parse_dates, resolve_entity
-from ..models.registry import RegistryEntry
+from ..core.registry_utils import get_latest_entry
 
 router = APIRouter()
-
-_BabynamesEntry = select(RegistryEntry).where(RegistryEntry.domain == "babynames")
 
 
 @router.get(
@@ -74,8 +70,7 @@ async def get_babynames_top_ngrams(
 ):
     """Get top baby names with optional temporal comparison.
     """
-    result = await db.execute(_BabynamesEntry.where(RegistryEntry.dataset_id == "ngrams"))
-    dataset_obj = result.scalar_one_or_none()
+    dataset_obj = await get_latest_entry(db, "babynames", "ngrams")
     if not dataset_obj:
         raise HTTPException(status_code=404, detail="'babynames/ngrams' dataset not found")
 

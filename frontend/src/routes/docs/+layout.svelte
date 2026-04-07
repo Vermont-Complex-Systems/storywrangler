@@ -33,6 +33,7 @@
 			items: [
 				{ label: 'Registering a dataset', href: '/docs/register' },
 				{ label: 'Design & architecture', href: '/docs/design' },
+				{ label: 'Versioning', href: '/docs/versioning' },
 				{ label: 'Storywrangler-Specs', href: '/docs/specification' }
 			]
 		},

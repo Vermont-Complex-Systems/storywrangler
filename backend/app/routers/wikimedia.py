@@ -6,16 +6,12 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlmodel import select
-
 from ..core.database import get_session
 from ..core.duckdb_client import get_duckdb_client
 from ..core.query_utils import load_system, parse_dates, resolve_entity
-from ..models.registry import RegistryEntry
+from ..core.registry_utils import get_latest_entry
 
 router = APIRouter()
-
-_WikimediaEntry = select(RegistryEntry).where(RegistryEntry.domain == "wikimedia")
 
 
 # ── top-ngrams ─────────────────────────────────────────────────────────────────
@@ -76,8 +72,7 @@ async def get_top_ngrams(
     db: AsyncSession = Depends(get_session),
 ):
     """Get top Wikipedia n-grams."""
-    result = await db.execute(_WikimediaEntry.where(RegistryEntry.dataset_id == "ngrams"))
-    dataset_obj = result.scalar_one_or_none()
+    dataset_obj = await get_latest_entry(db, "wikimedia", "ngrams")
     if not dataset_obj:
         raise HTTPException(status_code=404, detail="'wikimedia/ngrams' dataset not found")
 
@@ -191,8 +186,7 @@ async def list_revision_articles(
     Uses the pre-computed article_index from manifest.partition_index,
     populated at registration time by the submit script.
     """
-    result = await db.execute(_WikimediaEntry.where(RegistryEntry.dataset_id == "revisions"))
-    rev_dataset = result.scalar_one_or_none()
+    rev_dataset = await get_latest_entry(db, "wikimedia", "revisions")
     if not rev_dataset:
         raise HTTPException(status_code=404, detail="'wikimedia/revisions' dataset not found")
 
@@ -260,8 +254,7 @@ async def get_revision_deltas(
     the full token map. Subsequent revisions contain only changed tokens
     (value 0 = token removed).
     """
-    result = await db.execute(_WikimediaEntry.where(RegistryEntry.dataset_id == "revisions"))
-    rev_dataset = result.scalar_one_or_none()
+    rev_dataset = await get_latest_entry(db, "wikimedia", "revisions")
     if not rev_dataset:
         raise HTTPException(status_code=404, detail="'wikimedia/revisions' dataset not found")
 

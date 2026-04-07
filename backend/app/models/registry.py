@@ -9,7 +9,7 @@ The legacy tables are untouched — this new backend reads/writes only to "regis
 from datetime import datetime
 from typing import Any, Optional
 
-from sqlalchemy import Column, DateTime, ForeignKeyConstraint, JSON, String, UniqueConstraint
+from sqlalchemy import Column, DateTime, JSON, String, UniqueConstraint
 from sqlalchemy.sql import func
 from sqlmodel import Field, SQLModel
 
@@ -17,15 +17,17 @@ from sqlmodel import Field, SQLModel
 class RegistryEntryBase(SQLModel):
     """Scalar fields shared between the ORM table and any derived schemas.
 
-    The three-level namespace is: catalog.domain.dataset_id
+    The four-level identity is: catalog.domain.dataset_id@version
       catalog    — producing organisation (e.g. 'vcsi')
       domain     — owning service (e.g. 'wikimedia', 'babynames')
       dataset_id — name within domain (e.g. 'ngrams', 'revisions')
+      version    — 'latest' (mutable) or semver string (immutable snapshot)
     """
 
-    catalog: str = "vcsi" 
+    catalog: str = "vcsi"
     domain: str = Field(primary_key=True)
     dataset_id: str = Field(primary_key=True)
+    version: str = Field(default="latest", primary_key=True)
     data_location: Optional[Any] = Field(default=None, sa_column=Column(JSON))
     data_format: str = "parquet_hive"
     description: str = None
@@ -43,6 +45,9 @@ class RegistryEntry(RegistryEntryBase, table=True):
     transform: Optional[dict] = Field(default=None, sa_column=Column(JSON))
     ownership: Optional[dict] = Field(default=None, sa_column=Column(JSON))
     lineage: Optional[dict] = Field(default=None, sa_column=Column(JSON))
+
+    # Schema version — which storywrangler-schemas release governed this registration
+    schema_version: Optional[str] = Field(default=None)
 
     # Derived at registration — never submitted, always backend-computed
     data_schema: Optional[dict] = Field(default=None, sa_column=Column(JSON))
@@ -67,15 +72,15 @@ class RegistryEntry(RegistryEntryBase, table=True):
 
 
 class EntityMapping(SQLModel, table=True):
-    """Entity mappings: dataset-local IDs ↔ canonical entity IDs (e.g. Wikidata QIDs)."""
+    """Entity mappings: dataset-local IDs ↔ canonical entity IDs (e.g. Wikidata QIDs).
+
+    Version-agnostic: entity rows represent the canonical lookup table for a dataset
+    identity (domain + dataset_id) across all versions. The FK to registry was removed
+    because the registry PK is now (domain, dataset_id, version) — referential integrity
+    is enforced at the application level in the registry router.
+    """
 
     __tablename__ = "registry_entity_mappings"
-    __table_args__ = (
-        ForeignKeyConstraint(
-            ["domain", "dataset_id"],
-            ["registry.domain", "registry.dataset_id"],
-        ),
-    )
 
     id: str = Field(
         sa_column=Column(String, primary_key=True),

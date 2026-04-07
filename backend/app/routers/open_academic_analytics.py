@@ -18,23 +18,17 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlmodel import select
 
 from ..core.database import get_session
 from ..core.duckdb_client import get_duckdb_client
-from ..models.registry import RegistryEntry
+from ..core.registry_utils import get_latest_entry
 
 router = APIRouter()
 
 
 async def _get_path(db: AsyncSession, dataset_id: str) -> str:
     """Resolve a registered OAA dataset to its parquet file path."""
-    result = await db.execute(
-        select(RegistryEntry)
-        .where(RegistryEntry.domain == "open-academic-analytics")
-        .where(RegistryEntry.dataset_id == dataset_id)
-    )
-    entry = result.scalar_one_or_none()
+    entry = await get_latest_entry(db, "open-academic-analytics", dataset_id)
     if not entry:
         raise HTTPException(
             status_code=404,

@@ -10,12 +10,10 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlmodel import select
-
 from ..core.database import get_session
 from ..core.duckdb_client import get_duckdb_client
 from ..core.query_utils import load_system, parse_dates, resolve_entity
-from ..models.registry import RegistryEntry
+from ..core.registry_utils import get_latest_entry
 
 router = APIRouter()
 
@@ -129,13 +127,7 @@ async def allotaxonometer(
     > `?sex=M&sex2=F` compares boy vs girl babynames, `?geo=US&geo2=CA` compares countries.
     > Entity registration is optional when a filter dimension serves as the comparison axis.
     """
-    result = await db.execute(
-        select(RegistryEntry).where(
-            RegistryEntry.domain == domain,
-            RegistryEntry.dataset_id == dataset,
-        )
-    )
-    dataset_obj = result.scalar_one_or_none()
+    dataset_obj = await get_latest_entry(db, domain, dataset)
     if not dataset_obj:
         raise HTTPException(status_code=404, detail=f"Dataset '{domain}/{dataset}' not found")
 
@@ -230,7 +222,9 @@ async def allotaxonometer(
                 "system2": {"entity": entity2, "dates": dates2, "filters": filter_vals2, "types": len(sys2["types"])},
                 "domain": domain,
                 "dataset": dataset,
+                "dataset_version": dataset_obj.version,
                 "granularity": granularity,
+                "allotax_version": getattr(allotax, "__version__", "unknown"),
             },
         }
     except Exception as e:

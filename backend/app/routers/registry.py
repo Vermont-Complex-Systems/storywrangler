@@ -3,7 +3,7 @@ Registry endpoints — discover and inspect registered file-based datasets.
 """
 
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
@@ -16,6 +16,7 @@ from storywrangler_schemas.registry import DatasetCreate, EntityRow
 from ..core.database import get_session
 from ..core.duckdb_client import get_duckdb_client
 from ..core.parquet_introspect import introspect
+from ..core.registry_utils import get_latest_entry
 from ..models.auth import User
 from ..models.registry import RegistryEntry, EntityMapping, EntityGraph
 from .auth import get_admin_user, get_current_user
@@ -217,9 +218,21 @@ async def register_dataset(
         select(RegistryEntry).where(
             RegistryEntry.domain == dataset.domain,
             RegistryEntry.dataset_id == dataset.dataset_id,
+            RegistryEntry.version == dataset.version,
         )
     )
     existing = result.scalar_one_or_none()
+
+    # Immutable snapshot guard: reject re-registration of any version except 'latest'
+    if existing and dataset.version != "latest":
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Version '{dataset.version}' of '{dataset.domain}/{dataset.dataset_id}' "
+                "already exists and is immutable. Bump the version string or use "
+                "version='latest' for the mutable development slot."
+            ),
+        )
 
     # Serialize nested Pydantic models to plain dicts for JSON columns
     def _dump(obj) -> dict | None:
@@ -243,6 +256,7 @@ async def register_dataset(
         existing.catalog = dataset.catalog
         existing.ownership = _dump(dataset.ownership)
         existing.lineage = _dump(dataset.lineage)
+        existing.schema_version = dataset.schema_version
         if partition_index is not None:
             existing.partition_index = partition_index
         await db.commit()
@@ -252,6 +266,7 @@ async def register_dataset(
         db_entry = RegistryEntry(
             dataset_id=dataset.dataset_id,
             domain=dataset.domain,
+            version=dataset.version,
             data_location=dataset.data_location,
             data_format=dataset.data_format,
             description=dataset.description,
@@ -262,6 +277,7 @@ async def register_dataset(
             transform=_dump(dataset.transform),
             ownership=_dump(dataset.ownership),
             lineage=_dump(dataset.lineage),
+            schema_version=dataset.schema_version,
             partition_index=partition_index,
         )
         db.add(db_entry)
@@ -309,10 +325,7 @@ async def upsert_dataset_entities(
     db: AsyncSession = Depends(get_session),
 ):
     """Batch upsert entity mapping rows for a registered dataset. Idempotent."""
-    result = await db.execute(
-        select(RegistryEntry).where(RegistryEntry.domain == domain, RegistryEntry.dataset_id == dataset_id)
-    )
-    if not result.scalar_one_or_none():
+    if not await get_latest_entry(db, domain, dataset_id):
         raise HTTPException(status_code=404, detail=f"RegistryEntry '{domain}/{dataset_id}' not found")
 
     count = await _upsert_entities(db, domain, dataset_id, entities)
@@ -324,9 +337,13 @@ async def upsert_dataset_entities(
 
 @router.get("/", openapi_extra=_ex({"datasets": [_EXAMPLE_DATASET], "total": 1}))
 async def list_registered_datasets(db: AsyncSession = Depends(get_session)):
-    """List all registered datasets."""
+    """List all registered datasets (latest version per dataset)."""
+    # DISTINCT ON (domain, dataset_id) ordered by created_at DESC gives the
+    # most recently registered version for each dataset identity.
     result = await db.execute(
-        select(RegistryEntry).order_by(RegistryEntry.domain, RegistryEntry.dataset_id)
+        select(RegistryEntry)
+        .distinct(RegistryEntry.domain, RegistryEntry.dataset_id)
+        .order_by(RegistryEntry.domain, RegistryEntry.dataset_id, RegistryEntry.created_at.desc())
     )
     datasets = result.scalars().all()
     return {
@@ -335,6 +352,7 @@ async def list_registered_datasets(db: AsyncSession = Depends(get_session)):
                 "catalog": ds.catalog,
                 "domain": ds.domain,
                 "dataset_id": ds.dataset_id,
+                "version": ds.version,
                 "data_location": ds.data_location,
                 "data_format": ds.data_format,
                 "description": ds.description,
@@ -348,13 +366,14 @@ async def list_registered_datasets(db: AsyncSession = Depends(get_session)):
 
 
 _SUMMARY_COLUMNS = [
-    RegistryEntry.domain, RegistryEntry.dataset_id,
+    RegistryEntry.domain, RegistryEntry.dataset_id, RegistryEntry.version,
     RegistryEntry.data_location, RegistryEntry.data_format,
     RegistryEntry.description, RegistryEntry.catalog,
     RegistryEntry.manifest,    # now always small (availability only — partition_index excluded)
     RegistryEntry.data_schema,      # introspected column types — small, useful for SDK consumers
     RegistryEntry.entity_mapping, RegistryEntry.lineage,
     RegistryEntry.endpoint_schema,  # query contract without filter_values
+    RegistryEntry.schema_version,
     RegistryEntry.created_at, RegistryEntry.updated_at,
     # excluded: filter_values (medium), partition_index (can be large)
 ]
@@ -381,24 +400,27 @@ _SUMMARY_COLUMNS = [
 async def get_dataset_info(
     domain: str,
     dataset_id: str,
+    version: Optional[str] = None,
     full: bool = False,
     db: AsyncSession = Depends(get_session),
 ):
-    """Get metadata for a specific registered dataset. """
-    where = (RegistryEntry.domain == domain, RegistryEntry.dataset_id == dataset_id)
+    """Get metadata for a specific registered dataset.
 
+    Defaults to the latest version. Pass `?version=1.0.0` to retrieve an immutable snapshot.
+    Pass `?full=true` to include filter_values and partition_index.
+    """
     if full:
-        result = await db.execute(select(RegistryEntry).where(*where))
-        ds = result.scalar_one_or_none()
+        ds = await get_latest_entry(db, domain, dataset_id, version)
         if not ds:
             raise HTTPException(status_code=404, detail=f"RegistryEntry '{domain}/{dataset_id}' not found")
-        # Re-inject partition_index into manifest for a clean response shape.
         manifest_full = dict(ds.manifest or {})
         if ds.partition_index is not None:
             manifest_full["partition_index"] = ds.partition_index
         return {
             "domain": ds.domain,
             "dataset_id": ds.dataset_id,
+            "version": ds.version,
+            "schema_version": ds.schema_version,
             "data_location": ds.data_location,
             "data_format": ds.data_format,
             "description": ds.description,
@@ -413,9 +435,15 @@ async def get_dataset_info(
         }
 
     # Non-full: lightweight query — skips filter_values and partition_index.
-    # manifest and data_schema are always small and included.
+    where = [RegistryEntry.domain == domain, RegistryEntry.dataset_id == dataset_id]
+    if version:
+        where.append(RegistryEntry.version == version)
     result = await db.execute(
-        select(RegistryEntry).options(load_only(*_SUMMARY_COLUMNS)).where(*where)
+        select(RegistryEntry)
+        .options(load_only(*_SUMMARY_COLUMNS))
+        .where(*where)
+        .order_by(RegistryEntry.created_at.desc())
+        .limit(1)
     )
     ds = result.scalar_one_or_none()
     if not ds:
@@ -424,6 +452,8 @@ async def get_dataset_info(
     return {
         "domain": ds.domain,
         "dataset_id": ds.dataset_id,
+        "version": ds.version,
+        "schema_version": ds.schema_version,
         "data_location": ds.data_location,
         "data_format": ds.data_format,
         "description": ds.description,
@@ -450,10 +480,7 @@ async def get_adapter_info(
     db: AsyncSession = Depends(get_session),
 ):
     """List entity mapping rows for a dataset (entity_id ↔ local_id)."""
-    result = await db.execute(
-        select(RegistryEntry).where(RegistryEntry.domain == domain, RegistryEntry.dataset_id == dataset_id)
-    )
-    if not result.scalar_one_or_none():
+    if not await get_latest_entry(db, domain, dataset_id):
         raise HTTPException(status_code=404, detail=f"RegistryEntry '{domain}/{dataset_id}' not found")
 
     rows_result = await db.execute(
@@ -491,10 +518,7 @@ async def validate_dataset_sources(
     db: AsyncSession = Depends(get_session),
 ):
     """Validate that all source URLs for a dataset are still accessible."""
-    result = await db.execute(
-        select(RegistryEntry).where(RegistryEntry.domain == domain, RegistryEntry.dataset_id == dataset_id)
-    )
-    ds = result.scalar_one_or_none()
+    ds = await get_latest_entry(db, domain, dataset_id)
     if not ds:
         raise HTTPException(status_code=404, detail=f"RegistryEntry '{domain}/{dataset_id}' not found")
 
@@ -547,6 +571,50 @@ async def validate_dataset_sources(
             "all_accessible": accessible == total_urls,
         },
         "sources": validation_results,
+    }
+
+
+# ── Version history ────────────────────────────────────────────────────────────
+
+@router.get("/{domain}/{dataset_id}/versions")
+async def list_dataset_versions(
+    domain: str,
+    dataset_id: str,
+    db: AsyncSession = Depends(get_session),
+):
+    """List all registered versions for a dataset, newest first.
+
+    Returns the full version history: 'latest' (the mutable dev slot, if present)
+    plus any immutable semver snapshots (e.g. '1.0.0', '2.0.0').
+    """
+    result = await db.execute(
+        select(
+            RegistryEntry.version,
+            RegistryEntry.schema_version,
+            RegistryEntry.description,
+            RegistryEntry.created_at,
+            RegistryEntry.updated_at,
+        )
+        .where(RegistryEntry.domain == domain, RegistryEntry.dataset_id == dataset_id)
+        .order_by(RegistryEntry.created_at.desc())
+    )
+    rows = result.all()
+    if not rows:
+        raise HTTPException(status_code=404, detail=f"RegistryEntry '{domain}/{dataset_id}' not found")
+    return {
+        "domain": domain,
+        "dataset_id": dataset_id,
+        "versions": [
+            {
+                "version": r.version,
+                "schema_version": r.schema_version,
+                "description": r.description,
+                "created_at": r.created_at,
+                "updated_at": r.updated_at,
+            }
+            for r in rows
+        ],
+        "total": len(rows),
     }
 
 

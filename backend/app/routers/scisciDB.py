@@ -15,12 +15,10 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlmodel import select
-
 from ..core.database import get_session
 from ..core.duckdb_client import get_duckdb_client
 from ..core.query_utils import load_time_series
-from ..models.registry import RegistryEntry
+from ..core.registry_utils import get_latest_entry
 
 router = APIRouter()
 
@@ -48,13 +46,7 @@ async def get_metrics(
       ?group_by=field,year&metric_type=total
       ?group_by=venue,year&field=Computer+Science&metric_type=total
     """
-    result = await db.execute(
-        select(RegistryEntry).where(
-            RegistryEntry.domain == _DOMAIN,
-            RegistryEntry.dataset_id == dataset,
-        )
-    )
-    dataset_obj = result.scalar_one_or_none()
+    dataset_obj = await get_latest_entry(db, _DOMAIN, dataset)
     if not dataset_obj:
         raise HTTPException(
             status_code=404,

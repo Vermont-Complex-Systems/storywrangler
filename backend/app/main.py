@@ -1,5 +1,6 @@
 import logging
 from contextlib import asynccontextmanager
+from importlib.metadata import PackageNotFoundError, version as pkg_version
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -76,4 +77,33 @@ async def root():
         "message": "Storywrangler API",
         "version": "1.0.0",
         "specification": "https://github.com/vermont-complex-systems/Storywrangler-Specification",
+    }
+
+
+@app.get("/version", tags=["platform"])
+async def platform_version():
+    """Return the versions of all platform components.
+
+    Useful for debugging, reproducibility, and pinning API clients to a known
+    software stack. The `schemas` version records the registration contract in
+    effect; `duckdb` and `allotax` versions govern query results.
+    """
+    import duckdb
+
+    try:
+        schemas_ver = pkg_version("storywrangler-schemas")
+    except PackageNotFoundError:
+        schemas_ver = "unknown"
+
+    try:
+        import allotax
+        allotax_ver = getattr(allotax, "__version__", "unknown")
+    except ImportError:
+        allotax_ver = "not installed"
+
+    return {
+        "api": app.version,
+        "schemas": schemas_ver,
+        "duckdb": duckdb.__version__,
+        "allotax": allotax_ver,
     }

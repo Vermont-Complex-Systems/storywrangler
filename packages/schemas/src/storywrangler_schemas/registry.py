@@ -10,9 +10,17 @@ Field responsibilities (see DatasetCreate for full detail):
   manifest        : coverage index (never query-time) — {"availability": {...}, "partition_index": [...]}
 """
 
+from importlib.metadata import PackageNotFoundError, version as pkg_version
 from typing import Any, Dict, List, Literal, Optional, Union
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from .standards import Standards
+
+
+def _get_schema_version() -> str:
+    try:
+        return pkg_version("storywrangler-schemas")
+    except PackageNotFoundError:
+        return "unknown"
 
 _SUPPORTED_ENDPOINT_TYPES: frozenset[str] = frozenset(Standards.ENDPOINT_SCHEMAS)
 
@@ -189,6 +197,15 @@ class LineageConfig(BaseModel):
         ...,
         description="Git repository URL for the pipeline that produced this dataset. e.g. `https://github.com/Vermont-Complex-Systems/babynames`.",
     )
+    archival_doi: Optional[str] = Field(
+        None,
+        description=(
+            "DOI assigned by an archival system (e.g. Harvard Dataverse) when this version "
+            "was checkpointed for long-term preservation. Set this after archiving — it signals "
+            "that the version is citable and its data is durably stored externally. "
+            "Example: '10.7910/DVN/XXXXXX'."
+        ),
+    )
 
 
 class EndpointSchemaConfig(BaseModel):
@@ -340,6 +357,19 @@ class DatasetCreate(BaseModel):
         ...,
         description="Short identifier, unique within domain. e.g. 'ngrams', 'revisions'",
     )
+    version: str = Field(
+        "latest",
+        description=(
+            "Dataset version. `'latest'` (default) is the mutable development slot — "
+            "safe to re-register freely; each re-registration overwrites the previous entry. "
+            "Semver strings (e.g. `'1.0.0'`) create immutable snapshots: re-registering the "
+            "same version string returns 409 Conflict. "
+            "Increment PATCH for bug fixes (same schema, corrected values), "
+            "MINOR for new data (new time range, new entities — backward compatible), "
+            "MAJOR for breaking schema changes (column rename, endpoint_schema change). "
+            "See https://semver.org/."
+        ),
+    )
     data_location: Union[str, List[str]] = Field(
         ...,
         description=(
@@ -393,6 +423,16 @@ class DatasetCreate(BaseModel):
         None,
         description="Query slice axes: time dimension and categorical filter columns.",
     )
+    schema_version: str = Field(
+        default_factory=_get_schema_version,
+        description=(
+            "Version of storywrangler-schemas used at registration time. "
+            "Auto-populated — do not set manually. "
+            "Records the software-data version coupling so consumers know which "
+            "registration contract was in effect when this entry was created."
+        ),
+    )
+
     @model_validator(mode="after")
     def validate_endpoint_schema_type(self) -> "DatasetCreate":
         if not self.endpoint_schema:
