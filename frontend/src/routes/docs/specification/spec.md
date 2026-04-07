@@ -11,7 +11,6 @@
    - [Validation Rules](#34-validation-rules)
    - [Unresolved Entities](#35-unresolved-entities)
    - [API Endpoint Schemas](#36-api-endpoint-schemas)
-   - [Adapter Submission Contract](#37-adapter-submission-contract)
 4. [Extending the Standards](#4-extending-the-standards)
 5. [Appendix A: Validation Algorithms](#appendix-a-validation-algorithms)
 6. [Appendix B: Revision History](#appendix-b-revision-history)
@@ -30,12 +29,11 @@ This specification defines:
 - Format requirements for identifiers and classifications
 - Validation rules
 - Entity and field mapping requirements for adapters
-- Endpoint response schemas required for interoperability
-- Adapter submission contract (registration payload schema)
 
 This specification does NOT define:
 - Internal data formats
 - Processing algorithms
+- API contracts
 
 ### 1.2 Terminology
 
@@ -510,148 +508,54 @@ When using local identifiers, adapters SHOULD document:
 
 ### 3.6 API Endpoint Schemas
 
-This section defines required schemas for standardized API endpoints across Storywrangler datasets.
+Datasets declare their output shape via `endpoint_schema` at registration time. The platform
+normalises raw column names to canonical names at query time — callers always receive `types`
+and `counts` regardless of what the underlying parquet files use.
 
-#### 3.6.1 Top N-Grams Endpoint
+#### 3.6.1 Output shape declaration (`endpoint_schema`)
 
-All datasets implementing a "top-ngrams" endpoint MUST conform to the following schema:
-
-**Required Columns:**
-- `types` (VARCHAR): The n-gram text content
-- `counts` (INTEGER): Frequency count for the n-gram
-
-**Example Query Response:**
-```json
-[
-  {"types": "John", "counts": 1234},
-  {"types": "Mary", "counts": 987},
-  {"types": "Michael", "counts": 856}
-]
-```
-
-**Column Requirements:**
-- Column names MUST be exactly `types` and `counts`
-- `types` MUST be a text/varchar data type
-- `counts` MUST be an integer data type
-- Response MUST return data as a JSON array
-- Results SHOULD be ordered by count in descending order
-
-**Implementation Notes:**
-- Optional filter parameters (year, location, sex, limit) are implementation-specific
-- Aggregation and filtering logic is handled by individual adapters
-- Response format MUST be lightweight (array only, no wrapper objects)
-
----
-
-#### 3.6.2 Endpoint Schema Declaration
-
-When registering a dataset, adapters declare which endpoint types the dataset supports and how its columns map to the standard dimensions. This declaration is part of the registration payload (see Section 3.7).
-
-**`EndpointSchemaConfig` fields:**
-
-| Field | Type | Required | Description |
-|---|---|---|---|
-| `type` | string | REQUIRED | Endpoint type name. MUST be a value from the supported types list. Currently: `types-counts`. |
-| `time_dimension` | string | optional | Column used for temporal slicing (e.g. `date`, `week`, `month`, `year`). |
-| `entity_dimensions` | list[string] | optional | Columns whose values are canonical entity IDs resolvable via `entity_mapping`. |
-| `filter_dimensions` | list[string] | optional | Local categorical filter columns not in shared entity space (e.g. `sex`, `language`). Not cross-dataset interoperable. |
-
-**Validation rules:**
-- `type` MUST be in the list of supported endpoint types (validated by the SDK before submission)
-- `entity_dimensions` columns MUST be covered by `entity_mapping` if entity resolution is expected
-- `filter_dimensions` values are dataset-local and carry no cross-dataset semantics
-
-**Example:**
 ```json
 {
   "type": "types-counts",
-  "time_dimension": "date",
-  "entity_dimensions": ["country"],
-  "filter_dimensions": ["language"]
+  "type_column":  "ngram",     // raw column name in parquet; defaults to "types"
+  "count_column": "pv_count"   // raw column name in parquet; defaults to "counts"
 }
 ```
 
----
+`type_column` and `count_column` are optional. If omitted the platform assumes the parquet
+files already use `types` / `counts`.
 
-### 3.7 Adapter Submission Contract
+#### 3.6.2 Response envelope
 
-This section defines the payload an adapter MUST send when registering a dataset with the Storywrangler registry. The SDK validates this payload locally before making any network call; a conforming payload will not produce a `422` error from the backend.
+All `types-counts` endpoints return a consistent envelope:
 
-#### 3.7.1 Registration Payload Schema (`DatasetCreate`)
+```json
+{
+  "data": [
+    {"types": "John",    "counts": 1234},
+    {"types": "Mary",    "counts": 987},
+    {"types": "Michael", "counts": 856}
+  ],
+  "metadata": {
+    "location": "wikidata:Q30",
+    "sex": "M"
+  }
+}
+```
 
-**Required fields:**
+`data` is always ordered by count descending. `metadata` echoes back the resolved entity and
+any filter values applied — its exact keys vary by dataset.
 
-| Field | Type | Description |
-|---|---|---|
-| `dataset_id` | string | Short identifier for the dataset within its domain (e.g. `ngrams`, `revisions`). |
-| `domain` | string | Owning service. MUST be one of the accepted domains (see §3.7.2). |
-| `data_location` | string | Absolute path or connection string to the underlying data. |
-| `data_format` | string | Storage format. MUST be one of: `parquet_hive`, `duckdb`, `ducklake`. Default: `parquet_hive`. |
+When called with a second time range (`?dates2=`) or second entity (`?entity2=`) the response
+uses date-range strings as top-level keys instead of `data`:
 
-**Optional fields:**
-
-| Field | Type | Description |
-|---|---|---|
-| `description` | string | Human-readable description of the dataset. |
-| `format_config` | `FormatConfig` | Storage-format-specific metadata. See below. |
-| `entity_mapping` | `EntityMappingConfig` | Schema declaration for entity ID resolution (required when `entity_dimensions` are declared). See §3.7.3. |
-| `entities` | list[`EntityRow`] | Entity mapping rows to upsert inline. Each row: `{local_id, entity_id, entity_name, entity_ids?}`. Can also be submitted separately via `POST /admin/registry/{domain}/{dataset_id}/entities`. |
-| `endpoint_schemas` | list[`EndpointSchemaConfig`] | Endpoint types the dataset supports. See §3.6.2. |
-| `sources` | object | Source URLs for provenance and validation. |
-| `catalog` | string | Producer identity — the organisation or group registering this dataset (e.g. `vcsi`). Defaults to `vcsi`. Enables a future 3-level namespace `catalog.domain.dataset_id`. |
-| `ownership` | object | Ownership and succession metadata: `{owner_group, contact, status, storage_risk}`. |
-| `lineage` | object | Lineage metadata: `{derived_from, produced_by, consumers}`. |
-
-**`FormatConfig` fields:**
-
-| Field | Type | Applies to | Description |
-|---|---|---|---|
-| `tables_metadata` | object | parquet_hive, ducklake | Maps logical table names to file path lists. |
-| `ducklake_data_path` | string | ducklake | Path to the DuckLake catalog `.duckdb` file. |
-| `data_schema` | object | any | Column name → DuckDB type (e.g. `{"ngram": "VARCHAR", "count": "BIGINT"}`). |
-| `partitioning` | object | parquet_hive, ducklake | Partitioning scheme (e.g. `{"keys": ["date", "country"], "granularity": "daily"}`). |
-
-**`ownership` fields:** `owner_group` (lab/group), `contact` (email or GitHub handle), `status` (`active` \| `needs_successor` \| `archived`), `storage_risk` (`managed` \| `institutional` \| `cloud` \| `personal`).
-
-**`lineage` fields:** `derived_from` (list of `"domain/dataset_id"` upstream refs), `produced_by` (git SHA, script path, or Dagster asset key), `consumers` (opt-in list of downstream users).
-
-The composite key `(domain, dataset_id)` MUST be unique in the registry. Re-submitting an existing pair performs an upsert (UPDATE).
-
----
-
-#### 3.7.2 Accepted Domains
-
-The `domain` field MUST be a value recognized by the registry. The registry maintains the authoritative list of accepted domains; submissions with an unrecognized value MUST be rejected.
-
-The current list is queryable via `GET /registry/domains` or the SDK's `list_domains()` helper. New domains are added through the governance process in §4.
-
----
-
-#### 3.7.3 Entity Mapping Configuration (`EntityMappingConfig`)
-
-Declares how a dataset-local identifier column maps to canonical entity IDs (defined in §3.1). Required when `entity_dimensions` are listed in an endpoint schema.
-
-This is a **schema declaration only** — it describes the mapping structure, not the storage location. The actual mapping rows live in the `entity_mappings` table, submitted via the `entities` field in `DatasetCreate` or the batch endpoint `POST /admin/registry/{domain}/{dataset_id}/entities`.
-
-| Field | Type | Required | Description |
-|---|---|---|---|
-| `entity_type` | string | REQUIRED | Entity identifier system (e.g. `wikidata`, `orcid`, `ror`). |
-| `local_id_column` | string | REQUIRED | Column in the dataset holding the dataset-local ID. |
-
-Entity IDs in submitted `entities` rows MUST conform to the format rules for the declared `entity_type` (§3.1).
-
----
-
-#### 3.7.4 Validation Sequence
-
-The SDK performs the following checks **before** sending the registration request:
-
-1. Pydantic schema validation of the `DatasetCreate` model
-2. `domain` membership check against accepted domains (§3.7.2)
-3. Endpoint type names in `endpoint_schemas` validated against supported types (§3.6.2)
-4. Entity ID format validation for any IDs in `entities` rows, validated against the declared `entity_type` (§3.1)
-
-If any check fails, a `ValidationError` is raised locally. The backend performs the same domain and schema checks on receipt and returns `422` if the payload does not conform — this should not occur for SDK-submitted payloads but may occur for direct API calls.
+```json
+{
+  "1990-1993": [{"types": "James", "counts": 85234}, ...],
+  "1980-1983": [{"types": "Michael", "counts": 91000}, ...],
+  "metadata":  {"location": "wikidata:Q30", "sex": "M"}
+}
+```
 
 ---
 
@@ -752,19 +656,6 @@ To convert ISBN-10 to ISBN-13:
 ---
 
 ## Appendix B: Revision History
-
-### Version 0.0.3 (2026-03-16)
-
-**Changed:**
-- §3.7.1 `FormatConfig`: removed reference to `"adapter"` key in `tables_metadata`; adapter parquet for query-time JOINs is a legacy pattern superseded by the `entity_mappings` PostgreSQL table
-- §3.7.3 `EntityMappingConfig`: removed reference to adapter parquet paths; entity rows are submitted via `entities` field or batch endpoint only
-
-### Version 0.0.2 (2026-03-16)
-
-**Added:**
-- §1.1: Expanded scope to include endpoint response schemas and adapter submission contract; removed incorrect exclusion of API contracts
-- §3.6.2: `EndpointSchemaConfig` — how adapters declare `time_dimension`, `entity_dimensions`, and `filter_dimensions` when registering
-- §3.7: Adapter Submission Contract — full `DatasetCreate` registration payload schema, accepted domains, `EntityMappingConfig`, and SDK validation sequence; includes ownership fields (`owner_group`, `contact`, `status`, `storage_risk`), lineage fields (`derived_from`, `produced_by`, `consumers`), and `catalog` for future 3-level namespace
 
 ### Version 0.0.1 (2025-11-09)
 

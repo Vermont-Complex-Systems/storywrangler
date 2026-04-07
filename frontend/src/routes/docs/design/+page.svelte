@@ -1,74 +1,38 @@
-<script lang="ts">
-	import * as Table from '$lib/components/ui/table';
-</script>
-
 <h1>Design & architecture</h1>
 
 <p>
-	Key design decisions behind the platform. This section grows as decisions are made and
-	stabilized.
-</p>
-
-<h2>External vs. managed datasets</h2>
-
-<p>
-	By default, data stays with the submitter. The platform stores metadata only — a pointer to
-	wherever the data lives on institutional storage. This preserves data sovereignty and avoids
-	duplicating TB-scale datasets.
+	The registry is a <strong>data catalog</strong>, loosely inspired by projects like the <a href="https://www.unitycatalog.io/">Unity Catalogs</a> or <a href="https://polaris.apache.org/">Apache Polaris</a>. When registered, it simply stores pointers to data, not the data itself. If our API is unreachable, groups can still query their data directly as normal. The health of datasets will be monitored daily to keep track of the status of the data ecosystems.
 </p>
 
 <p>
-	<strong>Managed datasets</strong> are the opt-in alternative. When a student leaves without a
-	successor, or when a dataset is small and stable enough, VCSI can take custody and move the
-	data to platform-controlled storage.
+	Every dataset is addressed as a three-level namespace; <code>catalog/domain/dataset_id</code> — e.g.
+	<code>vcsi/wikimedia/ngrams</code> or <code>compstorylab/babynames/ngrams</code>. We can also plan to manage datasets, where we run and ensure data maintainability over long term, if necessary. The goal is to provide garantees about the long term usability of datasets that stem from the VCSI and beyond.
 </p>
 
-<Table.Root>
-	<Table.Header>
-		<Table.Row>
-			<Table.Head class="w-44"></Table.Head>
-			<Table.Head>External <span class="text-muted-foreground font-normal">(default)</span></Table.Head>
-			<Table.Head>Managed <span class="text-muted-foreground font-normal">(opt-in)</span></Table.Head>
-		</Table.Row>
-	</Table.Header>
-	<Table.Body>
-		<Table.Row>
-			<Table.Cell class="font-medium">Data location</Table.Cell>
-			<Table.Cell>Submitter's institutional storage</Table.Cell>
-			<Table.Cell><code>/netfiles/vcsi/warehouse/</code> or PostgreSQL</Table.Cell>
-		</Table.Row>
-		<Table.Row>
-			<Table.Cell class="font-medium">Storage owner</Table.Cell>
-			<Table.Cell>Submitting group</Table.Cell>
-			<Table.Cell>VCSI</Table.Cell>
-		</Table.Row>
-		<Table.Row>
-			<Table.Cell class="font-medium">API-down fallback</Table.Cell>
-			<Table.Cell>✓ DuckDB reads directly from <code>data_location</code></Table.Cell>
-			<Table.Cell>✓ if on netfiles; depends on storage choice if on VM</Table.Cell>
-		</Table.Row>
-		<Table.Row>
-			<Table.Cell class="font-medium"><code>storage_risk</code></Table.Cell>
-			<Table.Cell><code>institutional</code> · <code>cloud</code> · <code>personal</code></Table.Cell>
-			<Table.Cell><code>managed</code></Table.Cell>
-		</Table.Row>
-		<Table.Row>
-			<Table.Cell class="font-medium">Typical trigger</Table.Cell>
-			<Table.Cell>Registration via <code>submit.py</code></Table.Cell>
-			<Table.Cell>Succession (<code>status: needs_successor</code>) or explicit request</Table.Cell>
-		</Table.Row>
-		<Table.Row>
-			<Table.Cell class="font-medium">Best for</Table.Cell>
-			<Table.Cell>Active datasets owned by a research group</Table.Cell>
-			<Table.Cell>Historical, stable datasets; datasets whose author has left</Table.Cell>
-		</Table.Row>
-	</Table.Body>
-</Table.Root>
+<h2>Dataset model: registry as pointer store</h2>
 
 <p>
-	Managed ingestion has three paths: <strong>static clone</strong> (copy parquet files, update
-	<code>data_location</code>), <strong>pipeline adoption</strong> (clone the source repo,
-	schedule via Dagster), or <strong>PostgreSQL ingest</strong> (for very small, highly-queried
-	datasets where DuckDB can still query via the PostgreSQL scanner extension). For now all
-	datasets are expected to be external.
+	Data stays with the submitter. The registry stores metadata only — a pointer to wherever the
+	data lives on institutional storage. The API resolves that pointer at query time and reads via
+	DuckDB's <code>read_parquet()</code>. This has the benefit of preserving data sovereignty and avoids duplicating
+	TB-scale datasets on platform storage. In that sense, we meet researchers where they are; they keep credit for the work they put into wrangling datasets.
 </p>
+
+<p>
+	All current datasets are <strong>external</strong>: the submitting group owns the storage, the platform owns the query layer.
+</p>
+
+<p>
+	Another benefot of this approach is to makez sensitive data more shreable; for instance, users can submit encripted <a href="https://duckdb.org/docs/current/data/parquet/encryption">parquet</a> files, which the API could expose to other groups that possess the proper keys to read them. It means that the Storywrangler API itself could be blind to the data; but nonetheless facilitate sharing of the sensitive data. 
+</p>
+
+<h3>Pitfalls and solution</h3>
+
+<p>
+	By not owning the datasets, the platform run the risk of serving obsolete datasets.  There are different ways by which we migrate this. 
+	
+	The <code>storage_risk</code> field in <code>ownership</code>
+	documents how stable that storage is (<code>institutional</code> · <code>cloud</code> ·
+	<code>personal</code>).
+</p>
+

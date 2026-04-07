@@ -10,9 +10,10 @@ from storywrangler_schemas.registry import (  # noqa: F401
     EndpointSchemaConfig,
     EntityMappingConfig,
     EntityRow,
-    FormatConfig,
+    ManifestConfig,
     LineageConfig,
     OwnershipConfig,
+    TransformConfig,
 )
 
 __all__ = [
@@ -20,7 +21,8 @@ __all__ = [
     "EndpointSchemaConfig",
     "EntityMappingConfig",
     "EntityRow",
-    "FormatConfig",
+    "ManifestConfig",
     "LineageConfig",
     "OwnershipConfig",
+    "TransformConfig",
 ]

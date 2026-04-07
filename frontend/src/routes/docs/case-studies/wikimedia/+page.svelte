@@ -3,46 +3,39 @@
 	import PipelineDiagram from '$lib/components/PipelineDiagram.svelte';
 
 	const ngramsPayload = `register({
-    "catalog":       "vcsi",
-    "domain":        "wikimedia",
-    "dataset_id":    "ngrams",
-    "data_location": "/netfiles/compethicslab/wikimedia/1grams",
-    "data_format":   "parquet_hive",
-    "description":   "Wikipedia n-gram frequencies by country and date",
-
-    # ── What shape it has ─────────────────────────────────────────────
-    "format_config": {
-        "tables_metadata": {"ngrams": ["/netfiles/.../daily/...", ...]},
-        "partitioning": {"keys": ["date", "country"]},
-    },
-    "endpoint_schema": {
-        "type":         "types-counts",
-        "type_column":  "ngram",     # non-default column name
-        "count_column": "pv_count",  # non-default column name
-        "granularities": {"daily": "date", "weekly": "week", "monthly": "month"},
-    },
-
-    # ── What entities exist ───────────────────────────────────────────
-    "entity_mapping": {
-        "local_id_column": "country",   # raw value in parquet: "United States"
-    },
-    "entities": [
-        {"local_id": "United States", "entity_id": "wikidata:Q30",  "entity_name": "United States"},
-        {"local_id": "United Kingdom", "entity_id": "wikidata:Q145", "entity_name": "United Kingdom"},
-        # … ~100 Wikipedia language editions
-    ],
-
-    # ── Provenance and ownership ──────────────────────────────────────
-    "lineage": {
-        "sources": {"main": {"enwiki": "https://dumps.wikimedia.org/other/enterprise_html/"}},
-        "derived_from": [],
-    },
-    "ownership": {
-        "owner_group":  "vcsi",
-        "contact":      "compstorylab@uvm.edu",
-        "storage_risk": "institutional",
-    },
-})`;
+        "catalog": "vcsi",
+        "domain": "wikimedia",
+        "dataset_id": "ngrams",
+        "data_location": "/netfiles/wikimedia_snapshots/wikigrams",
+        "data_format": "parquet_hive",
+        "description": "Wikipedia n-grams by frequency, date, and location with entity mappings and ranks",
+        "manifest": {},
+        "entity_mapping": {
+            "entity_namespace": "wikidata",
+            "local_id_column": "country",
+        },
+        "entities": get_entities(),
+        "endpoint_schema": {
+            "type": "types-counts",
+            "type_column": "ngram",
+            "count_column": "pv_count",
+        },
+        "transform": {
+            "time_dimension": "date",
+            "partition_dimensions": {"granularity": "daily"},
+        },
+        "lineage": {
+            "sources": {
+			    "url": 
+			      "https://dumps.wikimedia.org/other/enterprise_html/"
+			},
+            "repo": "https://github.com/Vermont-Complex-Systems/wikipedia-parsing",
+        },
+        "ownership": {
+            "owner_group": "vcsi",
+            "contact": "compstorylab@uvm.edu"
+        },
+    })`;
 
 	const filterOnlyCall = `# filter-only (no entity_mapping — pass raw column values directly)
 GET /storywrangler/allotax
@@ -61,12 +54,35 @@ GET /storywrangler/allotax
 <h1>Wikimedia pipeline</h1>
 
 <p>
-	Wikipedia n-gram frequencies: raw page-view dumps → Silver parquet_hive → live allotaxonometry
-	on Complex Stories. Reference implementation for groups writing Hive-partitioned files to shared
-	storage.
+	The Wikipedia enterprise dump comprises over 100Gb of compressed files, daily. Arguably, it counts as "big data" by academic standards. As it is often the case, it is not just abou size; one needs to extract the data from the raw html, making some decisions along the way about what should stay and what should go. Typically, this involve deciding what you count as content and what is boilerplate. Some insights only come from experimentation from downstream tasks. In our case, our downstream products included counting ngrams of varying sizes (e.g. words, bigrams, trigrams), before feeding that our instruments that builds on principles of heavy-tail distributions.
 </p>
 
+<p>
+	This pipeline is also a story about how large data problems have become tractable on accessible hardware. Crunching 1 TB of n-gram counts on a consumer laptop was unthinkable a decade ago; today it is routine, thanks to open formats like Apache Arrow and out-of-core execution engines like DuckDB. This case study follows the full Storywrangler workflow: we start with the pipeline itself, walk through how its outputs are registered with the platform using the <code>storywrangler-sdk</code>, and then look at how the Storywrangler API serves over 500 GB of Parquet data from a SvelteKit application. 
+</p>
+	
+<p>
+	Here what the allotaxonometer page of the app looks like:
+</p>
+
+<div class="not-prose my-6">
+	<video
+		src="/demo-allotax.mp4"
+		controls
+		muted
+		loop
+		playsinline
+		class="w-full rounded-xl border border-border"
+	></video>
+</div>
+
+<p>For context, on loading a pair of single days, it'll load two "types-counts" parquet files of around 300–400 MB each, access the <code>top N = types</code> (at first we do 100K, then 1M), before computing the rank turbulence divergence (RTD). You can think of RTD as something like entropy: a metric that surfaces which types in comparable systems have experienced the most turbulence, controlling for the heavy-tail nature of the system. Note that as we increase date ranges to 16 days (2 times 8 days), we are loading as many 300–400 MB files as there are days, summing around 4 GB of data without much hassle.</p>
+
+<h2>The data pipeline</h2>
+
 <PipelineDiagram />
+
+This is how we go from 100Gb of daily dumps to about 165G of parquets for the daily level, hive partitioned on each date such that each file is about 300-400Mb. This is nice because duckdb knows how to skip days based on that hive partition, then within each file with sort based on types such that we can find the rank of a given type for a given time window.
 
 <h2>The registration process</h2>
 

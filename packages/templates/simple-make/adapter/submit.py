@@ -60,13 +60,10 @@ def main():
         "dataset_id": dataset_id,
         "domain": domain,
         "data_location": data_location,
-        "data_format": "ducklake",          # ducklake | parquet_hive | duckdb
+        "data_format": "parquet",           # parquet | parquet_hive
         "description": "...",
-        "format_config": {
+        "manifest": {
             # "availability": availability,
-            # ducklake only:
-            # "ducklake_data_path": ...,
-            # "tables_metadata": ...,
         },
         "entity_mapping": {
             "local_id_column": "geo",       # column in your data holding the local entity ID
@@ -74,9 +71,10 @@ def main():
         "entities": entities,
         "endpoint_schema": {
             "type": "types-counts",         # endpoint type this dataset supports
-            "time_dimension": "year",       # time column name (non-hive)
-            # "granularities": {"daily": "date"},  # hive-partitioned only
-            # "filter_dimensions": ["sex"], # optional filter columns
+        },
+        "transform": {
+            "time_dimension": "year",       # time column in your data (e.g. "year", "date")
+            # "filter_dimensions": ["sex"], # hive partition columns to expose as query filters
         },
         "ownership": {
             "owner_group": "vcsi",

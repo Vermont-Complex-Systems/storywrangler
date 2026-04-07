@@ -1,18 +1,21 @@
-"""Shared DuckDB query utilities for registry-driven types-counts datasets.
+"""Shared DuckDB query utilities for registry-driven datasets.
 
-Used by any router that loads data from a registered dataset with
-endpoint_schema.type == 'types-counts'. Currently consumed by:
-  - routers/wikimedia.py  (allotax2, top-ngrams3)
+Two query patterns, one for each endpoint schema type:
 
-Three time cases handled by load_system:
-  1. No time axis   (parquet, no time_dimension)         — compare entities directly
-  2. Time column    (parquet/ducklake, time_dimension)   — WHERE year BETWEEN ...
-  3. Hive-partitioned time (parquet_hive, granularities) — path-level entity+time
+  load_system()       — endpoint_schema.type == 'types-counts'
+                        Returns {types: [...], counts: [...]} for allotax / rank distributions.
+                        Consumed by: routers/wikimedia.py, routers/storywrangler.py
+
+  load_time_series()  — endpoint_schema.type == 'time-series'
+                        Returns [{col1: v, ..., "count": n}, ...] for flexible GROUP BY queries.
+                        Consumed by: routers/scisciDB.py (and any future time-series router)
+
+Both support parquet and parquet_hive; all filtering is done via WHERE clauses.
+For parquet_hive, hive_partitioning=true handles partition pruning automatically.
 """
 
 from types import SimpleNamespace
-from typing import List, Optional
-from urllib.parse import quote
+from typing import Any, List, Optional
 
 from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -98,38 +101,54 @@ async def resolve_entity(
     )
 
 
-def resolve_flat_path(dataset_obj) -> str:
-    """Return a DuckDB read_parquet() expression for non-hive datasets.
+def parse_dates(s: Optional[str]) -> Optional[List[str]]:
+    """Split a 'start' or 'start,end' date string into a two-element list.
 
-    - parquet:   reads data_location directly (single flat file or glob)
-    - ducklake:  reads parquet files via convention:
-                 {data_location}/data/main/{domain}/*.parquet
-                 Override the base path with format_config.ducklake_data_path.
-    - duckdb:    reads files listed in format_config.tables_metadata
-
-    Raises 400 for parquet_hive — those use path-based loading in load_system.
+    Always returns strings — type casting for the BETWEEN clause is deferred to
+    _cast_dates() inside load_system(), which reads the column type from data_schema.
     """
-    fmt = dataset_obj.data_format
-    if fmt == "parquet":
-        return f"'{dataset_obj.data_location}'"
-    if fmt == "ducklake":
-        fc = dataset_obj.format_config or {}
-        data_path = fc.get("ducklake_data_path") or f"{dataset_obj.data_location}/data"
-        glob = f"{data_path}/main/{dataset_obj.domain}/*.parquet"
-        return f"'{glob}'"
-    if fmt == "duckdb":
-        fc = dataset_obj.format_config or {}
-        tm = fc.get("tables_metadata", {})
-        for key, files in tm.items():
-            if key != "adapter" and files:
-                if len(files) == 1:
-                    return f"'{files[0]}'"
-                files_expr = ", ".join(f"'{f}'" for f in files)
-                return f"[{files_expr}]"
-    raise HTTPException(
-        status_code=400,
-        detail=f"Cannot resolve path for data_format '{fmt}'.",
-    )
+    if s is None:
+        return None
+    parts = s.split(",")
+    return [parts[0], parts[0]] if len(parts) == 1 else [parts[0], parts[1]]
+
+
+def _cast_dates(dates: List[str], col_type: str) -> List[Any]:
+    """Cast date strings to the correct Python type for DuckDB BETWEEN.
+
+    Reads the DuckDB column type from data_schema (introspected at registration)
+    so the router never needs to know whether the time column is an integer year,
+    a DATE, a TIMESTAMP, or a VARCHAR.
+
+      INTEGER / BIGINT / …  →  int("1980")  →  1980
+      FLOAT / DOUBLE / …    →  float("1980.0")
+      DATE / TIMESTAMP / VARCHAR / …  →  "2024-01-01"  (DuckDB casts natively)
+    """
+    t = (col_type or "").upper()
+    int_types = ("INT", "BIGINT", "SMALLINT", "HUGEINT", "TINYINT",
+                 "UBIGINT", "UINTEGER", "USMALLINT", "UTINYINT")
+    float_types = ("FLOAT", "DOUBLE", "DECIMAL", "NUMERIC", "REAL")
+    if any(t.startswith(k) for k in int_types):
+        return [int(d) for d in dates]
+    if any(k in t for k in float_types):
+        return [float(d) for d in dates]
+    return list(dates)
+
+
+def _path_expr(dataset_obj) -> str:
+    """Return a DuckDB FROM expression for the dataset.
+
+    - parquet (single path):  read_parquet('{path}')
+    - parquet (file list):    read_parquet([file1, file2, ...])
+    - parquet_hive:           read_parquet('{path}/**/*.parquet', hive_partitioning=true)
+    """
+    loc = dataset_obj.data_location
+    if dataset_obj.data_format == "parquet_hive":
+        return f"read_parquet('{loc}/**/*.parquet', hive_partitioning=true)"
+    if isinstance(loc, list):
+        quoted = ", ".join(f"'{p}'" for p in loc)
+        return f"read_parquet([{quoted}])"
+    return f"read_parquet('{loc}')"
 
 
 def load_system(
@@ -138,100 +157,63 @@ def load_system(
     local_id: Optional[str],
     dates: Optional[List[str]],
     filter_vals: dict,
-    granularity: Optional[str],
     limit: int,
-    n: Optional[int] = None,
 ) -> dict:
-    """Load types-counts for one system, handling all three time cases.
+    """Load types-counts for one system.
 
-    Branches on data_format:
-    - parquet_hive: path-based — entity and time are hive partition keys.
-                    Reads only the relevant partition directories.
-    - parquet / ducklake / duckdb: WHERE-based — entity and time are column values.
+    Identical query logic for both parquet and parquet_hive: all filtering
+    is done via WHERE clauses. For parquet_hive, hive_partitioning=true means
+    DuckDB prunes partition directories automatically.
 
     Column names come from endpoint_schema (type_column / count_column),
-    defaulting to 'types' / 'counts' for datasets that follow the convention.
+    defaulting to 'types' / 'counts'. The time column comes from
+    transform.time_dimension.
 
-    When endpoint_schema.ngram_sizes is set, the data lives under {n}grams/
-    subdirectories. Pass n= to select the desired size (e.g. n=1 → 1grams/).
+    Extra filter dimensions (e.g. granularity='daily', ngram_size=1) are
+    passed directly in filter_vals by the caller.
 
-    Returns {"types": [...], "counts": [...]} ready for allotax or direct serialization.
+    Returns {"types": [...], "counts": [...]} ready for allotax or serialization.
     """
     ep = dataset_obj.endpoint_schema or {}
+    tr = dataset_obj.transform or {}
     entity_col = (dataset_obj.entity_mapping or {}).get("local_id_column")
     type_col  = ep.get("type_column")  or "types"
     count_col = ep.get("count_column") or "counts"
+    time_col  = tr.get("time_dimension")
 
-    if dataset_obj.data_format == "parquet_hive":
-        time_col = ep["granularities"][granularity]  # already validated by caller
-        encoded = quote(local_id, safe="") if local_id else "*"
-        ngram_sizes = ep.get("ngram_sizes")
-        if ngram_sizes is not None:
-            n_val = n if n is not None else ngram_sizes[0]
-            ngram_prefix = f"{n_val}grams/"
-        else:
-            ngram_prefix = ""
-        glob_path = (
-            f"{dataset_obj.data_location}/{ngram_prefix}{granularity}"
-            f"/{entity_col}={encoded}/{time_col}=*/data_0.parquet"
-        )
+    from_clause = _path_expr(dataset_obj)
 
-        conditions, params = [], []
-        if dates:
-            conditions.append(f"{time_col} BETWEEN ? AND ?")
-            params.extend(dates)
-        for col, val in filter_vals.items():
-            conditions.append(f"{col} = ?")
-            params.append(val)
-        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    schema = dataset_obj.data_schema or {}
+    conditions, params = [], []
+    if entity_col and local_id is not None:
+        conditions.append(f"{entity_col} = ?")
+        params.append(local_id)
+    if time_col and dates:
+        col_type = schema.get(time_col, "")
+        cast = _cast_dates([str(d) for d in dates], col_type)
+        conditions.append(f"{time_col} BETWEEN ? AND ?")
+        params.extend(cast)
+    for col, val in filter_vals.items():
+        conditions.append(f"{col} = ?")
+        params.append(val)
+    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
 
-        rows = conn.execute(
-            f"""
-            SELECT {type_col}, SUM({count_col}) AS counts
-            FROM read_parquet('{glob_path}')
-            {where}
-            GROUP BY {type_col}
-            ORDER BY counts DESC
-            LIMIT ?
-            """,
-            [*params, limit],
-        ).fetchall()
+    rows = conn.execute(
+        f"""
+        SELECT {type_col}, SUM({count_col}) AS counts
+        FROM {from_clause}
+        {where}
+        GROUP BY {type_col}
+        ORDER BY counts DESC
+        LIMIT ?
+        """,
+        [*params, limit],
+    ).fetchall()
 
-    else:
-        time_col = ep.get("time_dimension")
-        path_expr = resolve_flat_path(dataset_obj)
-        from_clause = f"read_parquet({path_expr})"
-
-        conditions, params = [], []
-        if entity_col and local_id is not None:
-            conditions.append(f"{entity_col} = ?")
-            params.append(local_id)
-        if time_col and dates:
-            conditions.append(f"{time_col} BETWEEN ? AND ?")
-            params.extend(dates)
-        for col, val in filter_vals.items():
-            conditions.append(f"{col} = ?")
-            params.append(val)
-        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
-
-        rows = conn.execute(
-            f"""
-            SELECT {type_col}, SUM({count_col}) AS counts
-            FROM {from_clause}
-            {where}
-            GROUP BY {type_col}
-            ORDER BY counts DESC
-            LIMIT ?
-            """,
-            [*params, limit],
-        ).fetchall()
-
-    if not rows and entity_col and local_id is not None and dataset_obj.data_format != "parquet_hive":
+    if not rows and entity_col and local_id is not None:
         # Distinguish "entity not found" from "entity exists but no data in range".
-        # Only needed for flat formats (parquet, ducklake, duckdb) — for parquet_hive
-        # a missing partition directory already results in an empty/error response.
-        # Catches Pattern 2 misconfiguration: column stores short IDs like "A5002034958"
-        # but derived local_id is "https://openalex.org/A5002034958".
+        # For parquet_hive, hive partition pruning makes this cheap: DuckDB only
+        # opens files in the matching entity= directory (or returns 0 if absent).
         exists = conn.execute(
             f"SELECT COUNT(*) FROM {from_clause} WHERE {entity_col} = ? LIMIT 1",
             [local_id],
@@ -247,3 +229,66 @@ def load_system(
             )
 
     return {"types": [r[0] for r in rows], "counts": [float(r[1]) for r in rows]}
+
+
+def load_time_series(
+    conn,
+    dataset_obj,
+    group_cols: List[str],
+    filter_vals: dict,
+    start: Any = None,
+    end: Any = None,
+    limit: int = 1000,
+) -> List[dict]:
+    """Execute a flexible GROUP BY query for a time-series dataset.
+
+    group_cols defines both the SELECT and GROUP BY. Any extra dimensions declared in
+    transform.filter_dimensions that are not in group_cols and not in filter_vals are
+    aggregated over (SUM). The time column comes from transform.time_dimension.
+    The measure column comes from endpoint_schema.count_column (defaults to 'count').
+
+    start / end are optional bounds on the time dimension; their type is derived from
+    data_schema so integer years and date strings both work correctly.
+
+    Returns [{col1: v1, ..., "count": n}, ...] ordered by group_cols ASC.
+    """
+    ep = dataset_obj.endpoint_schema or {}
+    tr = dataset_obj.transform or {}
+    time_col = tr.get("time_dimension") or "year"
+    count_col = ep.get("count_column") or "count"
+
+    schema = dataset_obj.data_schema or {}
+    from_clause = _path_expr(dataset_obj)
+
+    conditions: List[str] = []
+    params: List[Any] = []
+
+    if start is not None:
+        col_type = schema.get(time_col, "")
+        conditions.append(f"{time_col} >= ?")
+        params.append(_cast_dates([str(start)], col_type)[0])
+    if end is not None:
+        col_type = schema.get(time_col, "")
+        conditions.append(f"{time_col} <= ?")
+        params.append(_cast_dates([str(end)], col_type)[0])
+    for col, val in filter_vals.items():
+        conditions.append(f"{col} = ?")
+        params.append(val)
+
+    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    group_clause = ", ".join(group_cols)
+
+    rows = conn.execute(
+        f"""
+        SELECT {group_clause}, SUM({count_col}) AS count
+        FROM {from_clause}
+        {where}
+        GROUP BY {group_clause}
+        ORDER BY {group_clause}
+        LIMIT ?
+        """,
+        [*params, limit],
+    ).fetchall()
+
+    col_names = group_cols + ["count"]
+    return [dict(zip(col_names, row)) for row in rows]

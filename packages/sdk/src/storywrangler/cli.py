@@ -2,9 +2,8 @@
 Storywrangler CLI — scaffold new dataset projects.
 
 Usage:
-    uvx storywrangler new <project-name> --format ducklake
+    uvx storywrangler new <project-name> --format parquet
     uvx storywrangler new <project-name> --format parquet_hive
-    uvx storywrangler new <project-name> --format duckdb
 
 The generated project follows the simple-make pattern:
   extract/ → transform/ → adapter/ (prepare + submit) → tests/
@@ -14,7 +13,7 @@ import argparse
 import sys
 from pathlib import Path
 
-FORMATS = ("ducklake", "parquet_hive", "duckdb")
+FORMATS = ("parquet", "parquet_hive")
 ORCHESTRATORS = ("make", "snakemake")
 
 
@@ -199,8 +198,8 @@ def test_no_null_entities(db):
 
 SUBMIT = {
 
-"ducklake": """\
-\"\"\"Adapter — Submit (ducklake)\"\"\"
+"parquet": """\
+\"\"\"Adapter — Submit (parquet)\"\"\"
 
 import os
 import yaml
@@ -221,79 +220,43 @@ def get_entities() -> list[dict]:
     return [{{"local_id": k, **v}} for k, v in mappings.items()]
 
 
-def get_availability(conn, entities: list[dict]) -> dict:
-    \"\"\"Compute min/max time range per entity. TODO: adapt query to your schema.\"\"\"
-    local_to_entity = {{e["local_id"]: e["entity_id"] for e in entities}}
-    rows = conn.execute(\"\"\"
-        SELECT geo, MIN(year), MAX(year) FROM my_table GROUP BY geo
-    \"\"\").fetchall()
-    return {{
-        "yearly": {{
-            "available": {{
-                local_to_entity[geo]: {{"min": mn, "max": mx}}
-                for geo, mn, mx in rows if geo in local_to_entity
-            }}
-        }}
-    }}
-
-
-def get_ducklake_metadata(conn):
-    \"\"\"Extract absolute file paths from ducklake metadata tables.
-
-    df.path is relative to data_path, stored under schema_name/table_name/.
-    We resolve everything to absolute paths so the API can find files
-    regardless of which directory uvicorn runs from.
-    \"\"\"
-    raw = conn.execute(\"\"\"
-        SELECT value FROM __ducklake_metadata_my_lake.ducklake_metadata WHERE key = 'data_path'
-    \"\"\").fetchone()[0]
-    data_path = str(Path(raw).resolve())
-    rows = conn.execute(\"\"\"
-        SELECT s.schema_name, t.table_name, df.path
-        FROM __ducklake_metadata_my_lake.ducklake_data_file df
-        JOIN __ducklake_metadata_my_lake.ducklake_table t ON df.table_id = t.table_id
-        JOIN __ducklake_metadata_my_lake.ducklake_schema s ON t.schema_id = s.schema_id
-        WHERE df.end_snapshot IS NULL
-    \"\"\").fetchall()
-    tables_metadata = {{}}
-    for schema_name, table_name, rel_path in rows:
-        abs_path = str(Path(data_path) / schema_name / table_name / rel_path.lstrip("/"))
-        tables_metadata.setdefault(table_name, []).append(abs_path)
-    return tables_metadata, data_path
+def get_availability(data_path: Path) -> dict:
+    \"\"\"Compute coverage metadata. TODO: adapt query to your schema.\"\"\"
+    conn = duckdb.connect()
+    try:
+        rows = conn.execute(f\"\"\"
+            SELECT geo, MIN(year), MAX(year) FROM read_parquet('{{data_path}}') GROUP BY geo
+        \"\"\").fetchall()
+        return {{"yearly": {{"available": {{r[0]: {{"min": r[1], "max": r[2]}} for r in rows}}}}}}
+    finally:
+        conn.close()
 
 
 def main():
     dataset_id = os.getenv("DATASET_ID")
     domain = os.getenv("DOMAIN")
-    ducklake_path = here() / "metadata.ducklake"  # TODO: adjust
-
-    conn = duckdb.connect()
-    conn.execute(f"ATTACH 'ducklake:{{ducklake_path}}' AS my_lake;")
-    conn.execute("USE my_lake;")
+    data_path = Path(os.getenv("DATA_PATH"))
 
     entities = get_entities()
-    tables_metadata, ducklake_data_path = get_ducklake_metadata(conn)
-    availability = get_availability(conn, entities)
-    conn.close()
 
     dataset_metadata = {{
         "catalog": "vcsi",
         "dataset_id": dataset_id,
         "domain": domain,
-        "data_location": str(ducklake_path),
-        "data_format": "ducklake",
+        "data_location": str(data_path),
+        "data_format": "parquet",
         "description": "TODO",
-        "format_config": {{
-            "ducklake_data_path": ducklake_data_path,
-            "tables_metadata": tables_metadata,
-            "availability": availability,
+        "manifest": {{
+            "availability": get_availability(data_path),
         }},
         "entity_mapping": {{"local_id_column": "geo"}},  # TODO: adjust column name
         "entities": entities,
         "endpoint_schema": {{
             "type": "types-counts",
-            "time_dimension": "year",       # TODO
-            # "filter_dimensions": ["sex"], # optional
+        }},
+        "transform": {{
+            "time_dimension": "year",       # TODO: adjust time column name
+            # "filter_dimensions": ["sex"], # optional filter columns
         }},
         "ownership": {{"owner_group": "vcsi", "contact": "your@email.edu", "storage_risk": "institutional"}},
         "lineage": {{"sources": {{}}, "derived_from": []}},
@@ -359,85 +322,17 @@ def main():
         "data_location": str(data_path),
         "data_format": "parquet_hive",
         "description": "TODO",
-        "format_config": {{
+        "manifest": {{
             "availability": get_availability(data_path),
         }},
         "entity_mapping": {{"local_id_column": "geo"}},  # TODO: adjust column name
         "entities": entities,
         "endpoint_schema": {{
             "type": "types-counts",
-            "granularities": {{"daily": "date"}},  # TODO: adjust
-            # "ngram_sizes": [1, 2],                # uncomment if data has {n}grams/ subdirs
         }},
-        "ownership": {{"owner_group": "vcsi", "contact": "your@email.edu", "storage_risk": "institutional"}},
-        "lineage": {{"sources": {{}}, "derived_from": []}},
-    }}
-
-    client = Storywrangler()  # reads API_KEY (and optionally API_URL) from .env
-    success = client.registry.register(dataset_metadata)
-    print(f"\\n{{dataset_id}} registered" if success else "\\nRegistration failed")
-
-
-if __name__ == "__main__":
-    main()
-""",
-
-"duckdb": """\
-\"\"\"Adapter — Submit (duckdb)\"\"\"
-
-import os
-import yaml
-from pathlib import Path
-
-from pyprojroot import here
-from storywrangler import Storywrangler
-from dotenv import load_dotenv
-import duckdb
-
-load_dotenv(override=True)
-
-
-def get_entities() -> list[dict]:
-    entities_path = here() / "config" / "entities.yaml"
-    with open(entities_path) as f:
-        mappings = yaml.safe_load(f)
-    return [{{"local_id": k, **v}} for k, v in mappings.items()]
-
-
-def get_availability(conn) -> dict:
-    \"\"\"Compute coverage metadata. TODO: adapt query to your schema.\"\"\"
-    rows = conn.execute(\"\"\"
-        SELECT geo, MIN(year), MAX(year) FROM my_table GROUP BY geo
-    \"\"\").fetchall()
-    return {{"yearly": {{"available": {{r[0]: {{"min": r[1], "max": r[2]}} for r in rows}}}}}}
-
-
-def main():
-    dataset_id = os.getenv("DATASET_ID")
-    domain = os.getenv("DOMAIN")
-    db_path = Path(os.getenv("DATA_PATH"))
-
-    conn = duckdb.connect(str(db_path))
-    entities = get_entities()
-    availability = get_availability(conn)
-    conn.close()
-
-    dataset_metadata = {{
-        "catalog": "vcsi",
-        "dataset_id": dataset_id,
-        "domain": domain,
-        "data_location": str(db_path),
-        "data_format": "duckdb",
-        "description": "TODO",
-        "format_config": {{
-            "availability": availability,
-        }},
-        "entity_mapping": {{"local_id_column": "geo"}},  # TODO: adjust column name
-        "entities": entities,
-        "endpoint_schema": {{
-            "type": "types-counts",
-            "time_dimension": "year",       # TODO
-            # "filter_dimensions": ["sex"], # optional
+        "transform": {{
+            "time_dimension": "date",               # hive partition column for time
+            "filter_dimensions": ["granularity"],   # TODO: list all filterable partition columns
         }},
         "ownership": {{"owner_group": "vcsi", "contact": "your@email.edu", "storage_risk": "institutional"}},
         "lineage": {{"sources": {{}}, "derived_from": []}},
@@ -457,7 +352,7 @@ if __name__ == "__main__":
 
 CONFTEST = {
 
-"ducklake": """\
+"parquet": """\
 import pytest
 import duckdb
 import yaml
@@ -466,10 +361,7 @@ from pyprojroot import here
 
 @pytest.fixture(scope="session")
 def db():
-    ducklake_path = here() / "metadata.ducklake"  # TODO: adjust
     con = duckdb.connect()
-    con.execute(f"ATTACH 'ducklake:{ducklake_path}' AS my_lake;")
-    con.execute("USE my_lake;")
     yield con
     con.close()
 
@@ -507,32 +399,6 @@ def data_dir(request):
 @pytest.fixture(scope="session")
 def db():
     con = duckdb.connect()
-    yield con
-    con.close()
-
-
-@pytest.fixture(scope="session")
-def expected_entities():
-    \"\"\"Load expected entity local_ids from entities.yaml — the source of truth.\"\"\"
-    entities_path = here() / "config" / "entities.yaml"
-    with open(entities_path) as f:
-        mappings = yaml.safe_load(f)
-    return list(mappings.keys())
-""",
-
-"duckdb": """\
-import pytest
-import duckdb
-import yaml
-from pathlib import Path
-from pyprojroot import here
-
-
-@pytest.fixture(scope="session")
-def db():
-    import os
-    db_path = Path(os.environ["DATA_PATH"])
-    con = duckdb.connect(str(db_path))
     yield con
     con.close()
 
@@ -618,7 +484,7 @@ def main():
         "--format", "-f",
         choices=FORMATS,
         required=True,
-        help="Storage format: ducklake | parquet_hive | duckdb",
+        help="Storage format: parquet | parquet_hive",
     )
     new_cmd.add_argument(
         "--orchestrator", "-o",

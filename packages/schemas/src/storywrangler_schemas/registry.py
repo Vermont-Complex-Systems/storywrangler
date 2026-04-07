@@ -3,14 +3,14 @@ Storywrangler dataset registry schemas — single source of truth.
 
 Both backend/app and packages/sdk import from here. Neither owns a copy.
 
-Three cases for endpoint_schema (see EndpointSchemaConfig):
-  - No time axis   : {"type": "types-counts"}
-  - Time column    : {"type": "types-counts", "time_dimension": "year", "filter_dimensions": ["sex"]}
-  - Hive-partitioned: {"type": "types-counts", "type_column": "ngram", "count_column": "pv_count",
-                       "granularities": {"daily": "date", "weekly": "week", "monthly": "month"}}
+Field responsibilities (see DatasetCreate for full detail):
+  endpoint_schema : output shape only — {"type": "types-counts", "type_column": "ngram"}
+  transform       : query slice axes — {"time_dimension": "date", "filter_dimensions": ["granularity", "ngram_size"]}
+  entity_mapping  : entity identity — {"local_id_column": "location", "entity_namespace": "wikidata"}
+  manifest        : coverage index (never query-time) — {"availability": {...}, "partition_index": [...]}
 """
 
-from typing import Dict, List, Literal, Optional, Union
+from typing import Any, Dict, List, Literal, Optional, Union
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from .standards import Standards
 
@@ -103,49 +103,44 @@ class EntityRow(BaseModel):
         return v
 
 
-class FormatConfig(BaseModel):
-    """Storage-format-specific metadata. Pass only the fields relevant to your `data_format` — `parquet` and `duckdb` can submit `{}`. See [format reference](/docs/specification#storage-formats)."""
+class ManifestConfig(BaseModel):
+    """Coverage index — pre-computed metadata about what data exists in this dataset.
 
-    tables_metadata: Optional[Dict[str, List[str]]] = Field(
-        None,
-        description=(
-            "Maps logical table names to lists of parquet file paths. "
-            "Examples: `{\"daily\": [\"2024-01-01.parquet\", ...], \"adapter\": [\"states.parquet\"]}`. "
-            "Use the `adapter` key for entity-mapping parquet files loaded at query time. "
-            "See [format reference](/docs/specification#storage-formats)."
-        ),
-    )
-    ducklake_catalog_schema: Optional[str] = Field(
-        None,
-        description=(
-            "Same-instance DuckLake. PostgreSQL schema name for the submitter's "
-            "DuckLake catalog tables, e.g. `'babynames_lake'`. "
-            "Platform attaches READ_ONLY. For frozen file-based catalogs use "
-            "`ducklake_data_path` instead."
-        ),
-    )
-    ducklake_data_path: Optional[str] = Field(
-        None,
-        description=(
-            "Frozen/external DuckLake. Absolute path to a portable DuckLake catalog `.duckdb` file. "
-            "Example: `/data/storylake/babynames_v1.duckdb`. "
-            "See [format reference](/docs/specification#storage-formats)."
-        ),
-    )
-    partitioning: Optional[Dict] = Field(
-        None,
-        description=(
-            "Hive-partitioning scheme for `parquet_hive` datasets. "
-            "Example: `{\"keys\": [\"date\", \"country\"]}`. "
-            "See [format reference](/docs/specification#storage-formats)."
-        ),
-    )
+    Borrowed from Apache Iceberg's concept of a manifest: a pre-computed record of
+    partition bounds and file-level statistics. Never read at query time — used only
+    for discovery, UI display, and SDK consumers.
+
+    Leave empty for most datasets. Populated at registration time by the submit script.
+
+    - `availability`: time/entity coverage summary (babynames, wikimedia/ngrams)
+    - `partition_index`: enumerable partition list with per-partition stats (wikimedia/revisions)
+
+    See [format reference](/docs/specification#storage-formats).
+    """
+
     availability: Optional[Dict] = Field(
         None,
         description=(
-            "Coverage metadata keyed by granularity then entity. "
-            "Example: `{\"daily\": {\"available\": {\"wd:Q30\": {\"min\": \"2010-01-01\", \"max\": \"2024-12-31\"}}}}`. "
-            "Used by the query layer to validate date-range requests."
+            "Time coverage summary for display in the registry UI. Never read at query time. "
+            "Only meaningful when transform.time_dimension is set — that axis uses "
+            "BETWEEN queries so distinct values are never enumerated into filter_values. "
+            "If time is declared as a filter_dimension instead, all distinct values are "
+            "already introspected into filter_values and availability is redundant. "
+            "Three forms depending on the entity axis — "
+            "(1) global (no entity or filter axis): "
+            '`{"min": 2015, "max": 2023}`; '
+            "(2) keyed by local ID when using filter_dimensions only (no entity_mapping): "
+            '`{"united_states": {"min": 1880, "max": 2022}, "quebec": {"min": 1980, "max": 2022}}`; '
+            "(3) keyed by canonical entity ID when using entity_mapping: "
+            '`{"wikidata:Q30": {"min": 1880, "max": 2022}, "wikidata:Q176": {"min": 1980, "max": 2022}}`.'
+        ),
+    )
+    partition_index: Optional[List[Dict]] = Field(
+        None,
+        description=(
+            "`parquet_hive` only. Enumerable list of partition values with optional per-partition stats. "
+            "Stored separately and excluded from summary registry responses to keep them fast. "
+            'Example: `[{"identifier": "Cat", "revision_count": 142, "first_edit": "2001-01-01"}]`.'
         ),
     )
 
@@ -153,21 +148,17 @@ class FormatConfig(BaseModel):
 class OwnershipConfig(BaseModel):
     """Ownership and succession metadata."""
 
-    owner_group: Optional[str] = Field(
-        None,
+    owner_group: str = Field(
+        ...,
         description="Lab or research group (e.g. 'compethicslab', 'vcsi').",
     )
-    contact: Optional[str] = Field(
-        None,
+    contact: str = Field(
+        ...,
         description="Email or GitHub handle of the current maintainer.",
     )
-    status: Optional[str] = Field(
+    status: str = Field(
         "active",
         description="Lifecycle state: active | needs_successor | archived.",
-    )
-    storage_risk: Optional[str] = Field(
-        None,
-        description="Durability signal: managed | institutional | cloud | personal.",
     )
 
 
@@ -178,8 +169,12 @@ class LineageConfig(BaseModel):
         None,
         description=(
             "External raw data URLs keyed by dimension then location. "
-            "e.g. {\"geo\": {\"US\": \"https://ssa.gov/...\"}}. "
-            "Used by the validate-sources endpoint."
+            "Used by the validate-sources endpoint. "
+            "Example: "
+            "{\"geo\": {"
+            "\"united_states\": \"https://www.ssa.gov/oact/babynames/limits.html\", "
+            "\"quebec\": \"https://www.donneesquebec.ca/recherche/dataset/banque-de-prenoms\""
+            "}}."
         ),
     )
     derived_from: Optional[List[str]] = Field(
@@ -190,48 +185,108 @@ class LineageConfig(BaseModel):
         None,
         description="Downstream users — stories, tools, or scripts that depend on this dataset.",
     )
-    repo: Optional[str] = Field(
-        None,
-        description="Git repository URL for the pipeline that produced this dataset. e.g. `https://github.com/org/repo`.",
+    repo: str = Field(
+        ...,
+        description="Git repository URL for the pipeline that produced this dataset. e.g. `https://github.com/Vermont-Complex-Systems/babynames`.",
     )
 
 
 class EndpointSchemaConfig(BaseModel):
-    """Declares the query contract for a dataset: endpoint type, time axis, filter dimensions, and optional hive-partitioning. See [endpoint schema spec](/docs/specification#endpoint-schemas)."""
+    """Output shape declaration — what columns the API reads and returns.
+
+    Describes the response structure only; query slicing (time range, categorical
+    filters, entity axis) belongs in TransformConfig.
+
+    Supported types:
+
+    ``types-counts``
+        Rank distribution: ``{types: [...], counts: [...]}``.
+        type_column (default 'types') holds token/label values.
+        count_column (default 'counts') holds frequency values.
+        Requires entity_mapping or transform.filter_dimensions.
+
+    ``time-series``
+        Tabular rows: ``[{dim1: v, ..., count: n}]``.
+        count_column (default 'count') is the numeric measure to SUM.
+        type_column is not used.
+        Requires transform.time_dimension and at least one filter_dimension.
+
+    See [endpoint schema spec](/docs/specification#endpoint-schemas).
+    """
 
     type: str = Field(
         ...,
         description=(
-            f"Endpoint type. Currently supported: `{'`, `'.join(sorted(_SUPPORTED_ENDPOINT_TYPES))}`. "
+            f"Endpoint type. Supported: `{'`, `'.join(sorted(_SUPPORTED_ENDPOINT_TYPES))}`. "
             "See [endpoint schema spec](/docs/specification#endpoint-schemas)."
         ),
     )
-    time_dimension: Optional[str] = Field(
-        None,
-        description="Column for WHERE-based time filtering (non-hive). e.g. 'year'. Omit for hive-partitioned.",
-    )
-    granularities: Optional[Dict[str, str]] = Field(
-        None,
-        description="Hive-partitioned only. Maps subdirectory to time column. e.g. {\"daily\": \"date\"}",
-    )
     type_column: Optional[str] = Field(
         None,
-        description="Column holding token/type values. Defaults to 'types'. Declare only when different.",
+        description=(
+            "types-counts only. Column holding token/type values. "
+            "Defaults to 'types'. Declare only when different."
+        ),
     )
     count_column: Optional[str] = Field(
         None,
-        description="Column holding frequency values. Defaults to 'counts'. Declare only when different.",
+        description=(
+            "Column holding the numeric measure to aggregate. "
+            "Defaults to 'counts' for types-counts, 'count' for time-series. "
+            "Declare only when different from the default."
+        ),
+    )
+
+
+class TransformConfig(BaseModel):
+    """Query slice axes — how to filter the dataset at request time.
+
+    Three orthogonal axes, all generating WHERE clauses at query time:
+    - `time_dimension`: date-range filtering via BETWEEN.
+    - `filter_dimensions`: categorical columns where omitting the filter is
+      valid (aggregates over all values). E.g. omitting `sex` means all sexes.
+    - `partition_dimensions`: columns where omitting the filter is INVALID —
+      it would mix incompatible rows (e.g. daily + weekly + monthly summed).
+      For `parquet_hive` these are the hive partition keys. Declare safe
+      defaults in `partition_defaults`; they are injected automatically when
+      the caller does not provide the parameter.
+
+    `entity_mapping.local_id_column` is NOT listed here — it is the entity
+    identity column and is handled separately.
+    """
+
+    time_dimension: Optional[str] = Field(
+        None,
+        description=(
+            "Column for time-range filtering, e.g. 'year' or 'date'. "
+            "For parquet_hive this is the hive partition column; "
+            "all granularity levels must share the same column name."
+        ),
     )
     filter_dimensions: Optional[List[str]] = Field(
         None,
-        description="Local categorical filter columns. e.g. ['sex'] in babynames.",
+        description=(
+            "Categorical filter columns where omitting the filter aggregates over all values "
+            "(valid behaviour). E.g. ['sex'] — omitting sex returns all names. "
+            "Distinct values are auto-introspected at registration."
+        ),
     )
-    ngram_sizes: Optional[List[int]] = Field(
+    partition_dimensions: Optional[Dict[str, Any]] = Field(
         None,
         description=(
-            "Available n-gram sizes when the data is split into {n}grams/ subdirectories. "
-            "e.g. [1, 2] → 1grams/ and 2grams/ under data_location. "
-            "Omit for datasets with a single flat structure."
+            "Storage partition key columns — filtering on these is performant because the "
+            "query layer can prune at the storage level rather than scanning file contents. "
+            "For parquet_hive, these map directly to hive directory levels (col=val/); "
+            "DuckDB reads partition values from directory names and skips non-matching "
+            "directories entirely. Future backends (e.g. database connections) may support "
+            "analogous partition pruning. "
+            "Keys are column names; values are safe defaults injected automatically when "
+            "the caller omits the parameter (use None when no safe default exists). "
+            "For datasets where mixing partition slices is semantically invalid "
+            "(e.g. daily + weekly + monthly), providing defaults prevents accidental "
+            "cross-partition aggregation. "
+            "Distinct values are auto-introspected at registration. "
+            "Example: {\"granularity\": \"daily\", \"ngram_size\": 1}."
         ),
     )
 
@@ -248,6 +303,8 @@ class DatasetCreate(BaseModel):
             data_location="/data/vt/zoning_bylaws.parquet", data_format="parquet",
             entity_mapping={"local_id_column": "town", "entity_namespace": "wikidata"},
             endpoint_schema={"type": "types-counts"},
+            ownership={"owner_group": "vcsi", "contact": "compstorylab@uvm.edu"},
+            lineage={"repo": "https://github.com/Vermont-Complex-Systems/vt-zoning-atlas"},
         )
     """
 
@@ -262,10 +319,10 @@ class DatasetCreate(BaseModel):
                     "data_location": "/data/babynames/names.parquet",
                     "data_format": "parquet",
                     "description": "US baby name frequencies by state, year, and sex.",
-                    "format_config": {},
-                    "endpoint_schema": {"type": "types-counts", "time_dimension": "year", "filter_dimensions": ["sex", "geo"]},
-                    "ownership": {"owner_group": "vcsi", "contact": "compstorylab@uvm.edu", "storage_risk": "institutional"},
-                    "lineage": {},
+                    "endpoint_schema": {"type": "types-counts"},
+                    "transform": {"time_dimension": "year", "filter_dimensions": ["sex"]},
+                    "ownership": {"owner_group": "vcsi", "contact": "compstorylab@uvm.edu"},
+                    "lineage": {"repo": "https://github.com/Vermont-Complex-Systems/babynames"},
                 }
             ]
         }
@@ -283,22 +340,34 @@ class DatasetCreate(BaseModel):
         ...,
         description="Short identifier, unique within domain. e.g. 'ngrams', 'revisions'",
     )
-    data_location: str = Field(
-        ...,
-        description="Absolute path to the root of the dataset on disk, or connection string",
-    )
-    data_format: Literal["parquet", "parquet_hive", "duckdb", "ducklake"] = Field(
+    data_location: Union[str, List[str]] = Field(
         ...,
         description=(
-            "Storage format. One of `parquet` (single file), `parquet_hive` (directory-partitioned), "
-            "`duckdb` (embedded DB file), `ducklake` (DuckLake catalog). "
+            "Where to find the data. Three forms are supported for `parquet`:\n"
+            "- Single file: `/data/babynames.parquet`\n"
+            "- Flat directory: `/data/babynames/` (all `.parquet` files read)\n"
+            "- File list: `[\"/data/f1.parquet\", \"/data/f2.parquet\"]` — "
+            "use this when the pipeline manages multiple snapshot files (e.g. DuckLake) and "
+            "you need to pin exactly the live files at submit time.\n"
+            "For `parquet_hive`, provide the **root** of the hive partition tree — the directory "
+            "directly above the first `col=val/` level (e.g. `/data/ngrams/` where subdirectories "
+            "are `ngram_size=1/granularity=daily/…`). The query layer appends `/**/*.parquet` and "
+            "enables hive partition pruning automatically. Do not point to a subdirectory."
+        ),
+    )
+
+    data_format: Literal["parquet", "parquet_hive"] = Field(
+        ...,
+        description=(
+            "Storage format. One of `parquet` (single file or directory) or "
+            "`parquet_hive` (directory-partitioned by entity/time). "
             "See [format reference](/docs/specification#storage-formats)."
         ),
     )
     description: str = Field(..., description="Human-readable description of the dataset")
-    format_config: FormatConfig = Field(
-        ...,
-        description="Storage-format-specific metadata (tables_metadata, partitioning, availability, etc.)",
+    manifest: Optional[ManifestConfig] = Field(
+        None,
+        description="Coverage index: pre-computed availability and partition_index. Never read at query time.",
     )
     ownership: OwnershipConfig = Field(
         ...,
@@ -318,9 +387,12 @@ class DatasetCreate(BaseModel):
     )
     endpoint_schema: Optional[EndpointSchemaConfig] = Field(
         None,
-        description="Query contract for this dataset. Declares endpoint type, time and filter dimensions.",
+        description="Output shape: endpoint type and column names for types and counts.",
     )
-
+    transform: Optional[TransformConfig] = Field(
+        None,
+        description="Query slice axes: time dimension and categorical filter columns.",
+    )
     @model_validator(mode="after")
     def validate_endpoint_schema_type(self) -> "DatasetCreate":
         if not self.endpoint_schema:
@@ -330,4 +402,27 @@ class DatasetCreate(BaseModel):
                 f"Unknown endpoint type: '{self.endpoint_schema.type}'. "
                 f"Supported: {sorted(_SUPPORTED_ENDPOINT_TYPES)}"
             )
+        return self
+
+    @model_validator(mode="after")
+    def derive_entity_namespace(self) -> "DatasetCreate":
+        """Auto-derive entity_namespace from submitted entity rows when not declared.
+
+        If entity_mapping is provided without entity_namespace but entity rows are
+        submitted, infer the namespace from the entity_id prefixes. Requires all
+        rows to share the same known namespace (e.g. all 'wikidata:Q...' → 'wikidata').
+        """
+        if not self.entity_mapping or self.entity_mapping.entity_namespace is not None:
+            return self
+        if not self.entities:
+            return self
+        prefixes = {
+            e.entity_id.split(":")[0]
+            for e in self.entities
+            if ":" in e.entity_id
+        }
+        if len(prefixes) == 1:
+            ns = prefixes.pop()
+            if ns in _KNOWN_NAMESPACES:
+                self.entity_mapping.entity_namespace = ns
         return self

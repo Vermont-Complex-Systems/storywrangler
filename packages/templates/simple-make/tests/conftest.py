@@ -16,11 +16,7 @@ def expected_entities():
 #
 # @pytest.fixture(scope="session")
 # def db():
-#     import duckdb
-#     from pyprojroot import here
-#     ducklake_path = here() / "metadata.ducklake"
+#     import os, duckdb
 #     con = duckdb.connect()
-#     con.execute(f"ATTACH 'ducklake:{ducklake_path}' AS my_lake;")
-#     con.execute("USE my_lake;")
 #     yield con
 #     con.close()

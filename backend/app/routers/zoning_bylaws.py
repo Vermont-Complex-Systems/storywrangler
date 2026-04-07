@@ -76,7 +76,7 @@ async def get_zoning_bylaws_ngrams(
 
     try:
         conn = get_duckdb_client().connect()
-        sys1 = load_system(conn, dataset_obj, em.local_id, None, {}, None, limit)
+        sys1 = load_system(conn, dataset_obj, em.local_id, None, {}, limit)
         formatted = [{"types": t, "counts": c} for t, c in zip(sys1["types"], sys1["counts"])]
         return {
             "data": formatted,

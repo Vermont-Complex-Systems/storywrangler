@@ -3,7 +3,7 @@ Transform — process raw data into storage format.
 
 Replace this with your actual transformation logic.
 Common patterns:
-  - Load raw files from extract/input/, write to ducklake or parquet
+  - Load raw files from extract/input/, write to parquet or parquet_hive
   - Normalize, deduplicate, compute counts/ranks
   - Partition by entity column and time dimension
 

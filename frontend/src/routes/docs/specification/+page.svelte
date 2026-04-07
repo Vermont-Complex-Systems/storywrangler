@@ -1,9 +1,10 @@
 <script lang="ts">
 	import Markdown from 'svelte-exmarkdown';
 	import { gfmPlugin } from 'svelte-exmarkdown/gfm';
+	import rehypeSlug from 'rehype-slug';
 	import specContent from './spec.md?raw';
 
-	const plugins = [gfmPlugin()];
+	const plugins = [gfmPlugin(), { rehypePlugin: rehypeSlug }];
 </script>
 
 <div class="not-prose mb-4 flex items-center gap-2">

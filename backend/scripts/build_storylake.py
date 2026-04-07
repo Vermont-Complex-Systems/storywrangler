@@ -49,8 +49,6 @@ def _resolve_views(
     base_name: str,
     data_format: str,
     data_location: str,
-    domain: str,
-    fc: dict,
     ep: dict,
 ) -> list[tuple[str, str]]:
     """Return a list of (view_name, FROM_expression) pairs for a dataset.
@@ -76,16 +74,6 @@ def _resolve_views(
         # No granularity split — single flat glob
         return [(base_name, f"read_parquet('{data_location}/**/*.parquet', hive_partitioning=true)")]
 
-    if data_format == "ducklake":
-        # Parquet files live under <data_location>/data/main/<domain>/
-        data_path = fc.get("ducklake_data_path") or f"{data_location}/data"
-        glob = f"{data_path}/main/{domain}/*.parquet"
-        return [(base_name, f"read_parquet('{glob}')")]
-
-    if data_format == "duckdb":
-        # Standalone .duckdb file — skip for now (needs ATTACH logic)
-        return []
-
     return []
 
 
@@ -107,17 +95,16 @@ def build() -> None:
         )
 
         rows = conn.execute(
-            "SELECT domain, dataset_id, data_format, data_location, format_config, endpoint_schema "
+            "SELECT domain, dataset_id, data_format, data_location, manifest, endpoint_schema "
             "FROM reg.public.registry ORDER BY domain, dataset_id"
         ).fetchall()
 
         print(f"Building {STORYLAKE_PATH}  ({len(rows)} registered datasets)\n")
 
-        for domain, dataset_id, data_format, data_location, fc_raw, ep_raw in rows:
-            fc   = json.loads(fc_raw) if fc_raw else {}
+        for domain, dataset_id, data_format, data_location, _fc_raw, ep_raw in rows:
             ep   = json.loads(ep_raw) if ep_raw else {}
             base = _view_name(domain, dataset_id, rows)
-            pairs = _resolve_views(base, data_format, data_location, domain, fc, ep)
+            pairs = _resolve_views(base, data_format, data_location, ep)
 
             if not pairs:
                 print(f"  SKIP  {base:30s}  (format '{data_format}' not yet supported)")

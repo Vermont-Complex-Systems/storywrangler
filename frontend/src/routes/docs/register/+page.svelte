@@ -1,213 +1,317 @@
+<script lang="ts">
+	import * as Code from '$lib/components/ui/code';
+
+  import diagram from '$lib/assets/simple-diagram.png?enhanced';
+  
+	// Step 1 — types-counts with filter_dimensions only. No entity axis, no time.
+	// The allotaxonometer can compare ?town=Arlington vs ?town2=Addison.
+	const step1 = `from storywrangler import Storywrangler
+
+client = Storywrangler()
+client.registry.register({
+    # ── Identity ──────────────────────────────────────────────────────
+    "catalog":    "verso",
+    "domain":     "vt-zoning-atlas",
+    "dataset_id": "ngrams",
+
+    # ── Location ──────────────────────────────────────────────────────
+    "data_location": "/data/vt-zoning/ngrams.parquet",
+    "data_format":   "parquet",
+    "description":   "Word frequencies from Vermont zoning bylaws by town.",
+
+    # ── Instrument contract ────────────────────────────────────────────
+    # types-counts: a column of token values and a column of counts.
+    # filter_dimensions are categorical axes exposed as query parameters.
+    "endpoint_schema": {"type": "types-counts"},
+    "transform":       {"filter_dimensions": ["town"]},
+
+    "ownership": {"owner_group": "verso", "contact": "verso@uvm.edu"},
+    "lineage":   {
+	    "repo": "https://github.com/Vermont-Complex-Systems/vt-zoning-atlas"
+	},
+})`;
+
+	// Curl preview for Step 1 — filter_dimensions become bare query parameters.
+	const step1curl = `curl "https://storywrangler.uvm.edu/storywrangler/allotax\\
+  ?domain=vt-zoning-atlas&dataset=ngrams\\
+  &town=Arlington&town2=Addison"`;
+
+	// Step 2 — diff: entity_mapping replaces filter_dimensions.
+	const step1b = `- "transform": {"filter_dimensions": ["town"]},
+
++ "entity_mapping": {"local_id_column": "town", "entity_namespace": "wikidata"},
++ "entities": [
++     {"local_id": "Arlington", "entity_id": "wikidata:Q675558", "entity_name": "Arlington, Vermont"},
++     {"local_id": "Addison",   "entity_id": "wikidata:Q353095", "entity_name": "Addison, Vermont"},
++     # ... one row per town
++ ],`;
+
+	// Curl preview for Step 2 — entity IDs instead of raw filter values.
+	const step1bcurl = `curl "https://storywrangler.uvm.edu/storywrangler/allotax\\
+  ?domain=vt-zoning-atlas&dataset=ngrams\\
+  &entity=wikidata:Q675558&entity2=wikidata:Q353095"`;
+
+	// Step 3 — babynames: year/sex/geo all as plain filter_dimensions (starting state).
+	const step2 = `from storywrangler import Storywrangler
+
+client = Storywrangler()
+client.registry.register({
+    "catalog":    "vcsi",
+    "domain":     "babynames",
+    "dataset_id": "ngrams",
+    "data_location": "/data/babynames/ngrams.parquet",
+    "data_format":   "parquet",
+    "description":   "Baby names by popularity, year, and location.",
+    "endpoint_schema": {"type": "types-counts"},
+    "transform": {
+        "filter_dimensions": ["year", "sex", "geo"],  # year is exact-match only: ?year=1990
+    },
+    "ownership": {"owner_group": "vcsi", "contact": "compstorylab@uvm.edu"},
+    "lineage":   {"repo": "https://github.com/Vermont-Complex-Systems/babynames"},
+})`;
+
+	// Curl preview for filter-only version — year as exact match.
+	const step2curl = `curl "https://storywrangler.uvm.edu/storywrangler/allotax\\
+  ?domain=babynames&dataset=ngrams\\
+  &year=1990&year2=2020\\
+  &geo=united_states&sex=F"`;
+
+	// Diff: move year to time_dimension, add manifest.availability.
+	const step2time = `  "transform": {
+-     "filter_dimensions": ["year", "sex", "geo"],
++     "filter_dimensions": ["sex", "geo"],
++     "time_dimension":    "year",
+  },
+
++ "manifest": {
++     "availability": {
++         "united_states": {"min": 1880, "max": 2022},
++         "quebec":        {"min": 1980, "max": 2022},
++     }
++ },`;
+
+	// Step 3b — diff: remove geo from filter_dimensions, add entity_mapping, upgrade manifest keys.
+	const step2b = `- "filter_dimensions": ["sex", "geo"],
++ "filter_dimensions": ["sex"],
+
+  "manifest": {
+      "availability": {
+-         "united_states": {"min": 1880, "max": 2022},
+-         "quebec":        {"min": 1980, "max": 2022},
++         "wikidata:Q30":  {"min": 1880, "max": 2022},
++         "wikidata:Q176": {"min": 1980, "max": 2022},
+      }
+  },
+
++ "entity_mapping": {"local_id_column": "geo", "entity_namespace": "wikidata"},
++ "entities": [
++     {"local_id": "united_states", "entity_id": "wikidata:Q30",  "entity_name": "United States"},
++     {"local_id": "quebec",        "entity_id": "wikidata:Q176", "entity_name": "Quebec"},
++ ],`;
+
+	// Curl preview — canonical entity IDs after adding entity_mapping.
+	const step3curl = `curl "https://storywrangler.uvm.edu/storywrangler/allotax\\
+  ?domain=babynames&dataset=ngrams\\
+  &entity=wikidata:Q30\\
+  &dates=1990&dates2=2020\\
+  &sex=F"`;
+
+	// Step 4 — wikimedia: parquet_hive + partition_dimensions + non-default column names.
+	const step4 = `from storywrangler import Storywrangler
+
+client = Storywrangler()
+client.registry.register({
+    "domain":     "wikimedia",
+    "dataset_id": "ngrams",
+	  # data_location is the root of the hive tree
+    "data_location": "/netfiles/compethicslab/wikimedia/1grams",
+    "data_format":   "parquet_hive",
+    "description":   "Wikipedia n-gram frequencies by country and date.",
+    "endpoint_schema": {
+        "type":         "types-counts",
+        "type_column":  "ngram",     # non-override when column name differs
+        "count_column": "pv_count",  # non-default
+    },
+    "transform": {
+        "time_dimension": "date",      # hive partition key; callers use ?dates= (standardized)
+        # partition_dimensions: a dict, not a list.
+        # Keys are columns unsafe to mix (daily + monthly = nonsense aggregation).
+        # Values are the safe defaults injected when the caller omits the param.
+        "partition_dimensions": {"granularity": "daily", "ngram_size": 1},
+    },
+    "entity_mapping": {"local_id_column": "country", "entity_namespace": "wikidata"},
+    "entities": [
+        {"local_id": "United States",  "entity_id": "wikidata:Q30",  "entity_name": "United States"},
+        {"local_id": "United Kingdom", "entity_id": "wikidata:Q145", "entity_name": "United Kingdom"},
+        # … ~100 Wikipedia language editions
+    ],
+
+    "ownership": {"owner_group": "vcsi", "contact": "compstorylab@uvm.edu"},
+    "lineage":   {"repo": "https://github.com/Vermont-Complex-Systems/..."},
+})`;
+
+	// DuckDB translation for Step 4 — what the API runs internally per system.
+	const step4duckdb = `FROM read_parquet('1grams/ngram_size=1/**/*.parquet', hive_partitioning=true)
+WHERE country     = 'United States'    -- entity_mapping.local_id_column
+  AND date BETWEEN ? AND ?             -- time_dimension
+  AND granularity = 'daily'            -- partition_dimensions (default injected)`;
+
+	// Curl preview for Step 4 — partition_dimensions passed as regular query params.
+	const step4curl = `curl "https://storywrangler.uvm.edu/storywrangler/allotax\\
+  ?domain=wikimedia&dataset=ngrams\\
+  &entity=wikidata:Q30&entity2=wikidata:Q145\\
+  &dates=2024-10-01,2024-10-31&dates2=2024-10-01,2024-10-31\\
+  &granularity=daily"`;
+</script>
 
 <h1>Registering a dataset</h1>
 
-
-<h2>Specs-free registration</h2>
-
-<p>
-	The simplest use case of registering your dataset is to get access to VCSI instruments, such as the <a href="/docs/tools/allotaxonometer">alloxonometer</a>, which can then be served anywhere on the web. In this case, your submitted dataset must fullfil the  instrument requirements you want to access (e.g. allotaxonometers requires a <code>types-counts</code> endpoint schema, see instrument page). It should also be part of an accepted domain space. By default, endpoints can go in the <code>guest</code> domain space, but specifying a domain space help cluster together related endpoints and increase discovery. If you want to submit a new domain space, you can submit a PR (TODO: add template).
-</p>
-
-<p>
-	If you simply want to make a programmatic use of our instruments, such as integrating the instruments in your codebase, you might be interested in running locally the equivalent packages we use on the platform (calling directly the Rust-backed <code>py-allotax</code> module, for instance). 
-</p>
-
-<h3>The submit.py structure</h3>
-
-<p>
-	A <code>submit.py</code> is a single call to <code>register()</code> with a Python dict. The dict has five logical groups of fields:
-</p>
-
-<ul>
-	<li><strong>Identity</strong> — the two-part namespace key: <code>domain/dataset_id</code></li>
-	<li>
-		<strong>Location</strong> — where the data lives and in what format. The registry stores a
-		pointer; it never copies the data.
-	</li>
-	<li>
-		<strong>Format config</strong> — storage-format-specific metadata: file paths, partitioning
-		scheme, coverage ranges. What the API needs to locate and query the data.
-	</li>
-	<li>
-		<strong>Provenance</strong> — the <code>lineage</code> object: where raw data came from
-		(<code>sources</code>), which registered datasets it was built on (<code>derived_from</code>),
-		and known downstream consumers (<code>consumers</code>).
-	</li>
-	<li>
-		<strong>Ownership</strong> — who maintains it and how durable the storage is
-		(<code>storage_risk</code>).
-	</li>
-	
-</ul>
-
-For the instrument part, we have the following fields:
-
-<ul>
-	<li>
-		<code>filter_dimensions</code>
-	</li>
-	<li>
-		<strong>Endpoint schema</strong> — declares what query types the dataset supports, so
-		instruments can determine compatibility without hardcoding dataset-specific logic.
-	</li>
-</ul>
-
-<h2>Choosing a storage format</h2>
-
-<p>
-	The registry accommodates four <code>data_format</code> values. The right choice depends on how
-	your group manages its data, not on what the platform prefers.
-</p>
-
-<table>
-	<thead>
-		<tr>
-			<th>Format</th>
-			<th>Best for</th>
-			<th><code>submit.py</code> complexity</th>
-		</tr>
-	</thead>
-	<tbody>
-		<tr>
-			<td><code>ducklake</code></td>
-			<td>Groups already running a DuckLake catalog</td>
-			<td>Medium — must query DuckLake metadata tables for file paths and coverage, but no manual directory scanning</td>
-		</tr>
-		<tr>
-			<td><code>parquet_hive</code></td>
-			<td>Groups that drop files on netfiles and want to keep it simple</td>
-			<td>Medium — must manually scan partitions and compute statistics</td>
-		</tr>
-		<tr>
-			<td><code>duckdb</code></td>
-			<td>Small, stable, managed datasets (survey snapshots, historical records)</td>
-			<td>Low — single file, no partitioning</td>
-		</tr>
-		<tr>
-			<td><code>parquet</code></td>
-			<td>Single flat parquet file, no partitioning or catalog</td>
-			<td>Low — simplest case; no format_config sub-fields needed</td>
-		</tr>
-	</tbody>
-</table>
-
-<p>
-	<strong>DuckLake</strong> — if your group already uses DuckLake, <code>submit.py</code> reads
-	file paths and coverage from the catalog's metadata tables rather than scanning directories
-	manually. The tradeoff is operational overhead — you need a running DuckLake catalog. If your
-	group is not already comfortable with DuckLake, starting with <code>parquet_hive</code> and
-	migrating later is a reasonable path.
-</p>
-
-<p>
-	<strong>parquet_hive</strong> — the most common choice for groups that produce data via a pipeline
-	and write the output to netfiles. No catalog, no schema inference — the adapter scans the
-	partition layout and computes statistics explicitly.
-</p>
-
-<h2>Specification-free registration, with accompanying endpoints</h2>
-
-<!-- Pattern 1 — opaque local keys (explicit entity rows required):
-
-The column holds values that have no intrinsic meaning outside the dataset — state abbreviations, snake_case names, internal IDs. The platform has no way to know what "VT" or "town_of_burlington" maps to without being told. You have to supply entity rows:
-
-
-"entity_mapping": {"local_id_column": "state", "entity_namespace": "wikidata"},
-"entities": [
-    {"local_id": "VT", "entity_id": "wikidata:Q16551", "entity_name": "Vermont"},
-    ...
-] 
-	
-When a query comes in for wikidata:Q16551, resolve_entity looks it up in the registry_entity_mappings table and gets back local_id = "VT" to use in the SQL WHERE state = ?.
-
-Pattern 2 — global-identifier column (no entity rows needed):
-
-The column already holds values from a recognized namespace — specifically full URLs like https://openalex.org/A5002034958. There's a bijection between the canonical form (openalex:A5002034958) and what's stored in the column. The platform just needs to know the namespace to compute that mapping.
-
-This is the _derive_local_id fallback added to resolve_entity in query_utils.py:
-
-
-_NAMESPACE_URL_PREFIX = {
-    "openalex": "https://openalex.org/",
-    "doi":      "https://doi.org/",
-}
-
-# When no entity row is found, look up entity_namespace from the registry entry
-# and derive the stored value directly:
-# openalex:A5002034958  →  https://openalex.org/A5002034958
-
--->
+<div class="not-prose my-8">
+	<enhanced:img src={diagram} alt="Storywrangler platform diagram: a POST request with endpoint_schema, data_location, and data_format enters the Storywrangler Platform (a decision diamond), which validates schema and data availability, reads from File Storage below, and returns an allotax JSON response." class="w-full dark:invert" />
+</div>
 
 
 <p>
-	To serve any dataset to users, say you want the <code>ngrams</code> datasets to be available to all, an endpoint ought to be added to the platform. The process is straightforward (TODO: add template to do it), but that will need to go through a PR as we need to review it. 
+	The simplest use case of registering your dataset is to get access to VCSI instruments, such as
+	the <a href="/docs/tools/allotaxonometer">allotaxonometer</a>, which can then be served anywhere
+	on the web. In this case, your submitted dataset must fulfil the instrument requirements you want
+	to access (e.g. the allotaxonometer requires a <code>types-counts</code> endpoint schema — see
+	the instrument page). It should also be part of an accepted domain. By default, endpoints can go
+	in the <code>guest</code> domain, but specifying a domain helps cluster related datasets and
+	improves discovery.
 </p>
-
-<h2>Registering interoperable datasets</h2>
 
 <p>
-	Now, if you are interested in making your datasets interoperable with  the rest of the data on the platform, you will need to provide the mapping between your local identifiers and the global identifier namespace available on the platform and specified by the <a href="/docs/specification">Storywrangler-Specification</a>. We provide an SDK to validate the specification, facilitating the submission process. In this case, malformed identifiers are rejected locally before anything reaches the server.
+	The minimal working registration. <code>types-counts</code> is the endpoint type for any
+	rank-frequency distribution: a column of token values and a column of counts. At least one
+	comparison axis is required — without one the API rejects the registration, since the
+	allotaxonometer has no way to distinguish system 1 from system 2.
+	<code>filter_dimensions</code> are categorical axes that serve as that comparison axis:
+	the allotaxonometer compares <code>?town=Arlington vs ?town2=Addison</code>. At query time,
+	omitting the parameter aggregates over all its values.
 </p>
 
-<h2>Entity mapping</h2>
+<Code.Root code={step1} lang="python">
+	<Code.CopyButton />
+</Code.Root>
+
+<p>Once registered, each <code>filter_dimensions</code> entry becomes a bare query parameter on the allotaxonometer. Comparing Arlington vs Addison:</p>
+
+<Code.Root code={step1curl} lang="bash" hideLines={true}>
+</Code.Root>
+
+<p>Without any entity mapping, we adopt the convention of simply incrementing provided filter dimensions when querying the API, e.g. <code>town</code> and <code>town2</code>.</p>
+
+<h2>Providing entity mapping</h2>
 
 <p>
-	The <code>entity_mapping</code> field covers <strong>filter-dimension entities</strong> — things a
-	caller can GROUP BY or FILTER ON in an instrument query. It is not for measured values. Person
-	names are the content of babynames, not its dimensions; Wikipedia article titles are the content
-	of ngrams, not dimensions.
+	Drop <code>filter_dimensions</code> and add <code>entity_mapping</code> instead. The SDK
+	validates all <code>entity_id</code> values locally before anything reaches the server.
+	This also standardizes the API parameter: regardless of what the local column is called
+	(<code>town</code>, <code>geo</code>, <code>country</code>…), callers always use
+	<code>?entity=</code> and <code>?entity2=</code> — accepting either a canonical ID
+	(<code>wikidata:Q675558</code>) or the raw local value (<code>Arlington</code>):
 </p>
 
-<p>Adapter vocabularies are always bounded by entity type:</p>
+<Code.Root code={step1b} lang="diff" hideLines={true}>
+</Code.Root>
 
-<table>
-	<thead>
-		<tr>
-			<th>Entity type</th>
-			<th>Typical count</th>
-		</tr>
-	</thead>
-	<tbody>
-		<tr><td>Countries / territories</td><td>11–200</td></tr>
-		<tr><td>Researchers / ORCID holders</td><td>hundreds to tens of thousands</td></tr>
-		<tr><td>Topics / fields (controlled vocabulary)</td><td>hundreds</td></tr>
-		<tr><td>Wikipedia articles, person names</td><td>millions — never an adapter vocabulary</td></tr>
-	</tbody>
-</table>
+<p>The corresponding curl command:</p>
+
+<Code.Root code={step1bcurl} lang="bash" hideLines={true}>
+</Code.Root>
+
+<p>By analogy to <code>filter_dimension</code>, the API now expect <code>entity</code> and <code>entity2</code> keys but values can either be the standardized or local identifiers. </p>
+
+<h2>Adding a time axis</h2>
 
 <p>
-	The SDK batches large entity lists automatically (~2,000 per request). See the
-	<a href="/docs/reference#entity-types">Field reference</a> for all supported
-	<code>entity_id</code> namespace prefixes (<code>wikidata</code>, <code>orcid</code>,
-	<code>ror</code>, etc.).
+	<code>transform.time_dimension</code> opens a date-range axis for <code>BETWEEN</code> queries.
+	The meaningful comparisons are same location across two time ranges (e.g. US 1990 vs US 2020),
+	or same time range across two locations (e.g. US 2020 vs Quebec 2020). This is also the first
+	registration that populates <code>manifest.availability</code> — year coverage per location,
+	letting the UI know valid ranges without querying the data.
 </p>
 
+<p>
+	Start without entity mapping: <code>geo</code> stays in <code>filter_dimensions</code> and
+	callers pass raw local IDs directly — <code>?geo=united_states</code> — with no namespace
+	resolution. The manifest is keyed by the same local IDs.
+</p>
 
-<h3>The submit.py structure additional fields</h3>
+<Code.Root code={step2} lang="python">
+	<Code.CopyButton />
+</Code.Root>
 
-<ul>
-	<li>
-		<strong>Entity mapping</strong> — maps dataset-local column values to canonical IDs
-		(e.g. <code>wikidata:Q30</code>). 
-	</li>
-</ul>
+<p>And the corresponding curl command:</p>
 
+<Code.Root code={step2curl} lang="bash" hideLines={true}>
+</Code.Root>
 
+<p>Moving <code>year</code> to <code>time_dimension</code> unlocks range queries and standardizes
+the API parameter: regardless of the underlying column name (<code>year</code>, <code>date</code>…),
+callers always use <code>?dates=</code> and <code>?dates2=</code>. <code>manifest.availability</code>
+is optional — it tells the UI what years are valid without touching the data, but the endpoint
+works without it:</p>
+
+<Code.Root code={step2time} lang="diff" hideLines={true}>
+</Code.Root>
+
+<p>
+	Adding <code>entity_mapping</code> promotes <code>geo</code> out of
+	<code>filter_dimensions</code> and upgrades the manifest keys to canonical entity IDs:
+</p>
+
+<Code.Root code={step2b} lang="diff" hideLines={true}>
+</Code.Root>
+
+<p>The corresponding curl command:</p>
+
+<Code.Root code={step3curl} lang="bash" hideLines={true}>
+</Code.Root>
+
+<h2>hive-partitioned storage</h2>
+
+<p>
+	The final form introduces <a href="https://duckdb.org/docs/current/data/partitioning/hive_partitioning">hive_partitioning</a> by specifying the `data_format`,  the relevant <code>partition_dimensions</code>. When using the hive partitioning strategy, <code>data_location</code> encodes the root of the hive tree:
+</p>
+
+<pre><code>1grams/                          ← data_location
+  ngram_size=1/
+    granularity=daily/
+      country=United%20States/
+        date=2024-01-01/data.parquet</code></pre>
+
+<p>
+	The subsequent directories below the data root should be of the form <code>col=val/</code> . This is geared towards performance, as duckdb will only read the relevant files when querying the data. This is particularly valuable in web apps where users could benefit from exploring arbitrary date ranges.
+</p>
+
+<Code.Root code={step4} lang="python">
+	<Code.CopyButton />
+</Code.Root>
+
+<p>
+	Each registration field maps directly to a clause in the DuckDB query the API runs per
+	system — it really is that simple:
+</p>
+
+<Code.Root code={step4duckdb} lang="sql" hideLines={true}>
+</Code.Root>
+
+<p>
+	That result set is handed to the instrument as-is. Partition dimensions are passed as regular
+	query params — the platform validates them against the introspected <code>filter_values</code>
+	and injects defaults for any omitted ones:
+</p>
+
+<Code.Root code={step4curl} lang="bash" hideLines={true}>
+</Code.Root>
 
 <h2>Case studies</h2>
 
 <p>
-	Two reference pipelines show what a complete <code>submit.py</code> looks like in practice, each with a different storage format:
+	The <a href="/docs/case-studies/wikimedia">Wikimedia pipeline</a> shows what a complete
+	<code>submit.py</code> looks like for <code>parquet_hive</code>: raw Wikipedia dump → silver
+	n-gram frequencies, partitioned by country, granularity, and date. Covers
+	<code>transform.partition_dimensions</code> and <code>manifest.availability</code>.
 </p>
-
-<ul>
-	<li>
-		<a href="/docs/case-studies/wikimedia">Wikimedia pipeline</a> — <code>parquet_hive</code>.
-		Raw Wikipedia dump → Silver n-gram frequencies, partitioned by date and country.
-	</li>
-	<li>
-		<a href="/docs/case-studies/babynames">Babynames pipeline</a> — <code>ducklake</code>.
-		SSA + Québec birth records managed via a DuckLake catalog; shows how the catalog eliminates
-		manual partition scanning.
-	</li>
-</ul>

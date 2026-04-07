@@ -2,10 +2,15 @@
 
 Derives two things at registration time:
   - data_schema    : column names + types (cheap — reads parquet footer only)
-  - filter_values  : distinct values per filter_dimension (scan — skipped for parquet_hive)
+  - filter_values  : distinct values per filter_dimension
 
 Uses DuckDB (already available) so no extra dependencies.
-Failures are silently logged and never block registration.
+For parquet_hive, hive_partitioning=true is used throughout:
+  - DESCRIBE reads partition columns alongside data columns
+  - DISTINCT queries read directory names (not file contents) — cheap even for
+    large datasets since DuckDB resolves partition values from the file tree.
+
+Schema introspection failure (empty data_schema) causes the registration endpoint to reject with 422.
 """
 
 import logging
@@ -14,52 +19,29 @@ from typing import Any, Dict, List, Optional
 log = logging.getLogger(__name__)
 
 
-def _sample_path_expr(dataset) -> Optional[str]:
-    """Return a DuckDB read_parquet() path expression sampling one file.
+def _path_expr(dataset) -> Optional[str]:
+    """Return a DuckDB read_parquet() expression for this dataset.
 
-    Used for schema introspection only (reads parquet footer — cheap).
-    Accepts a DatasetCreate Pydantic object (at registration time).
-    Returns None if no path can be determined.
+    Includes hive_partitioning=true for parquet_hive so that partition columns
+    (entity, time, granularity, ngram_size, etc.) appear in DESCRIBE output
+    and are efficiently scannable via metadata rather than file contents.
     """
     fmt = dataset.data_format
+    loc = dataset.data_location
 
-    if fmt == "parquet":
-        loc = dataset.data_location
-        return f"'{loc}'" if loc else None
-
-    if fmt in ("ducklake", "duckdb"):
-        fc = dataset.format_config
-        tm = (fc.tables_metadata or {}) if fc else {}
-        for key, files in tm.items():
-            if key != "adapter" and files:
-                return f"'{files[0]}'"  # sample first file only — schema is uniform
+    if not loc:
+        return None
 
     if fmt == "parquet_hive":
-        loc = dataset.data_location
-        return f"'{loc}/**/*.parquet'" if loc else None
+        return f"read_parquet('{loc}/**/*.parquet', hive_partitioning=true)"
+
+    if fmt == "parquet":
+        if isinstance(loc, list):
+            quoted = ", ".join(f"'{p}'" for p in loc)
+            return f"read_parquet([{quoted}])"
+        return f"read_parquet('{loc}')"
 
     return None
-
-
-def _full_path_expr(dataset) -> Optional[str]:
-    """Return a DuckDB read_parquet() path expression covering all files.
-
-    Used for filter_values scans where distinct values must span the whole dataset.
-    Falls back to _sample_path_expr for formats that already glob everything.
-    """
-    fmt = dataset.data_format
-
-    if fmt in ("ducklake", "duckdb"):
-        fc = dataset.format_config
-        tm = (fc.tables_metadata or {}) if fc else {}
-        for key, files in tm.items():
-            if key != "adapter" and files:
-                if len(files) == 1:
-                    return f"'{files[0]}'"
-                files_expr = ", ".join(f"'{f}'" for f in files)
-                return f"[{files_expr}]"
-
-    return _sample_path_expr(dataset)
 
 
 def introspect(conn, dataset) -> Dict[str, Any]:
@@ -67,40 +49,44 @@ def introspect(conn, dataset) -> Dict[str, Any]:
 
     Returns a dict with any subset of:
       {
-        "data_schema": {"col": "TYPE", ...},        # → stored in format_config
-        "filter_values": {"dim": ["val1", ...], ...} # → stored in endpoint_schema
+        "data_schema": {"col": "TYPE", ...},        # → stored in data_schema column
+        "filter_values": {"dim": ["val1", ...], ...} # → stored in filter_values column
       }
 
     Never raises — returns {} on any error.
     """
     result: Dict[str, Any] = {}
 
-    sample_expr = _sample_path_expr(dataset)
-    if not sample_expr:
+    path_expr = _path_expr(dataset)
+    if not path_expr:
         return result
 
-    # ── schema (cheap: reads parquet footer metadata only) ─────────────────────
+    # ── schema (cheap: reads parquet footer + hive directory metadata) ──────────
     try:
         rows = conn.execute(
-            f"DESCRIBE SELECT * FROM read_parquet({sample_expr})"
+            f"DESCRIBE SELECT * FROM {path_expr}"
         ).fetchall()
         result["data_schema"] = {r[0]: r[1] for r in rows}
     except Exception as e:
-        log.debug("Schema introspection failed for %s: %s", sample_expr, e)
+        log.debug("Schema introspection failed for %s: %s", path_expr, e)
 
-    # ── filter values (requires a scan — skip for parquet_hive) ────────────────
-    ep = dataset.endpoint_schema
-    filter_dims: List[str] = (ep.filter_dimensions or []) if ep else []
+    # ── filter values ────────────────────────────────────────────────────────────
+    # Source: transform.filter_dimensions + transform.partition_dimensions.
+    # For parquet_hive, partition columns are resolved from directory names —
+    # no file contents are read, making this efficient even for large datasets.
+    tr = dataset.transform
+    filter_dims: List[str] = list((tr.filter_dimensions or []) if tr else [])
+    partition_dims: List[str] = list((tr.partition_dimensions or []) if tr else [])
+    all_dims = filter_dims + partition_dims
 
-    if not filter_dims or dataset.data_format == "parquet_hive":
-        return result  # hive datasets could be huge — skip
+    if not all_dims:
+        return result
 
-    full_expr = _full_path_expr(dataset)
     filter_values: Dict[str, List[Any]] = {}
-    for dim in filter_dims:
+    for dim in all_dims:
         try:
             rows = conn.execute(
-                f"SELECT DISTINCT {dim} FROM read_parquet({full_expr}) "
+                f"SELECT DISTINCT {dim} FROM {path_expr} "
                 f"WHERE {dim} IS NOT NULL ORDER BY {dim}"
             ).fetchall()
             filter_values[dim] = [r[0] for r in rows]

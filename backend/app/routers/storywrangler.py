@@ -6,7 +6,7 @@ Currently includes:
              Generic — works for any registered dataset with endpoint_schema.type='types-counts'.
 """
 
-from typing import List, Optional
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,7 +14,7 @@ from sqlmodel import select
 
 from ..core.database import get_session
 from ..core.duckdb_client import get_duckdb_client
-from ..core.query_utils import load_system, resolve_entity
+from ..core.query_utils import load_system, parse_dates, resolve_entity
 from ..models.registry import RegistryEntry
 
 router = APIRouter()
@@ -104,14 +104,14 @@ async def allotaxonometer(
     dataset: str = Query("ngrams", description="Dataset ID within the domain"),
     entity: Optional[str] = Query(None, description="Global entity ID for system 1, e.g. 'wikidata:Q30' (United States). Optional — omit for datasets using filter_dimensions as the comparison axis."),
     entity2: Optional[str] = Query(None, description="Global entity ID for system 2, e.g. 'wikidata:Q145' (United Kingdom). Optional — omit for datasets using filter_dimensions as the comparison axis."),
-    dates: str = Query("2024-10-01,2024-10-31", description="Date/year range for system 1. Single value '2024-10-01' or range '2024-10-01,2024-10-31'"),
-    dates2: str = Query("2024-11-01,2024-11-30", description="Date/year range for system 2"),
+    dates: Optional[str] = Query(None, description="Date/year range for system 1. Single value '2024-10-01' or range '2024-10-01,2024-10-31'. Omit to load all time."),
+    dates2: Optional[str] = Query(None, description="Date/year range for system 2. Omit to load all time."),
     granularity: str = Query("daily", description="Hive granularity (parquet_hive only): daily | weekly | monthly"),
     alpha: float = Query(1.0, description="RTD alpha parameter"),
     alphas: Optional[str] = Query(None, description="Comma-separated alphas for multi-alpha mode, e.g. '0.5,1.0,2.0'"),
     ngram_limit: int = Query(10000, description="Max types to load per system before computing"),
     wordshift_limit: int = Query(200, description="Truncate wordshift output to top N entries"),
-    n: int = Query(1, description="N-gram size (1 = unigrams, 2 = bigrams). Only used when endpoint_schema.ngram_sizes is set."),
+    n: int = Query(1, description="N-gram size (1 = unigrams, 2 = bigrams). Only used when 'ngram_size' is in transform.filter_dimensions."),
     db: AsyncSession = Depends(get_session),
 ):
     """Compares two type-frequency systems using the allotaxonometer (rank-turbulence divergence).
@@ -121,11 +121,10 @@ async def allotaxonometer(
 
     - **entity vs entity** — e.g. US Wikipedia vs UK Wikipedia
     - **dates vs dates** — e.g. October vs November
-    - **entity × dates** — different entity *and* different period
     - **filter-only** — e.g. `sex=M` vs `sex2=F` (skipping entity registry)
 
     > **Filter dimensions** — look up a dataset's available filter dimensions via
-    > `GET /registry/{domain}/{dataset_id}` (`endpoint_schema.filter_dimensions`).
+    > `GET /registry/{domain}/{dataset_id}` (`transform.filter_dimensions`).
     > Pass them as extra query params using the `dim` / `dim2` suffix convention:
     > `?sex=M&sex2=F` compares boy vs girl babynames, `?geo=US&geo2=CA` compares countries.
     > Entity registration is optional when a filter dimension serves as the comparison axis.
@@ -147,34 +146,45 @@ async def allotaxonometer(
             detail="Dataset does not support the types-counts endpoint. Register with endpoint_schema.type='types-counts'.",
         )
 
-    if dataset_obj.data_format == "parquet_hive":
-        granularities = ep.get("granularities", {})
-        if not granularity:
-            raise HTTPException(
-                status_code=400,
-                detail=f"granularity is required for parquet_hive datasets. Options: {sorted(granularities)}",
-            )
-        if granularity not in granularities:
-            raise HTTPException(
-                status_code=400,
-                detail=f"granularity must be one of {sorted(granularities)}",
-            )
+    fv = dataset_obj.filter_values or {}
+    tr = dataset_obj.transform or {}
+    filter_dims = (tr.get("filter_dimensions") or []) if tr else []
+    partition_map = (tr.get("partition_dimensions") or {}) if tr else {}
+    # backward compat: old registrations put partition cols in filter_dimensions as a list
+    if isinstance(partition_map, list):
+        partition_map = {dim: None for dim in partition_map}
+    partition_dims = list(partition_map.keys())
+    all_dims = filter_dims + partition_dims
 
-    ngram_sizes = ep.get("ngram_sizes")
-    if ngram_sizes is not None and n not in ngram_sizes:
-        raise HTTPException(
-            status_code=400,
-            detail=f"n must be one of {ngram_sizes}",
-        )
-
-    filter_dims = ep.get("filter_dimensions") or []
+    # Step 1 — generic: any declared dim passed as ?dim=val / ?dim2=val
     qp = request.query_params
-    filter_vals1 = {dim: qp[dim]       for dim in filter_dims if dim in qp}
-    filter_vals2 = {dim: qp[f"{dim}2"] for dim in filter_dims if f"{dim}2" in qp}
+    filter_vals1 = {dim: qp[dim]       for dim in all_dims if dim in qp}
+    filter_vals2 = {dim: qp[f"{dim}2"] for dim in all_dims if f"{dim}2" in qp}
 
-    def parse_dates(s: str) -> List[str]:
-        parts = s.split(",")
-        return [parts[0], parts[0]] if len(parts) == 1 else [parts[0], parts[1]]
+    # Step 2 — alias injection: n → ngram_size (n is not a dim name).
+    # Use the raw query param to detect explicit caller intent before defaults run.
+    if "ngram_size" in all_dims:
+        if "n" in qp and "ngram_size" not in filter_vals1:
+            filter_vals1["ngram_size"] = n
+        if "n2" in qp and "ngram_size" not in filter_vals2:
+            filter_vals2["ngram_size"] = int(qp["n2"])
+
+    # Step 3 — partition defaults: inject default for any partition_dim still missing.
+    # Default is the value in the partition_dimensions dict (None = no default, caller must provide).
+    for dim, default_val in partition_map.items():
+        if default_val is not None:
+            filter_vals1.setdefault(dim, default_val)
+            filter_vals2.setdefault(dim, default_val)
+
+    # Validate assembled filter values against pre-introspected distinct values
+    for vals_dict in (filter_vals1, filter_vals2):
+        for dim, val in vals_dict.items():
+            valid = fv.get(dim, [])
+            if valid and val not in valid:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"{dim} must be one of {sorted(map(str, valid))}",
+                )
 
     dr1 = parse_dates(dates)
     dr2 = parse_dates(dates2)
@@ -199,8 +209,8 @@ async def allotaxonometer(
 
     try:
         conn = get_duckdb_client().connect()
-        sys1 = load_system(conn, dataset_obj, local_id1, dr1, filter_vals1, granularity, ngram_limit, n=n)
-        sys2 = load_system(conn, dataset_obj, local_id2, dr2, filter_vals2, granularity, ngram_limit, n=n)
+        sys1 = load_system(conn, dataset_obj, local_id1, dr1, filter_vals1, ngram_limit)
+        sys2 = load_system(conn, dataset_obj, local_id2, dr2, filter_vals2, ngram_limit)
     except HTTPException:
         raise
     except Exception as e:

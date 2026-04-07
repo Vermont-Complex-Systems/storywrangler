@@ -89,7 +89,7 @@ async def _upsert_entities(
             "data_location": "/data/babynames/names.parquet",
             "data_format": "parquet",
             "description": "US baby name frequencies by state, year, and sex.",
-            "format_config": {},
+            "manifest": {},
         },
         "derived": ["data_schema", "filter_values"],
     }),
@@ -115,20 +115,36 @@ async def register_dataset(
     except Exception as e:
         log.warning("Parquet introspection failed for %s/%s: %s", dataset.domain, dataset.dataset_id, e)
 
+    if "data_schema" not in derived:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Data not accessible at '{dataset.data_location}'. "
+                "Ensure the path exists and is available to the API before registering."
+            ),
+        )
+
     if dataset.endpoint_schema and dataset.endpoint_schema.type == "types-counts":
         ep = dataset.endpoint_schema
 
-        # 1. Require at least one comparison axis.
-        # entity_mapping counts if it declares a local_id_column (with or without
-        # entity_namespace / entities rows — namespace-only registrations are valid).
-        has_entity = bool(dataset.entity_mapping)
-        has_filter = bool(ep.filter_dimensions)
-        if not has_entity and not has_filter:
+        # 1. Require at least one comparison axis so the allotaxonometer can distinguish
+        # system 1 from system 2.  Any of the four axes is sufficient:
+        #   entity_mapping        → ?entity=X  vs ?entity2=Y
+        #   time_dimension        → ?dates=D1  vs ?dates2=D2
+        #   filter_dimensions     → ?sex=M     vs ?sex2=F
+        #   partition_dimensions  → ?gran=daily vs ?gran2=weekly
+        has_entity    = bool(dataset.entity_mapping)
+        has_time      = bool(dataset.transform and dataset.transform.time_dimension)
+        has_filter    = bool(dataset.transform and dataset.transform.filter_dimensions)
+        has_partition = bool(dataset.transform and dataset.transform.partition_dimensions)
+        if not any([has_entity, has_time, has_filter, has_partition]):
             raise HTTPException(
                 status_code=422,
                 detail=(
-                    "types-counts datasets require at least one comparison axis: "
-                    "set entity_mapping (with entities) or declare filter_dimensions. "
+                    "types-counts datasets require at least one comparison axis so the "
+                    "allotaxonometer can distinguish system 1 from system 2. Declare one of: "
+                    "entity_mapping, transform.time_dimension, transform.filter_dimensions, "
+                    "or transform.partition_dimensions. "
                     "See https://github.com/vermont-complex-systems/Storywrangler-Specification for the spec."
                 ),
             )
@@ -150,6 +166,52 @@ async def register_dataset(
                     ),
                 )
 
+    if dataset.endpoint_schema and dataset.endpoint_schema.type == "time-series":
+        ep = dataset.endpoint_schema
+
+        # 1. Require transform.time_dimension — a time series without a time column is invalid.
+        if not (dataset.transform and dataset.transform.time_dimension):
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "time-series datasets require transform.time_dimension to declare the temporal column "
+                    "(e.g. 'year' or 'date'). "
+                    "See https://github.com/vermont-complex-systems/Storywrangler-Specification for the spec."
+                ),
+            )
+
+        # 2. Require at least one groupable dimension.
+        has_filter    = bool(dataset.transform.filter_dimensions)
+        has_partition = bool(dataset.transform.partition_dimensions)
+        if not has_filter and not has_partition:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "time-series datasets require at least one groupable dimension: "
+                    "declare filter_dimensions or partition_dimensions in transform. "
+                    "See https://github.com/vermont-complex-systems/Storywrangler-Specification for the spec."
+                ),
+            )
+
+        # 3. If we could read the schema, verify all declared columns exist.
+        data_schema = derived.get("data_schema") or {}
+        if data_schema:
+            time_col    = dataset.transform.time_dimension
+            count_col   = ep.count_column or "count"
+            filter_cols = list(dataset.transform.filter_dimensions or [])
+            expected    = [time_col, count_col] + filter_cols
+            missing     = [c for c in expected if c not in data_schema]
+            if missing:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        f"Column(s) {missing} not found in dataset schema {sorted(data_schema)}. "
+                        "Verify transform.time_dimension, endpoint_schema.count_column (defaults to 'count'), "
+                        "and transform.filter_dimensions match the actual column names. "
+                        "See https://github.com/vermont-complex-systems/Storywrangler-Specification for the spec."
+                    ),
+                )
+
     # ── Upsert ──────────────────────────────────────────────────────────────────
     result = await db.execute(
         select(RegistryEntry).where(
@@ -163,16 +225,26 @@ async def register_dataset(
     def _dump(obj) -> dict | None:
         return obj.model_dump(mode="json") if obj is not None else None
 
+    # Extract partition_index from manifest into its own DB column.
+    # This keeps manifest small (fast summary responses) while the
+    # full index is available via full=True.
+    manifest_dump = _dump(dataset.manifest) or {}
+    partition_index = manifest_dump.pop("partition_index", None)
+    manifest_small = manifest_dump  # manifest without the large partition_index
+
     if existing:
         existing.data_location = dataset.data_location
         existing.data_format = dataset.data_format
         existing.description = dataset.description
-        existing.format_config = _dump(dataset.format_config)
+        existing.manifest = manifest_small
         existing.entity_mapping = _dump(dataset.entity_mapping)
         existing.endpoint_schema = _dump(dataset.endpoint_schema)
+        existing.transform = _dump(dataset.transform)
         existing.catalog = dataset.catalog
         existing.ownership = _dump(dataset.ownership)
         existing.lineage = _dump(dataset.lineage)
+        if partition_index is not None:
+            existing.partition_index = partition_index
         await db.commit()
         await db.refresh(existing)
         msg: Dict[str, Any] = {"message": f"RegistryEntry '{dataset.dataset_id}' updated successfully"}
@@ -184,11 +256,13 @@ async def register_dataset(
             data_format=dataset.data_format,
             description=dataset.description,
             catalog=dataset.catalog,
-            format_config=_dump(dataset.format_config),
+            manifest=manifest_small,
             entity_mapping=_dump(dataset.entity_mapping),
             endpoint_schema=_dump(dataset.endpoint_schema),
+            transform=_dump(dataset.transform),
             ownership=_dump(dataset.ownership),
             lineage=_dump(dataset.lineage),
+            partition_index=partition_index,
         )
         db.add(db_entry)
         await db.commit()
@@ -200,7 +274,7 @@ async def register_dataset(
                 "data_location": db_entry.data_location,
                 "data_format": db_entry.data_format,
                 "description": db_entry.description,
-                "format_config": db_entry.format_config,
+                "manifest": db_entry.manifest,
             },
         }
 
@@ -212,16 +286,12 @@ async def register_dataset(
 
     entry = existing if existing else db_entry
 
-    # Persist introspection results derived before the DB write.
+    # Persist introspection results into their own dedicated columns.
     if derived:
-        fc = dict(entry.format_config or {})
         if "data_schema" in derived:
-            fc["data_schema"] = derived["data_schema"]
-            entry.format_config = fc
-        ep_stored = dict(entry.endpoint_schema or {})
+            entry.data_schema = derived["data_schema"]
         if "filter_values" in derived:
-            ep_stored["filter_values"] = derived["filter_values"]
-            entry.endpoint_schema = ep_stored
+            entry.filter_values = derived["filter_values"]
         await db.commit()
         msg["derived"] = list(derived.keys())
 
@@ -281,9 +351,12 @@ _SUMMARY_COLUMNS = [
     RegistryEntry.domain, RegistryEntry.dataset_id,
     RegistryEntry.data_location, RegistryEntry.data_format,
     RegistryEntry.description, RegistryEntry.catalog,
+    RegistryEntry.manifest,    # now always small (availability only — partition_index excluded)
+    RegistryEntry.data_schema,      # introspected column types — small, useful for SDK consumers
     RegistryEntry.entity_mapping, RegistryEntry.lineage,
-    RegistryEntry.endpoint_schema,
+    RegistryEntry.endpoint_schema,  # query contract without filter_values
     RegistryEntry.created_at, RegistryEntry.updated_at,
+    # excluded: filter_values (medium), partition_index (can be large)
 ]
 
 
@@ -295,7 +368,7 @@ _SUMMARY_COLUMNS = [
         "data_location": "/data/babynames/names.parquet",
         "data_format": "parquet",
         "description": "US baby name frequencies by state, year, and sex.",
-        "format_config": {"data_schema": {"year": "int32", "sex": "varchar", "types": "varchar", "counts": "int64"}},
+        "manifest": {"data_schema": {"year": "int32", "sex": "varchar", "types": "varchar", "counts": "int64"}},
         "entity_mapping": None,
         "lineage": {},
         "endpoint_schema": {"type": "types-counts", "time_dimension": "year", "filter_dimensions": ["sex"]},
@@ -319,22 +392,28 @@ async def get_dataset_info(
         ds = result.scalar_one_or_none()
         if not ds:
             raise HTTPException(status_code=404, detail=f"RegistryEntry '{domain}/{dataset_id}' not found")
+        # Re-inject partition_index into manifest for a clean response shape.
+        manifest_full = dict(ds.manifest or {})
+        if ds.partition_index is not None:
+            manifest_full["partition_index"] = ds.partition_index
         return {
             "domain": ds.domain,
             "dataset_id": ds.dataset_id,
             "data_location": ds.data_location,
             "data_format": ds.data_format,
             "description": ds.description,
-            "format_config": ds.format_config or {},
+            "manifest": manifest_full,
+            "data_schema": ds.data_schema,
             "entity_mapping": ds.entity_mapping,
             "lineage": ds.lineage,
             "endpoint_schema": ds.endpoint_schema,
+            "filter_values": ds.filter_values,
             "created_at": ds.created_at,
             "updated_at": ds.updated_at,
         }
 
-    # Non-full: skip format_config (can be MB-sized) and strip filter_values
-    # from endpoint_schema so the summary response stays lightweight.
+    # Non-full: lightweight query — skips filter_values and partition_index.
+    # manifest and data_schema are always small and included.
     result = await db.execute(
         select(RegistryEntry).options(load_only(*_SUMMARY_COLUMNS)).where(*where)
     )
@@ -342,17 +421,17 @@ async def get_dataset_info(
     if not ds:
         raise HTTPException(status_code=404, detail=f"RegistryEntry '{domain}/{dataset_id}' not found")
 
-    ep = ds.endpoint_schema or {}
     return {
         "domain": ds.domain,
         "dataset_id": ds.dataset_id,
         "data_location": ds.data_location,
         "data_format": ds.data_format,
         "description": ds.description,
-        "format_config": {},
+        "manifest": ds.manifest or {},
+        "data_schema": ds.data_schema,
         "entity_mapping": ds.entity_mapping,
         "lineage": ds.lineage,
-        "endpoint_schema": {k: v for k, v in ep.items() if k != "filter_values"},
+        "endpoint_schema": ds.endpoint_schema,
         "created_at": ds.created_at,
         "updated_at": ds.updated_at,
     }

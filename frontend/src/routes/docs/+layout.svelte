@@ -24,6 +24,7 @@
 			title: 'Getting Started',
 			items: [
 				{ label: 'Introduction', href: '/docs' },
+				{ label: 'Why Storywrangler?', href: '/docs/manifesto' },
 				{ label: 'Authentication', href: '/docs/authentication' }
 			]
 		},
@@ -31,7 +32,6 @@
 			title: 'Guides',
 			items: [
 				{ label: 'Registering a dataset', href: '/docs/register' },
-				{ label: 'Field reference', href: '/docs/reference' },
 				{ label: 'Design & architecture', href: '/docs/design' },
 				{ label: 'Storywrangler-Specs', href: '/docs/specification' }
 			]
@@ -45,13 +45,8 @@
 		{
 			title: 'Case Studies',
 			items: [
-				{ label: 'Wikimedia pipeline', href: '/docs/case-studies/wikimedia' },
-				{ label: 'Babynames pipeline', href: '/docs/case-studies/babynames' }
+				{ label: 'Wikimedia pipeline', href: '/docs/case-studies/wikimedia' }
 			]
-		},
-		{
-			title: 'Project',
-			items: [{ label: 'Roadmap', href: '/docs/roadmap' }]
 		}
 	];
 

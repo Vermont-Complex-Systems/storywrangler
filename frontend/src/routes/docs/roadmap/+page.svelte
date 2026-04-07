@@ -225,6 +225,31 @@
 	model weights on netfiles. If model versioning becomes critical, that is when to reconsider.
 </p>
 
+
+<h3>Managed datasets</h3>
+
+<p>
+	When a student leaves without a successor, or when a dataset is small and stable enough, VCSI
+	could take custody and move the data to platform-controlled storage. Managed ingestion would
+	have three paths: <strong>static clone</strong> (copy parquet files, update
+	<code>data_location</code>), <strong>pipeline adoption</strong> (clone the source repo,
+	schedule via Dagster), or <strong>PostgreSQL ingest</strong> (for very small, highly-queried
+	datasets). The <code>storage_risk: "managed"</code> value is reserved for this case.
+</p>
+
+<h3>Internal tables</h3>
+
+<p>
+	Some datasets are small enough and queried frequently enough that storing them as parquet files
+	adds unnecessary indirection. The planned design is to allow a third storage class —
+	<strong>internal tables</strong> — where data is ingested directly into the platform's
+	PostgreSQL database and served without DuckDB. The registry entry would declare
+	<code>data_format: "postgres"</code> and <code>data_location</code> would identify the table
+	rather than a file path. The query layer would route to a PostgreSQL cursor instead of
+	<code>read_parquet()</code>. No datasets currently use this path.
+</p>
+
+
 <h2>Open questions</h2>
 
 <p>

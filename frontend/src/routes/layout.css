@@ -1,3 +1,27 @@
+@font-face {
+  font-family: "Baskervville";
+  src: url("/assets/fonts/baskerville/Baskervville-Regular.ttf") format("truetype");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Baskervville";
+  src: url("/assets/fonts/baskerville/Baskervville-SemiBold.ttf") format("truetype");
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Baskervville";
+  src: url("/assets/fonts/baskerville/Baskervville-Bold.ttf") format("truetype");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
 @import "tailwindcss";
 @plugin "@tailwindcss/typography";
 
@@ -75,6 +99,7 @@
 }
 
 @theme inline {
+  --font-baskerville: "Baskervville", "Times New Roman", Times, serif;
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
@@ -118,5 +143,8 @@
   }
   body {
     @apply bg-background text-foreground;
+  }
+  .prose h2 {
+    font-family: var(--font-baskerville);
   }
 }

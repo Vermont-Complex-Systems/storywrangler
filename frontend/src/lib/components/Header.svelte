@@ -11,7 +11,7 @@
 			<span class="text-foreground">Storywrangler</span>
 		</a>
 
-		<nav class="ml-6 flex items-center gap-4 text-sm">
+		<nav class="ml-4 sm:ml-6 flex items-center gap-3 sm:gap-4 text-sm">
 			<a
 				href="/docs"
 				class="text-foreground/60 hover:text-foreground transition-colors"
@@ -22,7 +22,8 @@
 				href="/docs/api-reference"
 				class="text-foreground/60 hover:text-foreground transition-colors"
 			>
-				API Reference
+				<span class="sm:hidden">API</span>
+				<span class="hidden sm:inline">API Reference</span>
 			</a>
 		</nav>
 

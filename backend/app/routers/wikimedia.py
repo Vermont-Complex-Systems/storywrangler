@@ -2,7 +2,7 @@
 Wikimedia endpoints — Wikipedia n-grams and revision histories.
 """
 
-from typing import List, Optional
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -10,7 +10,7 @@ from sqlmodel import select
 
 from ..core.database import get_session
 from ..core.duckdb_client import get_duckdb_client
-from ..core.query_utils import load_system, resolve_entity
+from ..core.query_utils import load_system, parse_dates, resolve_entity
 from ..models.registry import RegistryEntry
 
 router = APIRouter()
@@ -81,36 +81,46 @@ async def get_top_ngrams(
     if not dataset_obj:
         raise HTTPException(status_code=404, detail="'wikimedia/ngrams' dataset not found")
 
-    ep = dataset_obj.endpoint_schema or {}
-    granularities = ep.get("granularities", {})
-    if granularity not in granularities:
-        raise HTTPException(
-            status_code=400,
-            detail=f"granularity must be one of {sorted(granularities)}",
-        )
+    fv = dataset_obj.filter_values or {}
+    tr = dataset_obj.transform or {}
+    partition_dims = (tr.get("partition_dimensions") or tr.get("filter_dimensions") or []) if tr else []
 
-    ngram_sizes = ep.get("ngram_sizes")
-    if ngram_sizes is not None and n not in ngram_sizes:
-        raise HTTPException(
-            status_code=400,
-            detail=f"n must be one of {ngram_sizes}",
-        )
+    # Validate granularity against pre-introspected distinct values (if declared)
+    if "granularity" in partition_dims:
+        valid = fv.get("granularity", [])
+        if valid and granularity not in valid:
+            raise HTTPException(
+                status_code=400,
+                detail=f"granularity must be one of {sorted(valid)}",
+            )
+
+    # Validate n against pre-introspected ngram_size values (if declared)
+    if "ngram_size" in partition_dims:
+        valid_n = fv.get("ngram_size", [])
+        if valid_n and n not in valid_n:
+            raise HTTPException(
+                status_code=400,
+                detail=f"n must be one of {sorted(valid_n)}",
+            )
 
     em = await resolve_entity(db, "wikimedia", "ngrams", locations)
 
-    def parse_dr(s: str) -> List[str]:
-        parts = s.split(",")
-        return [parts[0], parts[0]] if len(parts) == 1 else [parts[0], parts[1]]
+    # Build filter_vals: include granularity and ngram_size if declared as partition dims.
+    extra: dict = {}
+    if "granularity" in partition_dims:
+        extra["granularity"] = granularity
+    if "ngram_size" in partition_dims:
+        extra["ngram_size"] = n
 
     try:
         conn = get_duckdb_client().connect()
-        dr1 = parse_dr(dates)
-        sys1 = load_system(conn, dataset_obj, em.local_id, dr1, {}, granularity, limit, n=n)
+        dr1 = parse_dates(dates)
+        sys1 = load_system(conn, dataset_obj, em.local_id, dr1, extra, limit)
         formatted1 = [{"types": t, "counts": c} for t, c in zip(sys1["types"], sys1["counts"])]
 
         if dates2:
-            dr2 = parse_dr(dates2)
-            sys2 = load_system(conn, dataset_obj, em.local_id, dr2, {}, granularity, limit, n=n)
+            dr2 = parse_dates(dates2)
+            sys2 = load_system(conn, dataset_obj, em.local_id, dr2, extra, limit)
             formatted2 = [{"types": t, "counts": c} for t, c in zip(sys2["types"], sys2["counts"])]
             key1 = dr1[0] if dr1[0] == dr1[1] else f"{dr1[0]}_{dr1[1]}"
             key2 = dr2[0] if dr2[0] == dr2[1] else f"{dr2[0]}_{dr2[1]}"
@@ -178,7 +188,7 @@ async def list_revision_articles(
 ):
     """List articles with extracted revision histories.
 
-    Uses the pre-computed article_index from format_config.partitioning,
+    Uses the pre-computed article_index from manifest.partition_index,
     populated at registration time by the submit script.
     """
     result = await db.execute(_WikimediaEntry.where(RegistryEntry.dataset_id == "revisions"))
@@ -186,10 +196,9 @@ async def list_revision_articles(
     if not rev_dataset:
         raise HTTPException(status_code=404, detail="'wikimedia/revisions' dataset not found")
 
-    fc = rev_dataset.format_config or {}
-    article_index = fc.get("partitioning", {}).get("article_index", [])
+    article_index = rev_dataset.partition_index or []
     if not article_index:
-        raise HTTPException(status_code=500, detail="Missing article_index in format_config. Please re-register.")
+        raise HTTPException(status_code=500, detail="Missing partition_index. Please re-register with partition_index set.")
 
     articles = [a for a in article_index if a["revision_count"] >= min_revisions][:limit]
     return {"articles": articles, "total": len(articles)}

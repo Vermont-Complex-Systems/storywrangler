@@ -7,7 +7,7 @@ The legacy tables are untouched — this new backend reads/writes only to "regis
 """
 
 from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
 
 from sqlalchemy import Column, DateTime, ForeignKeyConstraint, JSON, String, UniqueConstraint
 from sqlalchemy.sql import func
@@ -26,7 +26,7 @@ class RegistryEntryBase(SQLModel):
     catalog: str = "vcsi" 
     domain: str = Field(primary_key=True)
     dataset_id: str = Field(primary_key=True)
-    data_location: str
+    data_location: Optional[Any] = Field(default=None, sa_column=Column(JSON))
     data_format: str = "parquet_hive"
     description: str = None
 
@@ -37,11 +37,21 @@ class RegistryEntry(RegistryEntryBase, table=True):
     __tablename__ = "registry"
 
     # JSON columns — stored as plain dicts; Pydantic validation happens in DatasetCreate
-    format_config: Optional[dict] = Field(default=None, sa_column=Column(JSON))
+    manifest: Optional[dict] = Field(default=None, sa_column=Column(JSON))
     entity_mapping: Optional[dict] = Field(default=None, sa_column=Column(JSON))
     endpoint_schema: Optional[dict] = Field(default=None, sa_column=Column(JSON))
+    transform: Optional[dict] = Field(default=None, sa_column=Column(JSON))
     ownership: Optional[dict] = Field(default=None, sa_column=Column(JSON))
     lineage: Optional[dict] = Field(default=None, sa_column=Column(JSON))
+
+    # Derived at registration — never submitted, always backend-computed
+    data_schema: Optional[dict] = Field(default=None, sa_column=Column(JSON))
+    filter_values: Optional[dict] = Field(default=None, sa_column=Column(JSON))
+
+    # Partition index — submitted by owner for parquet_hive datasets with
+    # enumerable partitions (e.g. wikimedia/revisions article list).
+    # Excluded from summary registry responses via load_only.
+    partition_index: Optional[list] = Field(default=None, sa_column=Column(JSON))
 
     created_at: Optional[datetime] = Field(
         default=None,

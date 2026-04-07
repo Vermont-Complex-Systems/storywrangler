@@ -201,7 +201,7 @@
 					style="animation-delay:-0.5s"
 				/>
 			</svg>
-			<a href="/docs/reference" class="whitespace-nowrap rounded-full border border-zinc-200 px-2 py-0.5 text-[10px] text-zinc-400 transition-colors hover:border-zinc-400 hover:text-zinc-600 dark:border-zinc-700 dark:hover:border-zinc-500 dark:hover:text-zinc-300">registers metadata</a>
+			<a href="/docs/register" class="whitespace-nowrap rounded-full border border-zinc-200 px-2 py-0.5 text-[10px] text-zinc-400 transition-colors hover:border-zinc-400 hover:text-zinc-600 dark:border-zinc-700 dark:hover:border-zinc-500 dark:hover:text-zinc-300">registers metadata</a>
 			<svg width="12" height="20" viewBox="0 0 12 20" aria-hidden="true">
 				<line
 					x1="6"

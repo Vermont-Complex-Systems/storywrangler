@@ -2,7 +2,7 @@
 Babynames API endpoints.
 """
 
-from typing import List, Optional
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -10,7 +10,7 @@ from sqlmodel import select
 
 from ..core.database import get_session
 from ..core.duckdb_client import get_duckdb_client
-from ..core.query_utils import load_system, resolve_entity
+from ..core.query_utils import load_system, parse_dates, resolve_entity
 from ..models.registry import RegistryEntry
 
 router = APIRouter()
@@ -81,21 +81,17 @@ async def get_babynames_top_ngrams(
 
     em = await resolve_entity(db, "babynames", "ngrams", locations)
 
-    def parse_dr(s: str) -> List[str]:
-        parts = s.split(",")
-        return [parts[0], parts[0]] if len(parts) == 1 else [parts[0], parts[1]]
-
     filter_vals = {"sex": sex} if sex else {}
 
     try:
         conn = get_duckdb_client().connect()
-        dr1 = parse_dr(dates)
-        sys1 = load_system(conn, dataset_obj, em.local_id, dr1, filter_vals, None, limit)
+        dr1 = parse_dates(dates)
+        sys1 = load_system(conn, dataset_obj, em.local_id, dr1, filter_vals, limit)
         formatted1 = [{"types": t, "counts": c} for t, c in zip(sys1["types"], sys1["counts"])]
 
         if dates2:
-            dr2 = parse_dr(dates2)
-            sys2 = load_system(conn, dataset_obj, em.local_id, dr2, filter_vals, None, limit)
+            dr2 = parse_dates(dates2)
+            sys2 = load_system(conn, dataset_obj, em.local_id, dr2, filter_vals, limit)
             formatted2 = [{"types": t, "counts": c} for t, c in zip(sys2["types"], sys2["counts"])]
             key1 = dr1[0] if dr1[0] == dr1[1] else f"{dr1[0]}-{dr1[1]}"
             key2 = dr2[0] if dr2[0] == dr2[1] else f"{dr2[0]}-{dr2[1]}"

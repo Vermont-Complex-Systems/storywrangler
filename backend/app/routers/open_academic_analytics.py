@@ -1,86 +1,77 @@
 """
 Open Academic Analytics endpoints.
 
-Two datasets registered under domain="open-academic-analytics":
+Datasets registered under domain="open-academic-analytics":
 
-  dataset_id="oaa"
-    data_format: "duckdb"
-    data_location: ~/open-academic-analytics/oaa.duckdb
-    tables: papers, coauthors, training
-    produced by: ~/open-academic-analytics/ Dagster pipeline
+  dataset_id="papers"      — one row per paper per ego author
+  dataset_id="coauthors"   — one row per coauthor per publication year per ego author
+  dataset_id="training"    — one row per ego author per year (wide format + change point rates)
+  dataset_id="authors"     — materialized summary: one row per ego author (pipeline pre-joins coauthors × training)
+  /embeddings              — served from papers dataset, filtered to umap_1 IS NOT NULL at query time
+  dataset_id="academic-research-groups" — UVM faculty roster
 
-  dataset_id="academic-research-groups"
-    data_format: "parquet"
-    data_location: ~/academic-research-groups/academic-research-groups.parquet
-    produced by: ~/academic-research-groups/ annotation pipeline
-
-Each request opens a fresh read-only connection — DuckDB supports concurrent readers.
+All endpoints resolve data_location from the registry and query via read_parquet()
+using the shared DuckDB client — the same pattern as every other router.
 """
 
 from typing import Any, Dict, List, Optional
 
-import duckdb
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
 from ..core.database import get_session
+from ..core.duckdb_client import get_duckdb_client
 from ..models.registry import RegistryEntry
 
 router = APIRouter()
 
-_OAAEntry = (
-    select(RegistryEntry)
-    .where(RegistryEntry.domain == "open-academic-analytics")
-    .where(RegistryEntry.dataset_id == "papers")
-)
 
-
-def _conn(data_location: str) -> duckdb.DuckDBPyConnection:
-    """Open a fresh read-only connection to the OAA DuckDB file."""
-    return duckdb.connect(data_location, read_only=True)
-
-
-async def _get_dataset(db: AsyncSession) -> RegistryEntry:
-    result = await db.execute(_OAAEntry)
-    dataset = result.scalar_one_or_none()
-    if not dataset:
+async def _get_path(db: AsyncSession, dataset_id: str) -> str:
+    """Resolve a registered OAA dataset to its parquet file path."""
+    result = await db.execute(
+        select(RegistryEntry)
+        .where(RegistryEntry.domain == "open-academic-analytics")
+        .where(RegistryEntry.dataset_id == dataset_id)
+    )
+    entry = result.scalar_one_or_none()
+    if not entry:
         raise HTTPException(
             status_code=404,
-            detail="Dataset 'open-academic-analytics/papers' not found. Register it first.",
+            detail=f"Dataset 'open-academic-analytics/{dataset_id}' not found. Register it first.",
         )
-    return dataset
+    return entry.data_location
 
+# ── /academic-research-groups ──────────────────────────────────────────────────
 
-# ── /papers/{author_name} ──────────────────────────────────────────────────────
-
-@router.get("/papers/{author_name}")
-async def get_papers_for_author(
-    author_name: str,
-    filter_big_papers: bool = Query(False, description="Filter out papers with >25 coauthors"),
-    limit: Optional[int] = Query(None, description="Limit number of results"),
+@router.get("/academic-research-groups")
+async def get_academic_research_groups(
+    inst_ipeds_id: Optional[str] = Query(None, description="Filter by institution IPEDS ID, e.g. '231174' for UVM"),
+    payroll_year: Optional[int] = Query(None, description="Filter by payroll year, e.g. 2023"),
     db: AsyncSession = Depends(get_session),
 ) -> List[Dict[str, Any]]:
-    """Get processed papers for a specific author."""
-    dataset = await _get_dataset(db)
+    """Get the UVM faculty roster with OpenAlex IDs and research group metadata."""
+    path = await _get_path(db, "academic-research-groups")
 
-    where = "WHERE ego_display_name = ?"
-    params: list = [author_name]
-    if filter_big_papers:
-        where += " AND nb_coauthors < 25"
+    conditions, params = [], []
+    if inst_ipeds_id is not None:
+        conditions.append("inst_ipeds_id = ?")
+        params.append(inst_ipeds_id)
+    if payroll_year is not None:
+        conditions.append("payroll_year = ?")
+        params.append(payroll_year)
+
+    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
 
     sql = f"""
         SELECT *
-        FROM oaa.papers
+        FROM read_parquet('{path}')
         {where}
-        ORDER BY publication_date DESC
-        {"LIMIT ?" if limit else ""}
+        ORDER BY payroll_name
     """
-    if limit:
-        params.append(limit)
 
     try:
-        conn = _conn(dataset.data_location)
+        conn = get_duckdb_client().connect()
         result = conn.execute(sql, params)
         cols = [d[0] for d in result.description]
         rows = result.fetchall()
@@ -97,37 +88,17 @@ async def get_all_authors(
     db: AsyncSession = Depends(get_session),
 ) -> List[Dict[str, Any]]:
     """Get all authors with current age, last publication year, and research group status."""
-    dataset = await _get_dataset(db)
-
-    sql = """
-        SELECT
-            c.ego_display_name,
-            MAX(c.ego_age)          AS current_age,
-            MAX(c.publication_year) AS last_pub_year,
-            COALESCE(MAX(CAST(t.has_research_group AS INTEGER)), 0) AS has_research_group
-        FROM oaa.coauthors c
-        LEFT JOIN oaa.training t ON c.ego_display_name = t.name
-        WHERE c.ego_display_name IS NOT NULL
-          AND c.ego_age IS NOT NULL
-        GROUP BY c.ego_display_name
-        ORDER BY c.ego_display_name
-    """
+    path = await _get_path(db, "authors")
 
     try:
-        conn = _conn(dataset.data_location)
-        rows = conn.execute(sql).fetchall()
+        conn = get_duckdb_client().connect()
+        result = conn.execute(f"SELECT * FROM read_parquet('{path}') ORDER BY ego_display_name")
+        cols = [d[0] for d in result.description]
+        rows = result.fetchall()
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Query failed: {e}")
 
-    return [
-        {
-            "ego_display_name": r[0],
-            "current_age": r[1],
-            "last_pub_year": r[2],
-            "has_research_group": bool(r[3]),
-        }
-        for r in rows
-    ]
+    return [dict(zip(cols, row)) for row in rows]
 
 
 # ── /coauthors/{author_name} ───────────────────────────────────────────────────
@@ -140,7 +111,7 @@ async def get_coauthors_for_author(
     db: AsyncSession = Depends(get_session),
 ) -> List[Dict[str, Any]]:
     """Get coauthor data for a specific author."""
-    dataset = await _get_dataset(db)
+    path = await _get_path(db, "coauthors")
 
     where = "WHERE ego_display_name = ?"
     params: list = [author_name]
@@ -149,7 +120,7 @@ async def get_coauthors_for_author(
 
     sql = f"""
         SELECT *
-        FROM oaa.coauthors
+        FROM read_parquet('{path}')
         {where}
         ORDER BY publication_date DESC
         {"LIMIT ?" if limit else ""}
@@ -158,7 +129,7 @@ async def get_coauthors_for_author(
         params.append(limit)
 
     try:
-        conn = _conn(dataset.data_location)
+        conn = get_duckdb_client().connect()
         result = conn.execute(sql, params)
         cols = [d[0] for d in result.description]
         rows = result.fetchall()
@@ -172,80 +143,60 @@ async def get_coauthors_for_author(
 
 @router.get("/embeddings")
 async def get_embeddings_data(
+    limit: int = Query(6000, description="Number of papers to sample", ge=1, le=50000),
     db: AsyncSession = Depends(get_session),
 ) -> List[Dict[str, Any]]:
-    """Papers with UMAP embeddings joined with training metadata for visualization."""
-    dataset = await _get_dataset(db)
-
-    # Note: DuckDB uses string_split (not PostgreSQL's string_to_array)
-    sql = """
-        WITH exploded_depts AS (
-            SELECT DISTINCT
-                t.name,
-                t.oa_uid,
-                t.has_research_group,
-                trim(unnest(string_split(t.host_dept, ';'))) AS host_dept,
-                t.college
-            FROM oaa.training t
-            WHERE t.oa_uid IS NOT NULL
-        )
-        SELECT
-            p.doi,
-            p.id,
-            p.ego_author_id,
-            p.ego_display_name,
-            p.title,
-            p.publication_year,
-            p.publication_date,
-            p.cited_by_count,
-            p.umap_1,
-            p.umap_2,
-            p.abstract,
-            p.s2FieldsOfStudy,
-            p.fieldsOfStudy,
-            p.coauthor_names,
-            e.host_dept,
-            e.college
-        FROM oaa.papers p
-        LEFT JOIN exploded_depts e ON (
-            p.ego_author_id = 'https://openalex.org/' || e.oa_uid
-            OR p.ego_author_id = e.oa_uid
-        )
-        WHERE p.umap_1 IS NOT NULL
-        ORDER BY
-            CASE WHEN p.ego_author_id = 'https://openalex.org/A5040821463' THEN 0 ELSE 1 END,
-            random()
-        LIMIT 6000
-    """
+    """Papers with UMAP embeddings and department metadata for visualization."""
+    path = await _get_path(db, "papers")
 
     try:
-        conn = _conn(dataset.data_location)
-        rows = conn.execute(sql).fetchall()
+        conn = get_duckdb_client().connect()
+        result = conn.execute(
+            f"SELECT * FROM read_parquet('{path}') WHERE umap_1 IS NOT NULL ORDER BY random() LIMIT {limit}"
+        )
+        cols = [d[0] for d in result.description]
+        rows = result.fetchall()
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Query failed: {e}")
 
-    return [
-        {
-            "doi": r[0],
-            "id": r[1],
-            "ego_author_id": r[2],
-            "ego_display_name": r[3],
-            "title": r[4],
-            "publication_year": r[5],
-            "publication_date": r[6].isoformat() if r[6] else None,
-            "cited_by_count": r[7],
-            "umap_1": r[8],
-            "umap_2": r[9],
-            "abstract": r[10],
-            "s2FieldsOfStudy": r[11],
-            "fieldsOfStudy": r[12],
-            "coauthor_names": r[13],
-            "host_dept": r[14],
-            "college": r[15],
-        }
-        for r in rows
-    ]
+    return [dict(zip(cols, row)) for row in rows]
 
+# ── /papers/{author_name} ──────────────────────────────────────────────────────
+
+@router.get("/papers/{author_name}")
+async def get_papers_for_author(
+    author_name: str,
+    filter_big_papers: bool = Query(False, description="Filter out papers with >25 coauthors"),
+    limit: Optional[int] = Query(None, description="Limit number of results"),
+    db: AsyncSession = Depends(get_session),
+) -> List[Dict[str, Any]]:
+    """Get processed papers for a specific author."""
+    path = await _get_path(db, "papers")
+
+    where = "WHERE ego_display_name = ?"
+    params: list = [author_name]
+    if filter_big_papers:
+        where += " AND nb_coauthors < 25"
+
+    sql = f"""
+        SELECT *
+        FROM read_parquet('{path}')
+        {where}
+        ORDER BY publication_date DESC
+        {"LIMIT ?" if limit else ""}
+    """
+    if limit:
+        params.append(limit)
+
+    try:
+        conn = get_duckdb_client().connect()
+        result = conn.execute(sql, params)
+        cols = [d[0] for d in result.description]
+        rows = result.fetchall()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Query failed: {e}")
+
+    return [dict(zip(cols, row)) for row in rows]
 
 # ── /training/{author_name} ────────────────────────────────────────────────────
 
@@ -255,23 +206,23 @@ async def get_training_data(
     db: AsyncSession = Depends(get_session),
 ) -> Dict[str, Any]:
     """Aggregated training data for change point analysis."""
-    dataset = await _get_dataset(db)
+    path = await _get_path(db, "training")
 
-    sql = """
+    sql = f"""
         WITH age_data AS (
             SELECT author_age AS pub_year, older  AS counts, 'older'   AS age_category,
                    has_research_group, college, changing_rate
-            FROM oaa.training WHERE name = ? AND older > 0
+            FROM read_parquet('{path}') WHERE name = ? AND older > 0
 
             UNION ALL
 
             SELECT author_age, same,    'same',    has_research_group, college, changing_rate
-            FROM oaa.training WHERE name = ? AND same > 0
+            FROM read_parquet('{path}') WHERE name = ? AND same > 0
 
             UNION ALL
 
             SELECT author_age, younger, 'younger', has_research_group, college, changing_rate
-            FROM oaa.training WHERE name = ? AND younger > 0
+            FROM read_parquet('{path}') WHERE name = ? AND younger > 0
         )
         SELECT pub_year, counts, age_category, has_research_group, college,
                COALESCE(changing_rate, 0) AS changing_rate
@@ -280,7 +231,7 @@ async def get_training_data(
     """
 
     try:
-        conn = _conn(dataset.data_location)
+        conn = get_duckdb_client().connect()
         rows = conn.execute(sql, [author_name, author_name, author_name]).fetchall()
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Query failed: {e}")
@@ -296,61 +247,3 @@ async def get_training_data(
     ]
 
     return {"status": "success", "author": author_name, "training_data": training_data, "count": len(training_data)}
-
-
-# ── /academic-research-groups ──────────────────────────────────────────────────
-
-_RosterEntry = (
-    select(RegistryEntry)
-    .where(RegistryEntry.domain == "open-academic-analytics")
-    .where(RegistryEntry.dataset_id == "academic-research-groups")
-)
-
-
-async def _get_roster_dataset(db: AsyncSession) -> RegistryEntry:
-    result = await db.execute(_RosterEntry)
-    dataset = result.scalar_one_or_none()
-    if not dataset:
-        raise HTTPException(
-            status_code=404,
-            detail="Dataset 'open-academic-analytics/academic-research-groups' not found. Register it first.",
-        )
-    return dataset
-
-
-@router.get("/academic-research-groups")
-async def get_academic_research_groups(
-    inst_ipeds_id: Optional[str] = Query(None, description="Filter by institution IPEDS ID, e.g. '231174' for UVM"),
-    payroll_year: Optional[int] = Query(None, description="Filter by payroll year, e.g. 2023"),
-    db: AsyncSession = Depends(get_session),
-) -> List[Dict[str, Any]]:
-    """Get the UVM faculty roster with OpenAlex IDs and research group metadata."""
-    dataset = await _get_roster_dataset(db)
-
-    conditions, params = [], []
-    if inst_ipeds_id is not None:
-        conditions.append("inst_ipeds_id = ?")
-        params.append(inst_ipeds_id)
-    if payroll_year is not None:
-        conditions.append("payroll_year = ?")
-        params.append(payroll_year)
-
-    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
-
-    sql = f"""
-        SELECT *
-        FROM read_parquet('{dataset.data_location}')
-        {where}
-        ORDER BY payroll_name
-    """
-
-    try:
-        conn = duckdb.connect()
-        result = conn.execute(sql, params)
-        cols = [d[0] for d in result.description]
-        rows = result.fetchall()
-        conn.close()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Query failed: {e}")
-
-    return [dict(zip(cols, row)) for row in rows]

@@ -74,7 +74,12 @@ class Standards:
             },
             "response_format": "json_array",
             "ordering": "counts DESC",
-        }
+        },
+        "time-series": {
+            "required_columns": {},  # flexible — column layout declared via transform + data_schema
+            "response_format": "json_array_of_rows",
+            "ordering": "time_dimension ASC",
+        },
     }
 
     @classmethod
