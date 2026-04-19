@@ -479,8 +479,13 @@ async def get_adapter_info(
     dataset_id: str,
     db: AsyncSession = Depends(get_session),
 ):
-    """List entity mapping rows for a dataset (entity_id ↔ local_id)."""
-    if not await get_latest_entry(db, domain, dataset_id):
+    """List entity mapping rows for a dataset (entity_id ↔ local_id).
+
+    Includes min_year / max_year per entity when available in
+    manifest.availability.yearly.available.
+    """
+    ds = await get_latest_entry(db, domain, dataset_id)
+    if not ds:
         raise HTTPException(status_code=404, detail=f"RegistryEntry '{domain}/{dataset_id}' not found")
 
     rows_result = await db.execute(
@@ -490,12 +495,22 @@ async def get_adapter_info(
         )
     )
     rows = rows_result.scalars().all()
+
+    year_ranges: dict = (
+        (ds.manifest or {})
+        .get("availability", {})
+        .get("yearly", {})
+        .get("available", {})
+    )
+
     return [
         {
             "local_id": r.local_id,
             "entity_id": r.entity_id,
             "entity_name": r.entity_name,
             "entity_ids": r.entity_ids,
+            "min_year": year_ranges.get(r.entity_id, {}).get("min"),
+            "max_year": year_ranges.get(r.entity_id, {}).get("max"),
         }
         for r in rows
     ]

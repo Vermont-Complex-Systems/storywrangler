@@ -53,6 +53,14 @@ class RegistryEntry(RegistryEntryBase, table=True):
     data_schema: Optional[dict] = Field(default=None, sa_column=Column(JSON))
     filter_values: Optional[dict] = Field(default=None, sa_column=Column(JSON))
 
+    # Derived at version registration — null for 'latest' and pre-S3 migration datasets.
+    # Set by the platform when POST /register is called with a semver version and
+    # data_location is an S3 URI: enumerates parquet files → writes a tiny Frozen DuckLake
+    # catalog → stores its S3 URL here. Query layer uses this instead of read_parquet()
+    # for versioned requests, giving true immutability regardless of what happens to the
+    # submitter's data_location.
+    ducklake_path: Optional[str] = Field(default=None)
+
     # Partition index — submitted by owner for parquet_hive datasets with
     # enumerable partitions (e.g. wikimedia/revisions article list).
     # Excluded from summary registry responses via load_only.

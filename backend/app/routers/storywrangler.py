@@ -6,6 +6,7 @@ Currently includes:
              Generic — works for any registered dataset with endpoint_schema.type='types-counts'.
 """
 
+from importlib.metadata import PackageNotFoundError, version as pkg_version
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -16,6 +17,17 @@ from ..core.query_utils import load_system, parse_dates, resolve_entity
 from ..core.registry_utils import get_latest_entry
 
 router = APIRouter()
+
+
+def _allotax_version() -> str:
+    try:
+        return pkg_version("allotax")
+    except PackageNotFoundError:
+        try:
+            import allotax
+            return getattr(allotax, "__version__", "unknown")
+        except ImportError:
+            return "not installed"
 
 
 @router.get(
@@ -31,8 +43,11 @@ router = APIRouter()
                             "type": "object",
                             "properties": {
                                 "normalization": {"type": "number", "description": "Normalization constant for the rank-turbulence divergence"},
+                                "delta_sum": {"type": "number", "description": "Sum of normalized divergence elements — the actual D_alpha^R value"},
                                 "diamond_counts": {"type": "array", "description": "2D rank-space histogram used to render the diamond plot"},
                                 "max_delta_loss": {"type": "number", "description": "Maximum delta-loss value (used for color-scale normalization)"},
+                                "ncells": {"type": "integer", "description": "Number of cells along one side of the diamond grid; use to size the band scale"},
+                                "maxlog10": {"type": "number", "description": "Largest log10(rank) across both systems, rounded up to at least 1; use to label diamond axes"},
                                 "alpha": {"type": "number", "description": "Alpha parameter used in the computation"},
                                 "balance": {"type": "number", "description": "Balance measure between the two systems (0.5 = equal, >0.5 = system 2 dominates)"},
                                 "wordshift": {
@@ -196,7 +211,7 @@ async def allotaxonometer(
     except ImportError:
         raise HTTPException(
             status_code=503,
-            detail="allotax module not available. Install via: cd allotaxonometer-core/crates/allotax-py && maturin develop --release",
+            detail="allotax module not available. Install via: pip install allotax",
         )
 
     try:
@@ -224,7 +239,7 @@ async def allotaxonometer(
                 "dataset": dataset,
                 "dataset_version": dataset_obj.version,
                 "granularity": granularity,
-                "allotax_version": getattr(allotax, "__version__", "unknown"),
+                "allotax_version": _allotax_version(),
             },
         }
     except Exception as e:

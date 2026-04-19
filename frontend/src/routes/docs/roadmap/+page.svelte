@@ -72,6 +72,12 @@
 			<td>Derived artifacts and ML outputs are invisible</td>
 			<td>P5</td>
 		</tr>
+		<tr>
+			<td>Storage backend</td>
+			<td>netfiles (institutional NFS)</td>
+			<td>Slow reads; UVM-only access; blocks immutable Frozen DuckLake snapshots</td>
+			<td>Planned</td>
+		</tr>
 	</tbody>
 </table>
 
@@ -249,6 +255,108 @@
 	<code>read_parquet()</code>. No datasets currently use this path.
 </p>
 
+
+<h2>Planned — Storage backend: netfiles → S3 and Frozen DuckLake</h2>
+
+<p>
+	The current data serving path reads parquet files directly from netfiles, UVM's institutional
+	NFS. This creates three compounding problems:
+</p>
+
+<ul>
+	<li>
+		<strong>Performance.</strong> netfiles is an archival system optimised for sequential writes,
+		not the random column reads DuckDB issues at query time. Every API request pays the NFS
+		latency tax.
+	</li>
+	<li>
+		<strong>Accessibility.</strong> <code>data_location</code> paths are only reachable from
+		UVM-networked machines. External collaborators and cloud compute cannot access the data
+		without a VPN or an intermediary copy.
+	</li>
+	<li>
+		<strong>Frozen snapshots.</strong> <a href="https://ducklake.select/2025/10/24/frozen-ducklake/">Frozen DuckLake</a>
+		snapshots reference parquet files by HTTP/S3 URL — they require the files to be HTTP-accessible.
+		netfiles paths cannot be referenced this way, so versioned snapshots cannot freeze against them.
+	</li>
+</ul>
+
+<h3>What Frozen DuckLake actually is</h3>
+
+<p>
+	A Frozen DuckLake is a tiny <code>.ducklake</code> file — a DuckDB database containing table
+	schemas and pointers to parquet files stored in S3. It does <strong>not</strong> copy the data:
+	the parquet files stay in place and the catalog freezes which exact files existed at that moment.
+	The catalog file itself is kilobytes; the storage cost is negligible. Queries attach it like any
+	DuckDB database:
+</p>
+
+<pre class="not-prose bg-muted overflow-x-auto rounded-lg p-4 font-mono text-sm">ATTACH 'ducklake:s3://storywrangler-snapshots/babynames/ngrams/1.0.0.ducklake'</pre>
+
+<p>
+	Because the catalog references S3 URLs and S3 object versioning prevents silent overwriting,
+	a frozen snapshot is trustworthy in a way that a <code>data_location</code> pointer to a
+	submitter's local disk is not: the submitter cannot accidentally break or mutate it.
+</p>
+
+<h3>Migration path</h3>
+
+<p>
+	The migration is submitter-driven and incremental — no flag day. DuckDB handles S3 URIs
+	transparently; the query layer is unchanged. Submitters update one line in their
+	<code>submit.py</code> and upload their parquet files to the platform S3 bucket:
+</p>
+
+<pre class="not-prose bg-muted overflow-x-auto rounded-lg p-4 font-mono text-sm"># before
+data_location = "/netfiles/gsm-storywrangler/babynames/ngrams/"
+
+# after
+data_location = "s3://storywrangler-data/babynames/ngrams/"</pre>
+
+<p>
+	The registry stores the new path; the API serves queries against S3 from that point forward.
+	Existing netfiles registrations continue to work during transition.
+</p>
+
+<h3>Frozen DuckLake on top</h3>
+
+<p>
+	Once a dataset's <code>data_location</code> is an S3 URI, the platform can generate a frozen
+	snapshot at version registration time automatically. At <code>POST /register</code> with a
+	semver version string, the platform:
+</p>
+
+<ol>
+	<li>Enumerates all <code>.parquet</code> files at <code>data_location</code> (already done for introspection)</li>
+	<li>Calls <code>ducklake_add_data_files()</code> to register those S3 URLs in a <code>.ducklake</code> catalog</li>
+	<li>Uploads the catalog to <code>s3://storywrangler-snapshots/{'{domain}'}/{'{dataset_id}'}/{'{version}'}.ducklake</code></li>
+	<li>Stores the URL in <code>RegistryEntry.ducklake_path</code> (already reserved in the schema)</li>
+</ol>
+
+<p>
+	Query layer change is minimal: versioned requests check <code>ducklake_path</code> and use
+	<code>ATTACH 'ducklake:...'</code> instead of <code>read_parquet(s3://...)</code>. The
+	<code>version="latest"</code> slot always reads the live <code>data_location</code> —
+	no snapshot is generated for it.
+</p>
+
+<h3>Cost</h3>
+
+<p>
+	S3 Standard is approximately $0.023/GB/month, with S3 Intelligent-Tiering reducing cost further
+	for infrequently accessed snapshot versions. For a typical research dataset in the tens of GB
+	range, storage is $1–5/month. Request costs are negligible at academic traffic volumes. The
+	<code>.ducklake</code> catalog files themselves are kilobytes — essentially free.
+</p>
+
+<h3>Schema reservation</h3>
+
+<p>
+	<code>RegistryEntry.ducklake_path</code> is already a nullable column in the registry schema.
+	It is <code>null</code> for all current entries (netfiles-backed and <code>latest</code>
+	versions). No existing queries are affected. When the migration lands, the column is
+	populated automatically by the registration endpoint — submitters never set it.
+</p>
 
 <h2>Open questions</h2>
 

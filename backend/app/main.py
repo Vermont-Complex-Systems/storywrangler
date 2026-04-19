@@ -96,10 +96,13 @@ async def platform_version():
         schemas_ver = "unknown"
 
     try:
-        import allotax
-        allotax_ver = getattr(allotax, "__version__", "unknown")
-    except ImportError:
-        allotax_ver = "not installed"
+        allotax_ver = pkg_version("allotax")
+    except PackageNotFoundError:
+        try:
+            import allotax
+            allotax_ver = getattr(allotax, "__version__", "unknown")
+        except ImportError:
+            allotax_ver = "not installed"
 
     return {
         "api": app.version,
