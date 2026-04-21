@@ -239,6 +239,8 @@ def load_time_series(
     start: Any = None,
     end: Any = None,
     limit: int = 1000,
+    exclude_nulls: bool = True,
+    top_n: Optional[int] = None,
 ) -> List[dict]:
     """Execute a flexible GROUP BY query for a time-series dataset.
 
@@ -249,6 +251,11 @@ def load_time_series(
 
     start / end are optional bounds on the time dimension; their type is derived from
     data_schema so integer years and date strings both work correctly.
+
+    exclude_nulls: when True (default), adds IS NOT NULL for each group_by column.
+    top_n: when set, restricts results to only the top N non-time groups ranked by
+    total count. E.g. group_by=primary_subfield,year&top_n=10 returns the full
+    time-series for only the 10 largest primary_subfields.
 
     Returns [{col1: v1, ..., "count": n}, ...] ordered by group_cols ASC.
     """
@@ -263,6 +270,10 @@ def load_time_series(
     conditions: List[str] = []
     params: List[Any] = []
 
+    if exclude_nulls:
+        for col in group_cols:
+            conditions.append(f"{col} IS NOT NULL")
+
     if start is not None:
         col_type = schema.get(time_col, "")
         conditions.append(f"{time_col} >= ?")
@@ -272,11 +283,45 @@ def load_time_series(
         conditions.append(f"{time_col} <= ?")
         params.append(_cast_dates([str(end)], col_type)[0])
     for col, val in filter_vals.items():
-        conditions.append(f"{col} = ?")
-        params.append(val)
+        if isinstance(val, list):
+            placeholders = ",".join(["?"] * len(val))
+            conditions.append(f"{col} IN ({placeholders})")
+            params.extend(val)
+        else:
+            conditions.append(f"{col} = ?")
+            params.append(val)
 
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     group_clause = ", ".join(group_cols)
+
+    # When top_n is set, identify the top N non-time groups by total count,
+    # then restrict the main query to only those groups.
+    if top_n is not None:
+        non_time_cols = [c for c in group_cols if c != time_col]
+        if non_time_cols:
+            non_time_clause = ", ".join(non_time_cols)
+            rows = conn.execute(
+                f"""
+                WITH top_groups AS (
+                    SELECT {non_time_clause}
+                    FROM {from_clause}
+                    {where}
+                    GROUP BY {non_time_clause}
+                    ORDER BY SUM({count_col}) DESC
+                    LIMIT ?
+                )
+                SELECT {group_clause}, SUM({count_col}) AS count
+                FROM {from_clause}
+                {where}
+                  AND ({non_time_clause}) IN (SELECT {non_time_clause} FROM top_groups)
+                GROUP BY {group_clause}
+                ORDER BY {group_clause}
+                """,
+                [*params, top_n, *params],
+            ).fetchall()
+
+            col_names = group_cols + ["count"]
+            return [dict(zip(col_names, row)) for row in rows]
 
     rows = conn.execute(
         f"""

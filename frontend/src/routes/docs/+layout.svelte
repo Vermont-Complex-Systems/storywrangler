@@ -46,7 +46,8 @@
 		{
 			title: 'Case Studies',
 			items: [
-				{ label: 'Wikimedia pipeline', href: '/docs/case-studies/wikimedia' }
+				{ label: 'Wikimedia pipeline', href: '/docs/case-studies/wikimedia' },
+				{ label: 'scisciDB pipeline', href: '/docs/case-studies/scisciDB' }
 			]
 		}
 	];

@@ -38,11 +38,31 @@ STORYLAKE_PATH = Path.home() / "data" / "storylake.duckdb"
 # ---------------------------------------------------------------------------
 
 def _view_name(domain: str, dataset_id: str, all_rows: list) -> str:
-    """Use domain as view name; fall back to domain__dataset_id on collision."""
+    """Use domain as view name; fall back to domain__dataset_id on collision.
+
+    Replaces hyphens with underscores so the name is a valid SQL identifier
+    (avoids needing to quote-escape everywhere).
+    """
     domains = [r[0] for r in all_rows]
     if domains.count(domain) == 1:
-        return domain
-    return f"{domain}__{dataset_id}"
+        name = domain
+    else:
+        name = f"{domain}__{dataset_id}"
+    return name.replace("-", "_")
+
+
+def _parse_location(raw) -> str | list[str]:
+    """Normalize data_location from PostgreSQL JSON column.
+
+    PostgreSQL JSON comes back as a string that may be:
+      - A JSON-encoded string: '"path/to/file.parquet"' → 'path/to/file.parquet'
+      - A JSON-encoded array: '["/path/a.parquet", "/path/b.parquet"]' → list
+      - A plain string: 'path/to/dir' → 'path/to/dir'
+    """
+    if isinstance(raw, str):
+        parsed = json.loads(raw)
+        return parsed
+    return raw
 
 
 def _resolve_views(
@@ -59,6 +79,9 @@ def _resolve_views(
     """
 
     if data_format == "parquet":
+        if isinstance(data_location, list):
+            quoted = ", ".join(f"'{p}'" for p in data_location)
+            return [(base_name, f"read_parquet([{quoted}])")]
         return [(base_name, f"read_parquet('{data_location}')")]
 
     if data_format == "parquet_hive":
@@ -101,9 +124,10 @@ def build() -> None:
 
         print(f"Building {STORYLAKE_PATH}  ({len(rows)} registered datasets)\n")
 
-        for domain, dataset_id, data_format, data_location, _fc_raw, ep_raw in rows:
+        for domain, dataset_id, data_format, data_location_raw, _fc_raw, ep_raw in rows:
             ep   = json.loads(ep_raw) if ep_raw else {}
             base = _view_name(domain, dataset_id, rows)
+            data_location = _parse_location(data_location_raw)
             pairs = _resolve_views(base, data_format, data_location, ep)
 
             if not pairs:
