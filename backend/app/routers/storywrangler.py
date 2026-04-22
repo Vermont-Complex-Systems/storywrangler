@@ -6,6 +6,7 @@ Currently includes:
              Generic — works for any registered dataset with endpoint_schema.type='types-counts'.
 """
 
+import math
 from importlib.metadata import PackageNotFoundError, version as pkg_version
 from typing import Optional
 
@@ -120,8 +121,8 @@ async def allotaxonometer(
     dates: Optional[str] = Query(None, description="Date/year range for system 1. Single value '2024-10-01' or range '2024-10-01,2024-10-31'. Omit to load all time."),
     dates2: Optional[str] = Query(None, description="Date/year range for system 2. Omit to load all time."),
     granularity: str = Query("daily", description="Hive granularity (parquet_hive only): daily | weekly | monthly"),
-    alpha: float = Query(1.0, description="RTD alpha parameter"),
-    alphas: Optional[str] = Query(None, description="Comma-separated alphas for multi-alpha mode, e.g. '0.5,1.0,2.0'"),
+    alpha: str = Query("1.0", description="RTD alpha parameter (number or 'inf')"),
+    alphas: Optional[str] = Query(None, description="Comma-separated alphas for multi-alpha mode, e.g. '0.5,1.0,inf'"),
     ngram_limit: int = Query(10000, description="Max types to load per system before computing"),
     wordshift_limit: int = Query(200, description="Truncate wordshift output to top N entries"),
     n: int = Query(1, description="N-gram size (1 = unigrams, 2 = bigrams). Only used when 'ngram_size' is in transform.filter_dimensions."),
@@ -142,6 +143,11 @@ async def allotaxonometer(
     > `?sex=M&sex2=F` compares boy vs girl babynames, `?geo=US&geo2=CA` compares countries.
     > Entity registration is optional when a filter dimension serves as the comparison axis.
     """
+    try:
+        alpha_f = float(alpha)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Invalid alpha: {alpha!r}. Must be a number or 'inf'.")
+
     dataset_obj = await get_latest_entry(db, domain, dataset)
     if not dataset_obj:
         raise HTTPException(status_code=404, detail=f"Dataset '{domain}/{dataset}' not found")
@@ -227,8 +233,15 @@ async def allotaxonometer(
         if alphas:
             alpha_list = [float(a) for a in alphas.split(",")]
             result_data = allotax.compute_allotax_multi_alpha(sys1, sys2, alpha_list, wordshift_limit)
+            # serde_json serializes f64::INFINITY as null → Python None.
+            # Restore from the original input; use string since JSON has no Infinity.
+            for ar, a in zip(result_data.get("alpha_results", []), alpha_list):
+                if ar.get("alpha") is None and math.isinf(a):
+                    ar["alpha"] = "Infinity"
         else:
-            result_data = allotax.compute_allotax(sys1, sys2, alpha, wordshift_limit)
+            result_data = allotax.compute_allotax(sys1, sys2, alpha_f, wordshift_limit)
+            if result_data.get("alpha") is None and math.isinf(alpha_f):
+                result_data["alpha"] = "Infinity"
 
         return {
             **result_data,

@@ -1,8 +1,7 @@
 import { Context } from 'runed';
 import type { ReadableBoxedValues, WritableBoxedValues } from 'svelte-toolbelt';
 import type { CodeRootProps } from '$lib/components/ui/code/types';
-import { highlighter } from '$lib/components/ui/code/shiki';
-import DOMPurify from 'isomorphic-dompurify';
+import { getHighlighter } from '$lib/components/ui/code/shiki';
 import type { HighlighterCore } from 'shiki';
 
 type CodeOverflowStateProps = WritableBoxedValues<{
@@ -37,7 +36,7 @@ class CodeRootState {
 		readonly opts: CodeRootStateProps,
 		readonly overflow?: CodeOverflowState
 	) {
-		highlighter.then((hl) => (this.highlighter = hl));
+		getHighlighter(this.opts.lang.current).then((hl) => (this.highlighter = hl));
 	}
 
 	highlight(code: string) {
@@ -74,7 +73,18 @@ class CodeRootState {
 		return this.opts.code.current;
 	}
 
-	highlighted = $derived(DOMPurify.sanitize(this.highlight(this.code) ?? ''));
+	/** Plain-text fallback matching shiki's DOM structure, used during SSR and before shiki loads. */
+	get fallback() {
+		const escaped = this.code.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+		const lines = escaped
+			.split('\n')
+			.map((l) => `<span class="line">${l}</span>`)
+			.join('\n');
+		const cls = this.opts.hideLines.current ? 'shiki' : 'shiki line-numbers';
+		return `<pre class="${cls}"><code>${lines}</code></pre>`;
+	}
+
+	highlighted = $derived(this.highlight(this.code) ?? this.fallback);
 }
 
 function within(num: number, range: CodeRootProps['highlight']) {

@@ -350,7 +350,7 @@ Peter,1464,1925,M
 	{/each}
 </div>
 
-<h2 class="font-baskerville font-regular text-xl md:text-4xl leading-snug tracking-tight mb-2 md:mb-5">Getting started</h2>
+<h2 class="font-baskerville font-regular text-xl md:text-4xl leading-snug tracking-tight mb-2 md:mb-5">Registering your first data pipeline</h2>
 
 <div class="not-prose mb-6 flex gap-3 rounded-lg border border-amber-200 bg-amber-50 p-4 dark:border-amber-800 dark:bg-amber-950/40">
 	<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="mt-0.5 h-5 w-5 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden="true">
@@ -364,7 +364,7 @@ Peter,1464,1925,M
 	</div>
 </div>
 
-<p>The registration process is a simple POST request documented <a href="/docs/api-reference/registry/post-registry-register">here</a>.</p>
+<p>The registration process is a simple POST request documented <a href="/api-reference/registry/post-registry-register">here</a>.</p>
 
 <p>We also provide an SDK to ease the use of the platform, which we recommend to install with <a href="https://docs.astral.sh/uv/">uv</a> (or pip):</p>
 
@@ -382,7 +382,7 @@ Peter,1464,1925,M
 	<Code.CopyButton />
 </Code.Root>
 
-<p>You can find a walkthrough of the <code>types-counts</code> API schema that the allotaxonometer expects in <a href="/docs/register">Registering a dataset</a>. In this case, we are telling the API that the dataset has the following shape and is available at the <code>data/</code> location:</p>
+<p>You can find a walkthrough of the <code>types-counts</code> API schema that the allotaxonometer expects in <a href="/register">Registering a dataset</a>. In this case, we are telling the API that the dataset has the following shape and is available at the <code>data/</code> location:</p>
 
 <Code.Root code={dataframeCode} hideLines={true} />
 
@@ -407,12 +407,12 @@ Peter,1464,1925,M
 </div>
  
 
-<p>We are also offering utilities for increased discoverability and interoperability. For instance, submitters might have babynames data from all over the world. While registering "country" as <code>filter_dimensions</code> is directly usable, it decreases overall discoverability because the platform remains agnostic of what is going in the <code>filter_dimensions</code>. Instead, the users can submit their <code>entity_mapping</code> where they provide the link between their local ids and identifiers part of our global namespace (see <a href="/docs/specification">Storywrangler Specifications</a>). See our more detailed <a href="/docs/register">Registering a dataset</a> section to see how the registration of entity mapping is done.</p>
+<p>We are also offering utilities for increased discoverability and interoperability. For instance, submitters might have babynames data from all over the world. While registering "country" as <code>filter_dimensions</code> is directly usable, it decreases overall discoverability because the platform remains agnostic of what is going in the <code>filter_dimensions</code>. Instead, the users can submit their <code>entity_mapping</code> where they provide the link between their local ids and identifiers part of our global namespace (see <a href="/specification">Storywrangler Specifications</a>). See our more detailed <a href="/register">Registering a dataset</a> section to see how the registration of entity mapping is done.</p>
 
 <h2 class="font-baskerville font-regular text-xl md:text-4xl leading-snug tracking-tight mb-2 md:mb-5">Next steps</h2>
 
 <ul>
-	<li><a href="/docs/case-studies/wikimedia">Wikimedia case study</a> — How we are using Storywrangler internally to make our Wikimedia pipeline available to all.</li>
+	<li><a href="/case-studies/wikimedia">Wikimedia case study</a> — How we are using Storywrangler internally to make our Wikimedia pipeline available to all.</li>
 </ul>
 
 <style>

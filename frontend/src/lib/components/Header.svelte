@@ -13,13 +13,13 @@
 
 		<nav class="ml-4 sm:ml-6 flex items-center gap-3 sm:gap-4 text-sm">
 			<a
-				href="/docs"
+				href="/"
 				class="text-foreground/60 hover:text-foreground transition-colors"
 			>
 				Guides
 			</a>
 			<a
-				href="/docs/api-reference"
+				href="/api-reference"
 				class="text-foreground/60 hover:text-foreground transition-colors"
 			>
 				<span class="sm:hidden">API</span>

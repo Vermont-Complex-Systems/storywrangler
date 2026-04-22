@@ -23,31 +23,31 @@
 		{
 			title: 'Getting Started',
 			items: [
-				{ label: 'Introduction', href: '/docs' },
-				{ label: 'Why Storywrangler?', href: '/docs/manifesto' },
-				{ label: 'Authentication', href: '/docs/authentication' }
+				{ label: 'Introduction', href: '/' },
+				{ label: 'Why Storywrangler?', href: '/manifesto' },
+				{ label: 'Authentication', href: '/authentication' }
 			]
 		},
 		{
 			title: 'Guides',
 			items: [
-				{ label: 'Registering a dataset', href: '/docs/register' },
-				{ label: 'Design & architecture', href: '/docs/design' },
-				{ label: 'Versioning', href: '/docs/versioning' },
-				{ label: 'Storywrangler-Specs', href: '/docs/specification' }
+				{ label: 'Registering a dataset', href: '/register' },
+				{ label: 'Design & architecture', href: '/design' },
+				{ label: 'Versioning', href: '/versioning' },
+				{ label: 'Storywrangler-Specs', href: '/specification' }
 			]
 		},
 		{
 			title: 'Instruments',
 			items: [
-				{ label: 'Allotaxonometry', href: '/docs/tools/allotaxonometer' }
+				{ label: 'Allotaxonometry', href: '/tools/allotaxonometer' }
 			]
 		},
 		{
 			title: 'Case Studies',
 			items: [
-				{ label: 'Wikimedia pipeline', href: '/docs/case-studies/wikimedia' },
-				{ label: 'scisciDB pipeline', href: '/docs/case-studies/scisciDB' }
+				{ label: 'Wikimedia pipeline', href: '/case-studies/wikimedia' },
+				{ label: 'scisciDB pipeline', href: '/case-studies/scisciDB' }
 			]
 		}
 	];

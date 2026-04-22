@@ -17,7 +17,7 @@
 		<div class="flex flex-wrap items-center gap-2">
 			<!-- Step 1: Source -->
 			<a
-				href="/docs/design#medallion-tiers"
+				href="/design#medallion-tiers"
 				class="rounded-lg border border-zinc-200 bg-white px-3 py-2 transition-colors hover:border-zinc-300 dark:border-zinc-700 dark:bg-zinc-900 dark:hover:border-zinc-500"
 			>
 				<div class="text-[10px] font-semibold uppercase tracking-widest text-amber-700 dark:text-amber-500">Bronze</div>
@@ -124,7 +124,7 @@
 
 			<!-- Step 3: Silver dataset (collapsed) -->
 			<a
-				href="/docs/design#medallion-tiers"
+				href="/design#medallion-tiers"
 				class="rounded-lg border border-zinc-200 bg-white px-3 py-2 transition-colors hover:border-zinc-300 dark:border-zinc-700 dark:bg-zinc-900 dark:hover:border-zinc-500"
 			>
 				<div class="text-[10px] font-semibold uppercase tracking-widest text-zinc-400 dark:text-zinc-500">Silver</div>
@@ -150,7 +150,7 @@
 				/>
 			</svg>
 			<a
-				href="/docs/specification"
+				href="/specification"
 				class="text-zinc-500 transition-colors hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-200"
 				>Storywrangler adapter — validates <code class="text-zinc-600 dark:text-zinc-300"
 					>types-counts</code
@@ -201,7 +201,7 @@
 					style="animation-delay:-0.5s"
 				/>
 			</svg>
-			<a href="/docs/register" class="whitespace-nowrap rounded-full border border-zinc-200 px-2 py-0.5 text-[10px] text-zinc-400 transition-colors hover:border-zinc-400 hover:text-zinc-600 dark:border-zinc-700 dark:hover:border-zinc-500 dark:hover:text-zinc-300">registers metadata</a>
+			<a href="/register" class="whitespace-nowrap rounded-full border border-zinc-200 px-2 py-0.5 text-[10px] text-zinc-400 transition-colors hover:border-zinc-400 hover:text-zinc-600 dark:border-zinc-700 dark:hover:border-zinc-500 dark:hover:text-zinc-300">registers metadata</a>
 			<svg width="12" height="20" viewBox="0 0 12 20" aria-hidden="true">
 				<line
 					x1="6"
@@ -274,7 +274,7 @@
 
 		<!-- Storywrangler + allotax -->
 		<a
-			href="/docs/object-model"
+			href="/object-model"
 			class="flex flex-1 flex-col gap-2 rounded-xl border-2 border-amber-200 bg-amber-50 p-3 transition-colors hover:border-amber-300 dark:border-amber-900 dark:bg-amber-950/20 dark:hover:border-amber-700"
 		>
 			<div

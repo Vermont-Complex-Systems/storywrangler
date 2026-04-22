@@ -19,14 +19,38 @@ const bundledLanguages = {
 /** The languages configured for the highlighter */
 export type SupportedLanguage = keyof typeof bundledLanguages;
 
-/** A preloaded highlighter instance (browser-only; null during SSR). */
-export const highlighter: Promise<HighlighterCore | null> = browser
-	? createHighlighterCore({
-			themes: [
-				import('@shikijs/themes/github-light-default'),
-				import('@shikijs/themes/github-dark-default')
-			],
-			langs: Object.entries(bundledLanguages).map(([_, lang]) => lang),
-			engine: createJavaScriptRegexEngine()
-		})
-	: Promise.resolve(null);
+let _highlighter: HighlighterCore | null = null;
+
+/**
+ * Load the highlighter core (no language grammars yet).
+ * Returns null during SSR — the fallback plain-text <pre> is used instead.
+ */
+async function initHighlighter(): Promise<HighlighterCore | null> {
+	if (!browser) return null;
+	if (_highlighter) return _highlighter;
+	_highlighter = await createHighlighterCore({
+		themes: [
+			import('@shikijs/themes/github-light-default'),
+			import('@shikijs/themes/github-dark-default')
+		],
+		langs: [],
+		engine: createJavaScriptRegexEngine()
+	});
+	return _highlighter;
+}
+
+const _coreReady = initHighlighter();
+
+/**
+ * Ensure a language grammar is loaded, then return the highlighter.
+ * Languages are loaded on demand — only the ones actually used on the page.
+ */
+export async function getHighlighter(lang: SupportedLanguage): Promise<HighlighterCore | null> {
+	const hl = await _coreReady;
+	if (!hl) return null;
+	if (!hl.getLoadedLanguages().includes(lang)) {
+		const loader = bundledLanguages[lang];
+		if (loader) await hl.loadLanguage(await loader());
+	}
+	return hl;
+}

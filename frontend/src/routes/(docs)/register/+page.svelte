@@ -173,7 +173,7 @@ WHERE country     = 'United States'    -- entity_mapping.local_id_column
 
 <p>
 	The simplest use case of registering your dataset is to get access to VCSI instruments, such as
-	the <a href="/docs/tools/allotaxonometer">allotaxonometer</a>, which can then be served anywhere
+	the <a href="/tools/allotaxonometer">allotaxonometer</a>, which can then be served anywhere
 	on the web. In this case, your submitted dataset must fulfil the instrument requirements you want
 	to access (e.g. the allotaxonometer requires a <code>types-counts</code> endpoint schema — see
 	the instrument page). It should also be part of an accepted domain. By default, endpoints can go
@@ -310,7 +310,7 @@ works without it:</p>
 <h2>Case studies</h2>
 
 <p>
-	The <a href="/docs/case-studies/wikimedia">Wikimedia pipeline</a> shows what a complete
+	The <a href="/case-studies/wikimedia">Wikimedia pipeline</a> shows what a complete
 	<code>submit.py</code> looks like for <code>parquet_hive</code>: raw Wikipedia dump → silver
 	n-gram frequencies, partitioned by country, granularity, and date. Covers
 	<code>transform.partition_dimensions</code> and <code>manifest.availability</code>.

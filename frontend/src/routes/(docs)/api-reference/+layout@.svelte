@@ -44,7 +44,7 @@
 	);
 
 	function isActive(tag: string, method: string, path: string) {
-		return page.url.pathname === `/docs/api-reference/${tag}/${slugify(method, path)}`;
+		return page.url.pathname === `/api-reference/${tag}/${slugify(method, path)}`;
 	}
 </script>
 
@@ -59,10 +59,10 @@
 				<ul class="flex flex-col gap-0.5">
 					<li>
 						<a
-							href="/docs/api-reference"
+							href="/api-reference"
 							class={[
 								'text-muted-foreground hover:text-foreground block rounded-md px-2 py-1.5 text-sm transition-colors',
-								page.url.pathname === '/docs/api-reference' &&
+								page.url.pathname === '/api-reference' &&
 									'bg-accent text-accent-foreground font-medium'
 							]}
 						>
@@ -79,7 +79,7 @@
 						{#each endpoints as { method, path, op } (`${method}:${path}`)}
 							<li>
 								<a
-									href="/docs/api-reference/{tag}/{slugify(method, path)}"
+									href="/api-reference/{tag}/{slugify(method, path)}"
 									class={[
 										'text-muted-foreground hover:text-foreground flex items-center gap-1.5 rounded-md px-2 py-1.5 text-sm transition-colors',
 										isActive(tag, method, path) && 'bg-accent text-accent-foreground font-medium'

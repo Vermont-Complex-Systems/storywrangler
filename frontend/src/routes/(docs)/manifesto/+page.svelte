@@ -18,7 +18,7 @@
 </p>
 
 <p>
-	To study these systems at scale requires both large datasets and sophisticated analytical instruments. The <a href="/docs/tools/allotaxonometer">allotaxonometer</a>, for instance, can compare two word-frequency distributions and identify which terms drove a divergence — but it needs a consistent data contract to do so across sources. Building that contract once per dataset, manually, does not scale.
+	To study these systems at scale requires both large datasets and sophisticated analytical instruments. The <a href="/tools/allotaxonometer">allotaxonometer</a>, for instance, can compare two word-frequency distributions and identify which terms drove a divergence — but it needs a consistent data contract to do so across sources. Building that contract once per dataset, manually, does not scale.
 </p>
 
 <h2>The tragedy of the commons in academic data</h2>
@@ -109,5 +109,5 @@ client.registry.register(DatasetCreate(
 </p>
 
 <p>
-	If you study collective attention, language, or sociotechnical systems — and you have data that can be modeled as an ecological time series — <a href="/docs/register">register it</a>. The instruments are already waiting.
+	If you study collective attention, language, or sociotechnical systems — and you have data that can be modeled as an ecological time series — <a href="/register">register it</a>. The instruments are already waiting.
 </p>
