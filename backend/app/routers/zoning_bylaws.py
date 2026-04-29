@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from ..core.database import get_session
 from ..core.duckdb_client import get_duckdb_client
-from ..core.query_utils import load_system, resolve_entity
+from ..core.query_utils import handle_query_error, load_system, resolve_entity
 from ..core.registry_utils import get_latest_entry
 
 router = APIRouter()
@@ -69,7 +69,7 @@ async def get_zoning_bylaws_ngrams(
 
     em = await resolve_entity(db, "vt-zoning-atlas", "ngrams", locations)
 
-    try:
+    with handle_query_error("vt-zoning-atlas/ngrams"):
         conn = get_duckdb_client().connect()
         sys1 = load_system(conn, dataset_obj, em.local_id, None, {}, limit)
         formatted = [{"types": t, "counts": c} for t, c in zip(sys1["types"], sys1["counts"])]
@@ -77,7 +77,3 @@ async def get_zoning_bylaws_ngrams(
             "data": formatted,
             "metadata": {"location": locations},
         }
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Query execution failed: {str(e)}")

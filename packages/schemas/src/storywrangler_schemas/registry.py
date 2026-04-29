@@ -129,18 +129,15 @@ class ManifestConfig(BaseModel):
     availability: Optional[Dict] = Field(
         None,
         description=(
-            "Time coverage summary for display in the registry UI. Never read at query time. "
-            "Only meaningful when transform.time_dimension is set — that axis uses "
-            "BETWEEN queries so distinct values are never enumerated into filter_values. "
-            "If time is declared as a filter_dimension instead, all distinct values are "
-            "already introspected into filter_values and availability is redundant. "
-            "Three forms depending on the entity axis — "
-            "(1) global (no entity or filter axis): "
-            '`{"min": 2015, "max": 2023}`; '
-            "(2) keyed by local ID when using filter_dimensions only (no entity_mapping): "
-            '`{"united_states": {"min": 1880, "max": 2022}, "quebec": {"min": 1980, "max": 2022}}`; '
-            "(3) keyed by canonical entity ID when using entity_mapping: "
-            '`{"wikidata:Q30": {"min": 1880, "max": 2022}, "wikidata:Q176": {"min": 1980, "max": 2022}}`.'
+            "Time coverage summary for display in the registry UI and for computing "
+            "valid date ranges (e.g. the /rtd endpoint requires explicit dates). "
+            "Auto-populated by parquet_introspect at registration time when "
+            "transform.time_dimension is set. Never read at query time for data loading. "
+            "Entity-first, keyed by local_id (or entity_id), with per-granularity min/max — "
+            '`{"United States": {"daily": {"min": "2024-01-01", "max": "2026-04-20"}, '
+            '"weekly": {"min": "2024-09-30", "max": "2026-04-13"}}}`; '
+            "for datasets without entity_mapping (global): "
+            '`{"daily": {"min": "2024-01-01", "max": "2026-04-20"}}`.'
         ),
     )
     partition_index: Optional[List[Dict]] = Field(

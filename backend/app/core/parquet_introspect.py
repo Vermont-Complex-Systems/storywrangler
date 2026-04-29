@@ -1,8 +1,9 @@
 """Best-effort parquet introspection for registry enrichment.
 
-Derives two things at registration time:
+Derives three things at registration time:
   - data_schema    : column names + types (cheap — reads parquet footer only)
   - filter_values  : distinct values per filter_dimension
+  - availability   : min/max of time_dimension per entity and partition_dimension
 
 Uses DuckDB (already available) so no extra dependencies.
 For parquet_hive, hive_partitioning=true is used throughout:
@@ -45,12 +46,13 @@ def _path_expr(dataset) -> Optional[str]:
 
 
 def introspect(conn, dataset) -> Dict[str, Any]:
-    """Derive schema and filter_values from parquet files.
+    """Derive schema, filter_values, and availability from parquet files.
 
     Returns a dict with any subset of:
       {
-        "data_schema": {"col": "TYPE", ...},        # → stored in data_schema column
-        "filter_values": {"dim": ["val1", ...], ...} # → stored in filter_values column
+        "data_schema": {"col": "TYPE", ...},                       # → data_schema column
+        "filter_values": {"dim": ["val1", ...], ...},              # → filter_values column
+        "availability": {"entity": {"gran": {"min":..,"max":..}}}  # → merged into manifest
       }
 
     Never raises — returns {} on any error.
@@ -68,7 +70,8 @@ def introspect(conn, dataset) -> Dict[str, Any]:
         ).fetchall()
         result["data_schema"] = {r[0]: r[1] for r in rows}
     except Exception as e:
-        log.debug("Schema introspection failed for %s: %s", path_expr, e)
+        log.warning("Schema introspection failed for %s: %s", path_expr, e)
+        result["introspect_error"] = str(e)
 
     # ── filter values ────────────────────────────────────────────────────────────
     # Source: transform.filter_dimensions + transform.partition_dimensions.
@@ -78,9 +81,6 @@ def introspect(conn, dataset) -> Dict[str, Any]:
     filter_dims: List[str] = list((tr.filter_dimensions or []) if tr else [])
     partition_dims: List[str] = list((tr.partition_dimensions or []) if tr else [])
     all_dims = filter_dims + partition_dims
-
-    if not all_dims:
-        return result
 
     filter_values: Dict[str, List[Any]] = {}
     for dim in all_dims:
@@ -95,5 +95,77 @@ def introspect(conn, dataset) -> Dict[str, Any]:
 
     if filter_values:
         result["filter_values"] = filter_values
+
+    # ── availability (min/max of time_dimension per entity × partition_dimension) ─
+    # Produces entity-first format:
+    #   {"United States": {"daily": {"min": "2024-01-01", "max": "2026-04-20"}, ...}}
+    # For datasets without entity_mapping: {"daily": {"min": ..., "max": ...}}
+    time_col = tr.time_dimension if tr else None
+    if time_col:
+        entity_col = (
+            dataset.entity_mapping.local_id_column
+            if dataset.entity_mapping else None
+        )
+        # partition_dimensions whose distinct values define separate availability
+        # ranges (e.g. granularity: daily vs weekly have different date bounds)
+        group_dims = list(partition_dims)
+
+        select_cols = []
+        group_by = []
+        if entity_col:
+            select_cols.append(entity_col)
+            group_by.append(entity_col)
+        for dim in group_dims:
+            select_cols.append(dim)
+            group_by.append(dim)
+
+        select_str = ", ".join(select_cols)
+        if select_str:
+            select_str += ", "
+        group_str = ", ".join(group_by)
+
+        try:
+            if group_str:
+                sql = (
+                    f"SELECT {select_str}MIN({time_col})::TEXT, MAX({time_col})::TEXT "
+                    f"FROM {path_expr} GROUP BY {group_str}"
+                )
+            else:
+                sql = (
+                    f"SELECT MIN({time_col})::TEXT, MAX({time_col})::TEXT "
+                    f"FROM {path_expr}"
+                )
+            rows = conn.execute(sql).fetchall()
+
+            availability: Dict[str, Any] = {}
+            for row in rows:
+                idx = 0
+                ent = row[idx] if entity_col else None
+                if entity_col:
+                    idx += 1
+                dim_vals = {}
+                for dim in group_dims:
+                    dim_vals[dim] = row[idx]
+                    idx += 1
+                min_val, max_val = row[idx], row[idx + 1]
+                bounds = {"min": min_val, "max": max_val}
+
+                if entity_col and group_dims:
+                    # entity-first, multi-granularity
+                    availability.setdefault(ent, {})[dim_vals[group_dims[0]]] = bounds
+                elif entity_col:
+                    # entity-keyed, single granularity
+                    availability[ent] = bounds
+                elif group_dims:
+                    # global, multi-granularity
+                    availability[dim_vals[group_dims[0]]] = bounds
+                else:
+                    # global, single granularity
+                    availability = bounds
+
+            if availability:
+                result["availability"] = availability
+        except Exception as e:
+            log.debug("Availability introspection failed: %s", e)
 
     return result

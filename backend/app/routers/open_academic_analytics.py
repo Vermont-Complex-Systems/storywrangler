@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.database import get_session
 from ..core.duckdb_client import get_duckdb_client
+from ..core.query_utils import handle_query_error
 from ..core.registry_utils import get_latest_entry
 
 router = APIRouter()
@@ -64,13 +65,11 @@ async def get_academic_research_groups(
         ORDER BY payroll_name
     """
 
-    try:
+    with handle_query_error("open-academic-analytics/academic-research-groups"):
         conn = get_duckdb_client().connect()
         result = conn.execute(sql, params)
         cols = [d[0] for d in result.description]
         rows = result.fetchall()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Query failed: {e}")
 
     return [dict(zip(cols, row)) for row in rows]
 
@@ -84,13 +83,11 @@ async def get_all_authors(
     """Get all authors with current age, last publication year, and research group status."""
     path = await _get_path(db, "authors")
 
-    try:
+    with handle_query_error("open-academic-analytics/authors"):
         conn = get_duckdb_client().connect()
         result = conn.execute(f"SELECT * FROM read_parquet('{path}') ORDER BY ego_display_name")
         cols = [d[0] for d in result.description]
         rows = result.fetchall()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Query failed: {e}")
 
     return [dict(zip(cols, row)) for row in rows]
 
@@ -122,13 +119,11 @@ async def get_coauthors_for_author(
     if limit:
         params.append(limit)
 
-    try:
+    with handle_query_error("open-academic-analytics/coauthors"):
         conn = get_duckdb_client().connect()
         result = conn.execute(sql, params)
         cols = [d[0] for d in result.description]
         rows = result.fetchall()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Query failed: {e}")
 
     return [dict(zip(cols, row)) for row in rows]
 
@@ -143,15 +138,13 @@ async def get_embeddings_data(
     """Papers with UMAP embeddings and department metadata for visualization."""
     path = await _get_path(db, "papers")
 
-    try:
+    with handle_query_error("open-academic-analytics/papers"):
         conn = get_duckdb_client().connect()
         result = conn.execute(
             f"SELECT * FROM read_parquet('{path}') WHERE umap_1 IS NOT NULL ORDER BY random() LIMIT {limit}"
         )
         cols = [d[0] for d in result.description]
         rows = result.fetchall()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Query failed: {e}")
 
     return [dict(zip(cols, row)) for row in rows]
 
@@ -182,13 +175,11 @@ async def get_papers_for_author(
     if limit:
         params.append(limit)
 
-    try:
+    with handle_query_error("open-academic-analytics/papers"):
         conn = get_duckdb_client().connect()
         result = conn.execute(sql, params)
         cols = [d[0] for d in result.description]
         rows = result.fetchall()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Query failed: {e}")
 
     return [dict(zip(cols, row)) for row in rows]
 
@@ -224,11 +215,9 @@ async def get_training_data(
         ORDER BY pub_year, age_category
     """
 
-    try:
+    with handle_query_error("open-academic-analytics/training"):
         conn = get_duckdb_client().connect()
         rows = conn.execute(sql, [author_name, author_name, author_name]).fetchall()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Query failed: {e}")
 
     if not rows:
         raise HTTPException(status_code=404, detail=f"No training data found for: {author_name}")

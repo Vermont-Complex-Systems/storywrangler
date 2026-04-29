@@ -85,8 +85,8 @@ client.registry.register({
 
 + "manifest": {
 +     "availability": {
-+         "united_states": {"min": 1880, "max": 2022},
-+         "quebec":        {"min": 1980, "max": 2022},
++         "united_states": {"yearly": {"min": 1880, "max": 2022}},
++         "quebec":        {"yearly": {"min": 1980, "max": 2022}},
 +     }
 + },`;
 
@@ -96,10 +96,10 @@ client.registry.register({
 
   "manifest": {
       "availability": {
--         "united_states": {"min": 1880, "max": 2022},
--         "quebec":        {"min": 1980, "max": 2022},
-+         "wikidata:Q30":  {"min": 1880, "max": 2022},
-+         "wikidata:Q176": {"min": 1980, "max": 2022},
+-         "united_states": {"yearly": {"min": 1880, "max": 2022}},
+-         "quebec":        {"yearly": {"min": 1980, "max": 2022}},
++         "wikidata:Q30":  {"yearly": {"min": 1880, "max": 2022}},
++         "wikidata:Q176": {"yearly": {"min": 1980, "max": 2022}},
       }
   },
 
@@ -228,9 +228,10 @@ WHERE country     = 'United States'    -- entity_mapping.local_id_column
 <p>
 	<code>transform.time_dimension</code> opens a date-range axis for <code>BETWEEN</code> queries.
 	The meaningful comparisons are same location across two time ranges (e.g. US 1990 vs US 2020),
-	or same time range across two locations (e.g. US 2020 vs Quebec 2020). This is also the first
-	registration that populates <code>manifest.availability</code> — year coverage per location,
-	letting the UI know valid ranges without querying the data.
+	or same time range across two locations (e.g. US 2020 vs Quebec 2020). When
+	<code>time_dimension</code> is set, the platform auto-populates
+	<code>manifest.availability</code> at registration time — computing min/max date coverage
+	per entity and partition dimension, so the UI knows valid ranges without querying the data.
 </p>
 
 <p>
@@ -251,8 +252,8 @@ WHERE country     = 'United States'    -- entity_mapping.local_id_column
 <p>Moving <code>year</code> to <code>time_dimension</code> unlocks range queries and standardizes
 the API parameter: regardless of the underlying column name (<code>year</code>, <code>date</code>…),
 callers always use <code>?dates=</code> and <code>?dates2=</code>. <code>manifest.availability</code>
-is optional — it tells the UI what years are valid without touching the data, but the endpoint
-works without it:</p>
+is auto-populated at registration — it tells the UI what date ranges are valid per entity
+without touching the data:</p>
 
 <Code.Root code={step2time} lang="diff" hideLines={true}>
 </Code.Root>

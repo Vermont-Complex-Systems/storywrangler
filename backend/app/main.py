@@ -1,15 +1,19 @@
 import logging
+import time
 from contextlib import asynccontextmanager
 from importlib.metadata import PackageNotFoundError, version as pkg_version
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.responses import JSONResponse
 from sqlmodel import select
 
 from app.core.auth import get_password_hash
 from app.core.config import settings
 from app.core.database import async_session_factory, init_db
+from app.core.exceptions import DataNotAvailableError, QueryError
+from app.core.timing import get_timings, init_timings
 from app.models.auth import User
 from app.routers import auth, babynames, open_academic_analytics, registry, scisciDB, storywrangler, wikimedia, zoning_bylaws
 
@@ -56,8 +60,64 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["Server-Timing"],
 )
 app.add_middleware(GZipMiddleware, minimum_size=1000)
+
+
+# ── Server-Timing middleware ──────────────────────────────────────────────────
+
+@app.middleware("http")
+async def server_timing_middleware(request: Request, call_next):
+    init_timings()
+    start = time.perf_counter()
+    response = await call_next(request)
+    total_ms = (time.perf_counter() - start) * 1000
+
+    parts = []
+    for name, desc, dur in get_timings():
+        if desc:
+            parts.append(f'{name};desc="{desc}";dur={dur:.1f}')
+        else:
+            parts.append(f"{name};dur={dur:.1f}")
+    parts.append(f"total;dur={total_ms:.1f}")
+
+    response.headers["Server-Timing"] = ", ".join(parts)
+    return response
+
+
+# ── Global exception handlers (FastAPI recommended pattern) ───────────────────
+
+@app.exception_handler(DataNotAvailableError)
+async def data_not_available_handler(request: Request, exc: DataNotAvailableError):
+    return JSONResponse(
+        status_code=404,
+        content={
+            "detail": {
+                "code": "DATA_NOT_AVAILABLE",
+                "message": (
+                    f"Data files for '{exc.dataset}' are not available on this server. "
+                    "The dataset is registered but its underlying data has not been loaded yet."
+                ),
+                "dataset": exc.dataset,
+            }
+        },
+    )
+
+
+@app.exception_handler(QueryError)
+async def query_error_handler(request: Request, exc: QueryError):
+    return JSONResponse(
+        status_code=500,
+        content={
+            "detail": {
+                "code": "QUERY_FAILED",
+                "message": f"An internal error occurred while querying '{exc.dataset}'.",
+                "dataset": exc.dataset,
+            }
+        },
+    )
+
 
 app.include_router(auth.router, prefix="/auth", tags=["auth"])
 app.include_router(auth.admin_router, prefix="/admin/auth", tags=["admin"])

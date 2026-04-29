@@ -18,7 +18,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from ..core.database import get_session
 from ..core.duckdb_client import get_duckdb_client
-from ..core.query_utils import load_time_series
+from ..core.query_utils import handle_query_error, load_time_series
 from ..core.registry_utils import get_latest_entry
 
 router = APIRouter()
@@ -117,10 +117,6 @@ async def get_metrics(
                     detail=f"'{v}' is not a valid value for '{dim}'. Valid: {sorted(map(str, valid))}",
                 )
 
-    try:
+    with handle_query_error(f"{_DOMAIN}/{dataset}"):
         conn = get_duckdb_client().connect()
         return load_time_series(conn, dataset_obj, group_cols, filter_vals, start_year, end_year, limit, exclude_nulls, top_n)
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Query execution failed: {str(e)}")

@@ -99,14 +99,22 @@ Hive partitioning promotes a column to the path level; the name is still the col
 ### `manifest` — coverage index, borrowed from Apache Iceberg (never query-time)
 
 Contains `availability` (time/entity ranges) and `partition_index` (enumerable
-partition list with per-partition stats). Neither is read at query time. Both are
-populated by pipeline submit scripts and returned via the registry API for UI/discovery.
+partition list with per-partition stats). Neither is read at query time.
 
 The name is borrowed from Apache Iceberg: a pre-computed record of partition bounds
 and file-level statistics — exactly what `availability` and `partition_index` are.
 
-`partition_index` is stored in a separate DB column (excluded from summary responses
-via SQLAlchemy `load_only`) and re-injected into `manifest` on `GET ?full=true`.
+`availability` is **auto-populated by `parquet_introspect.py`** at registration time
+when `transform.time_dimension` is set. It computes `MIN/MAX` of the time column
+grouped by entity and partition dimensions. Entity-first format:
+```json
+{"United States": {"daily": {"min": "2024-01-01", "max": "2026-04-20"}, "weekly": {...}}}
+```
+For datasets without entity_mapping: `{"daily": {"min": ..., "max": ...}}`.
+
+`partition_index` is submitter-provided, stored in a separate DB column (excluded
+from summary responses via SQLAlchemy `load_only`) and re-injected into `manifest`
+on `GET ?full=true`.
 
 ---
 

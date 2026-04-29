@@ -14,6 +14,8 @@ Both support parquet and parquet_hive; all filtering is done via WHERE clauses.
 For parquet_hive, hive_partitioning=true handles partition pruning automatically.
 """
 
+import re
+from contextlib import contextmanager
 from types import SimpleNamespace
 from typing import Any, List, Optional
 
@@ -22,7 +24,48 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from storywrangler_schemas.standards import Standards
+from ..core.exceptions import DataNotAvailableError, QueryError
 from ..models.registry import EntityMapping, RegistryEntry
+
+
+# ── DuckDB error classification ──────────────────────────────────────────────
+
+_DATA_MISSING_PATTERNS = [
+    re.compile(r"No files found that match the pattern", re.IGNORECASE),
+    re.compile(r"Cannot open file", re.IGNORECASE),
+    re.compile(r"File .+ does not exist", re.IGNORECASE),
+]
+
+
+def _is_data_missing(exc: Exception) -> bool:
+    msg = str(exc)
+    return any(p.search(msg) for p in _DATA_MISSING_PATTERNS)
+
+
+@contextmanager
+def handle_query_error(dataset_label: str):
+    """Wrap DuckDB queries with user-friendly error translation.
+
+    Usage::
+
+        with handle_query_error("wikimedia/ngrams"):
+            rows = conn.execute(...).fetchall()
+
+    Catches raw DuckDB exceptions and raises custom exceptions that are
+    converted to JSON responses by the global handlers in main.py.
+
+    - File-not-found → DataNotAvailableError (→ 404)
+    - Other errors   → QueryError (→ 500, no internal paths leaked)
+    - HTTPExceptions pass through unchanged
+    """
+    try:
+        yield
+    except (HTTPException, DataNotAvailableError, QueryError):
+        raise
+    except Exception as exc:
+        if _is_data_missing(exc):
+            raise DataNotAvailableError(dataset_label)
+        raise QueryError(dataset_label)
 
 
 def _derive_local_id(namespace: Optional[str], canonical_id: str) -> Optional[str]:

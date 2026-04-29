@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from ..core.database import get_session
 from ..core.duckdb_client import get_duckdb_client
-from ..core.query_utils import load_system, parse_dates, resolve_entity
+from ..core.query_utils import handle_query_error, load_system, parse_dates, resolve_entity
 from ..core.registry_utils import get_latest_entry
 
 router = APIRouter()
@@ -78,7 +78,7 @@ async def get_babynames_top_ngrams(
 
     filter_vals = {"sex": sex} if sex else {}
 
-    try:
+    with handle_query_error("babynames/ngrams"):
         conn = get_duckdb_client().connect()
         dr1 = parse_dates(dates)
         sys1 = load_system(conn, dataset_obj, em.local_id, dr1, filter_vals, limit)
@@ -100,8 +100,3 @@ async def get_babynames_top_ngrams(
             "data": formatted1,
             "metadata": {"location": locations, "sex": sex},
         }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Query execution failed: {str(e)}")

@@ -115,12 +115,15 @@ async def register_dataset(
         derived = introspect(conn, dataset)
     except Exception as e:
         log.warning("Parquet introspection failed for %s/%s: %s", dataset.domain, dataset.dataset_id, e)
+        derived["introspect_error"] = str(e)
 
     if "data_schema" not in derived:
+        reason = derived.get("introspect_error", "")
+        hint = f" DuckDB error: {reason}" if reason else ""
         raise HTTPException(
             status_code=422,
             detail=(
-                f"Data not accessible at '{dataset.data_location}'. "
+                f"Data not accessible at '{dataset.data_location}'.{hint} "
                 "Ensure the path exists and is available to the API before registering."
             ),
         )
@@ -155,14 +158,17 @@ async def register_dataset(
         if data_schema:
             type_col  = ep.type_column  or "types"
             count_col = ep.count_column or "counts"
-            missing = [c for c in [type_col, count_col] if c not in data_schema]
+            expected = [type_col, count_col]
+            if dataset.transform and dataset.transform.time_dimension:
+                expected.append(dataset.transform.time_dimension)
+            missing = [c for c in expected if c not in data_schema]
             if missing:
                 raise HTTPException(
                     status_code=422,
                     detail=(
                         f"Column(s) {missing} not found in dataset schema {sorted(data_schema)}. "
-                        "Declare the correct column names via endpoint_schema.type_column and "
-                        "endpoint_schema.count_column. "
+                        "Verify endpoint_schema.type_column, endpoint_schema.count_column, "
+                        "and transform.time_dimension match the actual column names. "
                         "See https://github.com/vermont-complex-systems/Storywrangler-Specification for the spec."
                     ),
                 )
@@ -308,6 +314,10 @@ async def register_dataset(
             entry.data_schema = derived["data_schema"]
         if "filter_values" in derived:
             entry.filter_values = derived["filter_values"]
+        if "availability" in derived:
+            manifest = dict(entry.manifest or {})
+            manifest["availability"] = derived["availability"]
+            entry.manifest = manifest
         await db.commit()
         msg["derived"] = list(derived.keys())
 
@@ -479,15 +489,7 @@ async def get_adapter_info(
     dataset_id: str,
     db: AsyncSession = Depends(get_session),
 ):
-    """List entity mapping rows for a dataset (entity_id ↔ local_id).
-
-    Includes min_year / max_year per entity when available in
-    manifest.availability.yearly.available.
-    """
-    ds = await get_latest_entry(db, domain, dataset_id)
-    if not ds:
-        raise HTTPException(status_code=404, detail=f"RegistryEntry '{domain}/{dataset_id}' not found")
-
+    """List entity mapping rows for a dataset (entity_id ↔ local_id)."""
     rows_result = await db.execute(
         select(EntityMapping).where(
             EntityMapping.domain == domain,
@@ -495,13 +497,8 @@ async def get_adapter_info(
         )
     )
     rows = rows_result.scalars().all()
-
-    year_ranges: dict = (
-        (ds.manifest or {})
-        .get("availability", {})
-        .get("yearly", {})
-        .get("available", {})
-    )
+    if not rows:
+        raise HTTPException(status_code=404, detail=f"No entity mappings for '{domain}/{dataset_id}'")
 
     return [
         {
@@ -509,8 +506,6 @@ async def get_adapter_info(
             "entity_id": r.entity_id,
             "entity_name": r.entity_name,
             "entity_ids": r.entity_ids,
-            "min_year": year_ranges.get(r.entity_id, {}).get("min"),
-            "max_year": year_ranges.get(r.entity_id, {}).get("max"),
         }
         for r in rows
     ]
