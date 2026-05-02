@@ -2,6 +2,7 @@
 Wikimedia endpoints — Wikipedia n-grams, revision histories, and term time series.
 """
 
+import hashlib
 from datetime import datetime, timedelta
 from typing import Optional
 from urllib.parse import quote
@@ -535,12 +536,11 @@ async def term_series(
     sparkline_rows = []
     with timed("registry", "Sparkline registry lookup"):
         sparkline_obj = await get_latest_entry(db, "wikimedia", "sparklines")
+        top_articles_obj = await get_latest_entry(db, "wikimedia", "top_articles_ngrams")
 
     if sparkline_obj:
         encoded_country = quote(str(local_id), safe="")
         sparkline_path = f"{sparkline_obj.data_location}/ngram_size={n}/country={encoded_country}/data_0.parquet"
-        articles_base = sparkline_obj.data_location.replace("/sparklines", "/top_articles_ngrams")
-        articles_path = f"{articles_base}/ngram_size={n}/country={encoded_country}/data_0.parquet"
 
         with timed("fast_query", "DuckDB sparkline + articles read"):
             conn = get_duckdb_client().connect()
@@ -555,23 +555,25 @@ async def term_series(
             ).fetchall()
 
             articles_by_date: dict = {}
-            if sparkline_rows and include_articles:
+            if sparkline_rows and include_articles and top_articles_obj:
                 try:
+                    bucket = hashlib.md5(type.encode("utf-8")).hexdigest()[0]
+                    articles_base = f"{top_articles_obj.data_location}/ngram_size={n}/country={encoded_country}"
                     art_rows = conn.execute(
                         f"""
                         SELECT date, article_url, score
-                        FROM read_parquet('{articles_path}')
-                        WHERE ngram = ? AND {date_filter}
+                        FROM read_parquet('{articles_base}/*/data_0.parquet', hive_partitioning=true)
+                        WHERE ngram_bucket = ? AND ngram = ? AND {date_filter}
                         ORDER BY date, article_rank
                         """,
-                        [type, *date_params],
+                        [bucket, type, *date_params],
                     ).fetchall()
                     for row in art_rows:
                         articles_by_date.setdefault(str(row[0]), []).append(
                             [row[1], float(row[2]) if row[2] else 0.0]
                         )
                 except Exception:
-                    pass  # articles file may not exist yet
+                    pass  # articles files may not exist yet
 
     # ── Slow path: scan daily partitions (fallback for terms not in sparkline) ──
     if not sparkline_rows:
@@ -820,14 +822,14 @@ async def term_series_batch(
     if use_fast_path:
         with timed("registry", "Sparkline registry lookup"):
             sparkline_obj = await get_latest_entry(db, "wikimedia", "sparklines")
+            top_articles_obj = await get_latest_entry(db, "wikimedia", "top_articles_ngrams")
     else:
         sparkline_obj = None
+        top_articles_obj = None
 
     if sparkline_obj:
         encoded_country = quote(str(local_id), safe="")
         sparkline_path = f"{sparkline_obj.data_location}/ngram_size={n}/country={encoded_country}/data_0.parquet"
-        articles_base = sparkline_obj.data_location.replace("/sparklines", "/top_articles_ngrams")
-        articles_path = f"{articles_base}/ngram_size={n}/country={encoded_country}/data_0.parquet"
 
         with timed("fast_query", "DuckDB sparkline + articles read"):
             conn = get_duckdb_client().connect()
@@ -845,13 +847,20 @@ async def term_series_batch(
 
                 found_terms = {row[0] for row in sparkline_rows}
 
-                if include_articles and found_terms:
+                if include_articles and found_terms and top_articles_obj:
                     try:
+                        # Compute which buckets contain our terms, then pass all
+                        # matching bucket files as a list so DuckDB can parallelise I/O
+                        # (critical on NFS where sequential file opens are expensive).
+                        buckets = {hashlib.md5(t.encode("utf-8")).hexdigest()[0] for t in found_terms}
+                        articles_base = f"{top_articles_obj.data_location}/ngram_size={n}/country={encoded_country}"
+                        bucket_files = [f"{articles_base}/ngram_bucket={b}/data_0.parquet" for b in buckets]
+                        file_list = ", ".join(f"'{f}'" for f in bucket_files)
                         found_placeholders = ", ".join(["?"] * len(found_terms))
                         art_rows = conn.execute(
                             f"""
                             SELECT ngram, date, article_url, score
-                            FROM read_parquet('{articles_path}')
+                            FROM read_parquet([{file_list}])
                             WHERE ngram IN ({found_placeholders})
                               {art_date_filter}
                             ORDER BY ngram, date, article_rank
@@ -864,7 +873,7 @@ async def term_series_batch(
                                 [row[2], float(row[3]) if row[3] else 0.0]
                             )
                     except Exception:
-                        pass  # articles file may not exist yet
+                        pass  # articles files may not exist yet
             except Exception:
                 sparkline_rows = []
                 found_terms = set()
@@ -948,4 +957,68 @@ async def term_series_batch(
     return {
         "results": results,
         "latest_available_date": latest_date,
+    }
+
+
+# ── precomputed-rtd ───────────────────────────────────────────────────────────
+
+@router.get("/precomputed-rtd")
+async def precomputed_rtd(
+    entity: str = Query(..., description="Global entity ID, e.g. 'wikidata:Q30'"),
+    date: str = Query(..., description="Reference date (YYYY-MM-DD)"),
+    date_delta: int = Query(1, description="Days between the two compared systems"),
+    granularity: str = Query("daily", description="Granularity: daily | weekly | monthly"),
+    n: int = Query(1, description="N-gram size (1 = unigrams, 2 = bigrams)"),
+    alpha: float = Query(0.17, description="RTD alpha parameter"),
+    limit: int = Query(200, description="Top N terms by absolute divergence"),
+    db: AsyncSession = Depends(get_session),
+):
+    """Precomputed Rank Turbulence Divergence for a single entity and date.
+
+    Returns the top divergent terms between two consecutive time periods,
+    sorted by absolute divergence descending.
+    """
+    with timed("registry", "RTD registry lookup"):
+        rtd_obj = await get_latest_entry(db, "wikimedia", "precomputed_rtd")
+        if not rtd_obj:
+            raise HTTPException(status_code=404, detail="'wikimedia/precomputed_rtd' dataset not found")
+        local_id = (await resolve_entity(db, "wikimedia", "ngrams", entity)).local_id
+
+    encoded_country = quote(str(local_id), safe="")
+    path = f"{rtd_obj.data_location}/ngram_size={n}/country={encoded_country}/data_0.parquet"
+
+    with timed("query", "DuckDB precomputed RTD read"):
+        conn = get_duckdb_client().connect()
+        with handle_query_error("wikimedia/precomputed_rtd"):
+            rows = conn.execute(
+                f"""
+                SELECT ngram, date, date_delta, divergence, alpha, granularity
+                FROM read_parquet('{path}')
+                WHERE date = ? AND date_delta = ? AND granularity = ? AND alpha = ?
+                ORDER BY ABS(divergence) DESC
+                LIMIT ?
+                """,
+                [date, date_delta, granularity, alpha, limit],
+            ).fetchall()
+
+    return {
+        "data": [
+            {
+                "type": r[0],
+                "date": str(r[1]),
+                "date_delta": r[2],
+                "divergence": r[3],
+                "alpha": r[4],
+                "granularity": r[5],
+            }
+            for r in rows
+        ],
+        "metadata": {
+            "entity": entity,
+            "date": date,
+            "date_delta": date_delta,
+            "granularity": granularity,
+            "n": n,
+            "alpha": alpha,
+        },
     }
