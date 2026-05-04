@@ -15,7 +15,7 @@ from app.core.database import async_session_factory, init_db
 from app.core.exceptions import DataNotAvailableError, QueryError
 from app.core.timing import get_timings, init_timings
 from app.models.auth import User
-from app.routers import auth, babynames, open_academic_analytics, registry, scisciDB, storywrangler, wikimedia, zoning_bylaws
+from app.routers import auth, babynames, open_academic_analytics, reddit, registry, scisciDB, storywrangler, wikimedia, zoning_bylaws
 
 log = logging.getLogger(__name__)
 
@@ -129,6 +129,7 @@ app.include_router(wikimedia.router, prefix="/wikimedia", tags=["wikimedia"])
 app.include_router(open_academic_analytics.router, prefix="/open-academic-analytics", tags=["open-academic-analytics"])
 app.include_router(scisciDB.router, prefix="/scisciDB", tags=["scisciDB"])
 app.include_router(zoning_bylaws.router, prefix="/vt-zoning-atlas", tags=["vt-zoning-atlas"])
+app.include_router(reddit.router, prefix="/reddit", tags=["reddit"])
 
 
 @app.get("/")
