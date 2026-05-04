@@ -392,6 +392,15 @@ class DatasetCreate(BaseModel):
         ),
     )
     description: str = Field(..., description="Human-readable description of the dataset")
+    data_schema: Optional[Dict[str, str]] = Field(
+        None,
+        description=(
+            "Column names → DuckDB type strings (e.g. {'ngram': 'VARCHAR', 'pv_count': 'BIGINT'}). "
+            "When provided, used as the authoritative schema — glob-based schema introspection "
+            "is skipped. When omitted, schema is auto-derived from data files (all files must "
+            "have consistent schemas or registration will be rejected)."
+        ),
+    )
     manifest: Optional[ManifestConfig] = Field(
         None,
         description="Coverage index: pre-computed availability and partition_index. Never read at query time.",

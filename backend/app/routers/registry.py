@@ -109,10 +109,12 @@ async def register_dataset(
 
     # ── Pre-registration validation ─────────────────────────────────────────────
     # Introspect first (read-only) so we can validate before touching the DB.
+    # When the submitter provides data_schema, glob-based schema introspection
+    # is skipped (allows registration during schema transitions).
     derived: Dict[str, Any] = {}
     try:
         conn = get_duckdb_client().connect()
-        derived = introspect(conn, dataset)
+        derived = introspect(conn, dataset, provided_schema=dataset.data_schema)
     except Exception as e:
         log.warning("Parquet introspection failed for %s/%s: %s", dataset.domain, dataset.dataset_id, e)
         derived["introspect_error"] = str(e)
@@ -124,7 +126,10 @@ async def register_dataset(
             status_code=422,
             detail=(
                 f"Data not accessible at '{dataset.data_location}'.{hint} "
-                "Ensure the path exists and is available to the API before registering."
+                "Ensure the path exists and is available to the API before registering. "
+                "If your files have inconsistent schemas (e.g. after a column was added or "
+                "removed), provide data_schema in the registration payload to declare the "
+                "authoritative schema and skip glob-based introspection."
             ),
         )
 

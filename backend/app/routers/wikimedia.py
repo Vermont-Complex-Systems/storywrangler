@@ -581,26 +581,38 @@ async def term_series(
             conn = get_duckdb_client().connect()
             glob_pattern = f"{entity_path}/date=*/data_0.parquet"
 
-            if include_articles:
-                slow_rows = conn.execute(
-                    f"""
-                    SELECT date, pv_count, pv_rank, pv_freq, top_articles
-                    FROM read_parquet('{glob_pattern}', hive_partitioning=true)
-                    WHERE ngram = ? AND {date_filter}
-                    ORDER BY date
-                    """,
-                    [type, *date_params],
-                ).fetchall()
-            else:
-                slow_rows = conn.execute(
-                    f"""
-                    SELECT date, pv_count, pv_rank, pv_freq
-                    FROM read_parquet('{glob_pattern}', hive_partitioning=true)
-                    WHERE ngram = ? AND {date_filter}
-                    ORDER BY date
-                    """,
-                    [type, *date_params],
-                ).fetchall()
+            slow_rows = conn.execute(
+                f"""
+                SELECT date, pv_count, pv_rank, pv_freq
+                FROM read_parquet('{glob_pattern}', hive_partitioning=true)
+                WHERE ngram = ? AND {date_filter}
+                ORDER BY date
+                """,
+                [type, *date_params],
+            ).fetchall()
+
+            # Articles live in the separate top_articles_ngrams dataset.
+            articles_by_date: dict = {}
+            if slow_rows and include_articles and top_articles_obj:
+                try:
+                    encoded = quote(str(local_id), safe="")
+                    bucket = hashlib.md5(type.encode("utf-8")).hexdigest()[0]
+                    articles_base = f"{top_articles_obj.data_location}/ngram_size={n}/country={encoded}"
+                    art_rows = conn.execute(
+                        f"""
+                        SELECT date, article_url, score
+                        FROM read_parquet('{articles_base}/*/data_0.parquet', hive_partitioning=true)
+                        WHERE ngram_bucket = ? AND ngram = ? AND {date_filter}
+                        ORDER BY date, article_rank
+                        """,
+                        [bucket, type, *date_params],
+                    ).fetchall()
+                    for row in art_rows:
+                        articles_by_date.setdefault(str(row[0]), []).append(
+                            [row[1], float(row[2]) if row[2] else 0.0]
+                        )
+                except Exception:
+                    pass  # articles files may not exist yet
 
             series = []
             for row in slow_rows:
@@ -611,15 +623,7 @@ async def term_series(
                     "freq": float(row[3]) if row[3] else 0.0,
                 }
                 if include_articles:
-                    top_articles = []
-                    if row[4]:
-                        for article in row[4]:
-                            if len(article) >= 2:
-                                try:
-                                    top_articles.append([article[0], float(article[1])])
-                                except (ValueError, TypeError):
-                                    top_articles.append([article[0], 0.0])
-                    entry["top_articles"] = top_articles
+                    entry["top_articles"] = articles_by_date.get(str(row[0]), [])
                 series.append(entry)
 
             return {
@@ -887,31 +891,46 @@ async def term_series_batch(
             glob_pattern = f"{entity_path}/date=*/data_0.parquet"
             slow_placeholders = ", ".join(["?"] * len(missing_terms))
 
-            if include_articles and use_fast_path:
-                # top_articles column only exists in daily partition files
-                slow_rows = conn.execute(
-                    f"""
-                    SELECT ngram, date, pv_count, pv_rank, pv_freq, top_articles
-                    FROM read_parquet('{glob_pattern}', hive_partitioning=true)
-                    WHERE ngram IN ({slow_placeholders})
-                      {date_filter}
-                    ORDER BY ngram, date
-                    """,
-                    [*missing_terms, *date_params],
-                ).fetchall()
-            else:
-                slow_rows = conn.execute(
-                    f"""
-                    SELECT ngram, date, pv_count, pv_rank, pv_freq
-                    FROM read_parquet('{glob_pattern}', hive_partitioning=true)
-                    WHERE ngram IN ({slow_placeholders})
-                      {date_filter}
-                    ORDER BY ngram, date
-                    """,
-                    [*missing_terms, *date_params],
-                ).fetchall()
+            slow_rows = conn.execute(
+                f"""
+                SELECT ngram, date, pv_count, pv_rank, pv_freq
+                FROM read_parquet('{glob_pattern}', hive_partitioning=true)
+                WHERE ngram IN ({slow_placeholders})
+                  {date_filter}
+                ORDER BY ngram, date
+                """,
+                [*missing_terms, *date_params],
+            ).fetchall()
 
-            art_date_set = set(art_date_list) if articles_dates else None
+            # Articles live in the separate top_articles_ngrams dataset.
+            slow_articles: dict = {}  # (ngram, date_str) -> [[url, score], ...]
+            if slow_rows and include_articles and use_fast_path and top_articles_obj:
+                try:
+                    encoded = quote(str(local_id), safe="")
+                    slow_found = {row[0] for row in slow_rows}
+                    buckets = {hashlib.md5(t.encode("utf-8")).hexdigest()[0] for t in slow_found}
+                    articles_base = f"{top_articles_obj.data_location}/ngram_size={n}/country={encoded}"
+                    bucket_files = [f"{articles_base}/ngram_bucket={b}/data_0.parquet" for b in buckets]
+                    file_list = ", ".join(f"'{f}'" for f in bucket_files)
+                    slow_found_ph = ", ".join(["?"] * len(slow_found))
+                    art_rows = conn.execute(
+                        f"""
+                        SELECT ngram, date, article_url, score
+                        FROM read_parquet([{file_list}])
+                        WHERE ngram IN ({slow_found_ph})
+                          {art_date_filter}
+                        ORDER BY ngram, date, article_rank
+                        """,
+                        [*list(slow_found), *art_date_params],
+                    ).fetchall()
+                    for row in art_rows:
+                        key = (row[0], str(row[1]))
+                        slow_articles.setdefault(key, []).append(
+                            [row[2], float(row[3]) if row[3] else 0.0]
+                        )
+                except Exception:
+                    pass  # articles files may not exist yet
+
             for row in slow_rows:
                 ngram = row[0]
                 date_str = str(row[1])
@@ -922,19 +941,7 @@ async def term_series_batch(
                     "freq": float(row[4]) if row[4] else 0.0,
                 }
                 if include_articles and use_fast_path:
-                    # Only parse articles for requested dates (daily only)
-                    if art_date_set is None or date_str in art_date_set:
-                        top_articles = []
-                        if row[5]:
-                            for article in row[5]:
-                                if len(article) >= 2:
-                                    try:
-                                        top_articles.append([article[0], float(article[1])])
-                                    except (ValueError, TypeError):
-                                        top_articles.append([article[0], 0.0])
-                        entry["top_articles"] = top_articles
-                    else:
-                        entry["top_articles"] = []
+                    entry["top_articles"] = slow_articles.get((ngram, date_str), [])
                 slow_results.setdefault(ngram, []).append(entry)
 
     # ── Merge results ──

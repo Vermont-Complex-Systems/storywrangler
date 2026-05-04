@@ -45,8 +45,13 @@ def _path_expr(dataset) -> Optional[str]:
     return None
 
 
-def introspect(conn, dataset) -> Dict[str, Any]:
+def introspect(conn, dataset, provided_schema: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     """Derive schema, filter_values, and availability from parquet files.
+
+    When *provided_schema* is given, it is used as the authoritative data_schema
+    and glob-based schema introspection is skipped.  This allows registration to
+    succeed even when older partition files have a different schema (submitter
+    takes responsibility for consistency).
 
     Returns a dict with any subset of:
       {
@@ -63,15 +68,20 @@ def introspect(conn, dataset) -> Dict[str, Any]:
     if not path_expr:
         return result
 
-    # ── schema (cheap: reads parquet footer + hive directory metadata) ──────────
-    try:
-        rows = conn.execute(
-            f"DESCRIBE SELECT * FROM {path_expr}"
-        ).fetchall()
-        result["data_schema"] = {r[0]: r[1] for r in rows}
-    except Exception as e:
-        log.warning("Schema introspection failed for %s: %s", path_expr, e)
-        result["introspect_error"] = str(e)
+    # ── schema ─────────────────────────────────────────────────────────────────
+    if provided_schema is not None:
+        result["data_schema"] = provided_schema
+    else:
+        # Cheap: reads parquet footer + hive directory metadata.
+        # Fails when files in the glob have inconsistent schemas.
+        try:
+            rows = conn.execute(
+                f"DESCRIBE SELECT * FROM {path_expr}"
+            ).fetchall()
+            result["data_schema"] = {r[0]: r[1] for r in rows}
+        except Exception as e:
+            log.warning("Schema introspection failed for %s: %s", path_expr, e)
+            result["introspect_error"] = str(e)
 
     # ── filter values ────────────────────────────────────────────────────────────
     # Source: transform.filter_dimensions + transform.partition_dimensions.
