@@ -500,11 +500,11 @@ async def term_series(
     partition_map = (ngrams_tr.get("partition_dimensions") or {})
     if isinstance(partition_map, list):
         partition_map = {dim: None for dim in partition_map}
-    ngrams_filter_vals: dict = {}
-    if "granularity" in partition_map:
-        ngrams_filter_vals["granularity"] = granularity
-    if "ngram_size" in partition_map:
-        ngrams_filter_vals["ngram_size"] = n
+    # Build filter_vals in partition_map key order (matches hive directory nesting)
+    _dim_values = {"granularity": granularity, "ngram_size": n}
+    ngrams_filter_vals: dict = {
+        dim: _dim_values[dim] for dim in partition_map if dim in _dim_values
+    }
     entity_path = _entity_base_path(ngrams_obj, local_id, ngrams_filter_vals)
 
     with timed("discover", "Latest date from manifest"):
@@ -540,7 +540,8 @@ async def term_series(
 
     if sparkline_obj:
         encoded_country = quote(str(local_id), safe="")
-        sparkline_path = f"{sparkline_obj.data_location}/ngram_size={n}/country={encoded_country}/data_0.parquet"
+        bucket = hashlib.md5(type.encode("utf-8")).hexdigest()[0]
+        sparkline_path = f"{sparkline_obj.data_location}/ngram_size={n}/country={encoded_country}/ngram_bucket={bucket}/data_0.parquet"
 
         with timed("fast_query", "DuckDB sparkline + articles read"):
             conn = get_duckdb_client().connect()
@@ -557,16 +558,15 @@ async def term_series(
             articles_by_date: dict = {}
             if sparkline_rows and include_articles and top_articles_obj:
                 try:
-                    bucket = hashlib.md5(type.encode("utf-8")).hexdigest()[0]
-                    articles_base = f"{top_articles_obj.data_location}/ngram_size={n}/country={encoded_country}"
+                    articles_path = f"{top_articles_obj.data_location}/ngram_size={n}/country={encoded_country}/ngram_bucket={bucket}/data_0.parquet"
                     art_rows = conn.execute(
                         f"""
                         SELECT date, article_url, score
-                        FROM read_parquet('{articles_base}/*/data_0.parquet', hive_partitioning=true)
-                        WHERE ngram_bucket = ? AND ngram = ? AND {date_filter}
+                        FROM read_parquet('{articles_path}')
+                        WHERE ngram = ? AND {date_filter}
                         ORDER BY date, article_rank
                         """,
-                        [bucket, type, *date_params],
+                        [type, *date_params],
                     ).fetchall()
                     for row in art_rows:
                         articles_by_date.setdefault(str(row[0]), []).append(
@@ -597,15 +597,15 @@ async def term_series(
                 try:
                     encoded = quote(str(local_id), safe="")
                     bucket = hashlib.md5(type.encode("utf-8")).hexdigest()[0]
-                    articles_base = f"{top_articles_obj.data_location}/ngram_size={n}/country={encoded}"
+                    articles_path = f"{top_articles_obj.data_location}/ngram_size={n}/country={encoded}/ngram_bucket={bucket}/data_0.parquet"
                     art_rows = conn.execute(
                         f"""
                         SELECT date, article_url, score
-                        FROM read_parquet('{articles_base}/*/data_0.parquet', hive_partitioning=true)
-                        WHERE ngram_bucket = ? AND ngram = ? AND {date_filter}
+                        FROM read_parquet('{articles_path}')
+                        WHERE ngram = ? AND {date_filter}
                         ORDER BY date, article_rank
                         """,
-                        [bucket, type, *date_params],
+                        [type, *date_params],
                     ).fetchall()
                     for row in art_rows:
                         articles_by_date.setdefault(str(row[0]), []).append(
@@ -769,11 +769,11 @@ async def term_series_batch(
     partition_map = (ngrams_tr.get("partition_dimensions") or {})
     if isinstance(partition_map, list):
         partition_map = {dim: None for dim in partition_map}
-    ngrams_filter_vals: dict = {}
-    if "granularity" in partition_map:
-        ngrams_filter_vals["granularity"] = granularity
-    if "ngram_size" in partition_map:
-        ngrams_filter_vals["ngram_size"] = n
+    # Build filter_vals in partition_map key order (matches hive directory nesting)
+    _dim_values = {"granularity": granularity, "ngram_size": n}
+    ngrams_filter_vals: dict = {
+        dim: _dim_values[dim] for dim in partition_map if dim in _dim_values
+    }
     entity_path = _entity_base_path(ngrams_obj, local_id, ngrams_filter_vals)
     latest_date = _latest_from_manifest(ngrams_obj, local_id, granularity)
 
@@ -833,7 +833,11 @@ async def term_series_batch(
 
     if sparkline_obj:
         encoded_country = quote(str(local_id), safe="")
-        sparkline_path = f"{sparkline_obj.data_location}/ngram_size={n}/country={encoded_country}/data_0.parquet"
+        sparkline_base = f"{sparkline_obj.data_location}/ngram_size={n}/country={encoded_country}"
+        # Compute which buckets contain our terms, then read only those files.
+        spark_buckets = {hashlib.md5(t.encode("utf-8")).hexdigest()[0] for t in type_list}
+        spark_bucket_files = [f"{sparkline_base}/ngram_bucket={b}/data_0.parquet" for b in spark_buckets]
+        spark_file_list = ", ".join(f"'{f}'" for f in spark_bucket_files)
 
         with timed("fast_query", "DuckDB sparkline + articles read"):
             conn = get_duckdb_client().connect()
@@ -841,7 +845,7 @@ async def term_series_batch(
                 sparkline_rows = conn.execute(
                     f"""
                     SELECT ngram, date, pv_count, pv_rank, pv_freq
-                    FROM read_parquet('{sparkline_path}')
+                    FROM read_parquet([{spark_file_list}])
                     WHERE ngram IN ({placeholders})
                       {date_filter}
                     ORDER BY ngram, date
@@ -992,31 +996,31 @@ async def precomputed_rtd(
         local_id = (await resolve_entity(db, "wikimedia", "ngrams", entity)).local_id
 
     encoded_country = quote(str(local_id), safe="")
-    path = f"{rtd_obj.data_location}/ngram_size={n}/country={encoded_country}/data_0.parquet"
+    path = f"{rtd_obj.data_location}/ngram_size={n}/country={encoded_country}/alpha={alpha}/data_0.parquet"
 
     with timed("query", "DuckDB precomputed RTD read"):
         conn = get_duckdb_client().connect()
         with handle_query_error("wikimedia/precomputed_rtd"):
             rows = conn.execute(
                 f"""
-                SELECT ngram, date, date_delta, divergence, alpha, granularity
+                SELECT ngram, divergence
                 FROM read_parquet('{path}')
-                WHERE date = ? AND date_delta = ? AND granularity = ? AND alpha = ?
+                WHERE date = ? AND date_delta = ? AND granularity = ?
                 ORDER BY ABS(divergence) DESC
                 LIMIT ?
                 """,
-                [date, date_delta, granularity, alpha, limit],
+                [date, date_delta, granularity, limit],
             ).fetchall()
 
     return {
         "data": [
             {
                 "type": r[0],
-                "date": str(r[1]),
-                "date_delta": r[2],
-                "divergence": r[3],
-                "alpha": r[4],
-                "granularity": r[5],
+                "date": date,
+                "date_delta": date_delta,
+                "divergence": r[1],
+                "alpha": alpha,
+                "granularity": granularity,
             }
             for r in rows
         ],

@@ -107,6 +107,37 @@ async def register_dataset(
             detail=f"Unknown domain '{dataset.domain}'. Valid: {sorted(VALID_DOMAINS)}",
         )
 
+    # ── data_location / partition_dimensions consistency ────────────────────────
+    # For parquet_hive, data_location must be the root of the hive tree — the
+    # directory directly above the first col=val/ level.  If the path already
+    # embeds a partition dimension (e.g. "/data/ngram_size=1") and the same key
+    # appears in partition_dimensions, queries will double the path segment.
+    if dataset.data_format == "parquet_hive" and dataset.transform:
+        partition_keys = set()
+        pd = dataset.transform.partition_dimensions
+        if isinstance(pd, dict):
+            partition_keys = set(pd.keys())
+        elif isinstance(pd, list):
+            partition_keys = set(pd)
+        if partition_keys:
+            from pathlib import PurePosixPath
+            path_parts = PurePosixPath(dataset.data_location or "").parts
+            embedded = [
+                part for part in path_parts
+                if "=" in part and part.split("=", 1)[0] in partition_keys
+            ]
+            if embedded:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        f"data_location contains hive partition segment(s) {embedded} that also "
+                        f"appear in partition_dimensions {sorted(partition_keys)}. "
+                        "data_location must be the root of the hive tree (the directory above "
+                        "the first col=val/ level) so that query code can append partition paths "
+                        "without duplication."
+                    ),
+                )
+
     # ── Pre-registration validation ─────────────────────────────────────────────
     # Introspect first (read-only) so we can validate before touching the DB.
     # When the submitter provides data_schema, glob-based schema introspection

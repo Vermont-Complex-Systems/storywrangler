@@ -26,6 +26,12 @@ def _path_expr(dataset) -> Optional[str]:
     Includes hive_partitioning=true for parquet_hive so that partition columns
     (entity, time, granularity, ngram_size, etc.) appear in DESCRIBE output
     and are efficiently scannable via metadata rather than file contents.
+
+    For parquet_hive, when partition_dimensions declares specific values
+    (e.g. {"ngram_size": [1]}), the glob is narrowed to only scan those
+    partitions.  This avoids scanning incomplete/in-progress partitions
+    (e.g. ngram_size=2 that isn't ready yet) and keeps data_location at
+    the true hive root.
     """
     fmt = dataset.data_format
     loc = dataset.data_location
@@ -34,6 +40,16 @@ def _path_expr(dataset) -> Optional[str]:
         return None
 
     if fmt == "parquet_hive":
+        # Narrow glob using first declared value of each partition dimension
+        # that has an explicit list of allowed values (e.g. {"ngram_size": [1]}).
+        # Scalar defaults (e.g. {"granularity": "daily"}) are query-time defaults
+        # and do NOT restrict which partitions exist on disk — don't narrow on them.
+        tr = getattr(dataset, "transform", None)
+        pd = (tr.partition_dimensions if tr else None) or {}
+        if isinstance(pd, dict):
+            for dim, vals in pd.items():
+                if isinstance(vals, list) and vals:
+                    loc = f"{loc}/{dim}={vals[0]}"
         return f"read_parquet('{loc}/**/*.parquet', hive_partitioning=true)"
 
     if fmt == "parquet":
@@ -117,8 +133,18 @@ def introspect(conn, dataset, provided_schema: Optional[Dict[str, str]] = None) 
             if dataset.entity_mapping else None
         )
         # partition_dimensions whose distinct values define separate availability
-        # ranges (e.g. granularity: daily vs weekly have different date bounds)
-        group_dims = list(partition_dims)
+        # ranges (e.g. granularity: daily vs weekly have different date bounds).
+        # Exclude dimensions already narrowed in the glob (list values) — they
+        # have a single value in the scanned data so grouping on them is redundant
+        # and would push the useful dimension (granularity) out of group_dims[0].
+        partition_dims_dict = (tr.partition_dimensions if tr else None) or {}
+        if isinstance(partition_dims_dict, dict):
+            group_dims = [
+                dim for dim in partition_dims_dict
+                if not isinstance(partition_dims_dict[dim], list)
+            ]
+        else:
+            group_dims = list(partition_dims)
 
         select_cols = []
         group_by = []
