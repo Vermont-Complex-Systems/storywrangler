@@ -2,7 +2,7 @@
 Wikimedia endpoints — Wikipedia n-grams, revision histories, and term time series.
 """
 
-import hashlib
+import mmh3
 from datetime import datetime, timedelta
 from typing import Optional
 from urllib.parse import quote
@@ -17,6 +17,26 @@ from ..core.registry_utils import get_latest_entry
 from ..core.timing import timed
 
 router = APIRouter()
+
+
+def _murmur_bucket(term: str, num_buckets: int) -> int:
+    """Compute hash bucket via murmur3_32 (seed 0, positive mask).
+
+    The ``& 0x7FFFFFFF`` clears the sign bit — mmh3.hash() returns a signed
+    int32 which can be negative, but bucket IDs must be non-negative.
+    Seed 0 matches DuckDB/DuckLake's built-in murmur3_32() default.
+    """
+    return (mmh3.hash(term, seed=0) & 0x7FFFFFFF) % num_buckets
+
+
+def _get_bucket_config(dataset_obj) -> tuple[str, int]:
+    """Read hash_bucket config from a dataset's transform metadata.
+
+    Returns (column_name, bucket_count) with fallback defaults for datasets
+    not yet re-registered with hash_bucket config.
+    """
+    hb = ((dataset_obj.transform or {}).get("hash_bucket") or {}) if dataset_obj else {}
+    return hb.get("column", "ngram_bucket"), hb.get("count", 16)
 
 
 # ── top-ngrams ─────────────────────────────────────────────────────────────────
@@ -540,8 +560,9 @@ async def term_series(
 
     if sparkline_obj:
         encoded_country = quote(str(local_id), safe="")
-        bucket = hashlib.md5(type.encode("utf-8")).hexdigest()[0]
-        sparkline_path = f"{sparkline_obj.data_location}/ngram_size={n}/country={encoded_country}/ngram_bucket={bucket}/data_0.parquet"
+        spark_col, spark_count = _get_bucket_config(sparkline_obj)
+        bucket = _murmur_bucket(type, spark_count)
+        sparkline_path = f"{sparkline_obj.data_location}/ngram_size={n}/country={encoded_country}/{spark_col}={bucket}/data_0.parquet"
 
         with timed("fast_query", "DuckDB sparkline + articles read"):
             conn = get_duckdb_client().connect()
@@ -558,7 +579,9 @@ async def term_series(
             articles_by_date: dict = {}
             if sparkline_rows and include_articles and top_articles_obj:
                 try:
-                    articles_path = f"{top_articles_obj.data_location}/ngram_size={n}/country={encoded_country}/ngram_bucket={bucket}/data_0.parquet"
+                    art_col, art_count = _get_bucket_config(top_articles_obj)
+                    art_bucket = _murmur_bucket(type, art_count)
+                    articles_path = f"{top_articles_obj.data_location}/ngram_size={n}/country={encoded_country}/{art_col}={art_bucket}/data_0.parquet"
                     art_rows = conn.execute(
                         f"""
                         SELECT date, article_url, score
@@ -596,8 +619,9 @@ async def term_series(
             if slow_rows and include_articles and top_articles_obj:
                 try:
                     encoded = quote(str(local_id), safe="")
-                    bucket = hashlib.md5(type.encode("utf-8")).hexdigest()[0]
-                    articles_path = f"{top_articles_obj.data_location}/ngram_size={n}/country={encoded}/ngram_bucket={bucket}/data_0.parquet"
+                    art_col, art_count = _get_bucket_config(top_articles_obj)
+                    bucket = _murmur_bucket(type, art_count)
+                    articles_path = f"{top_articles_obj.data_location}/ngram_size={n}/country={encoded}/{art_col}={bucket}/data_0.parquet"
                     art_rows = conn.execute(
                         f"""
                         SELECT date, article_url, score
@@ -833,10 +857,11 @@ async def term_series_batch(
 
     if sparkline_obj:
         encoded_country = quote(str(local_id), safe="")
+        spark_col, spark_count = _get_bucket_config(sparkline_obj)
         sparkline_base = f"{sparkline_obj.data_location}/ngram_size={n}/country={encoded_country}"
         # Compute which buckets contain our terms, then read only those files.
-        spark_buckets = {hashlib.md5(t.encode("utf-8")).hexdigest()[0] for t in type_list}
-        spark_bucket_files = [f"{sparkline_base}/ngram_bucket={b}/data_0.parquet" for b in spark_buckets]
+        spark_buckets = {_murmur_bucket(t, spark_count) for t in type_list}
+        spark_bucket_files = [f"{sparkline_base}/{spark_col}={b}/data_0.parquet" for b in spark_buckets]
         spark_file_list = ", ".join(f"'{f}'" for f in spark_bucket_files)
 
         with timed("fast_query", "DuckDB sparkline + articles read"):
@@ -860,9 +885,10 @@ async def term_series_batch(
                         # Compute which buckets contain our terms, then pass all
                         # matching bucket files as a list so DuckDB can parallelise I/O
                         # (critical on NFS where sequential file opens are expensive).
-                        buckets = {hashlib.md5(t.encode("utf-8")).hexdigest()[0] for t in found_terms}
+                        art_col, art_count = _get_bucket_config(top_articles_obj)
+                        buckets = {_murmur_bucket(t, art_count) for t in found_terms}
                         articles_base = f"{top_articles_obj.data_location}/ngram_size={n}/country={encoded_country}"
-                        bucket_files = [f"{articles_base}/ngram_bucket={b}/data_0.parquet" for b in buckets]
+                        bucket_files = [f"{articles_base}/{art_col}={b}/data_0.parquet" for b in buckets]
                         file_list = ", ".join(f"'{f}'" for f in bucket_files)
                         found_placeholders = ", ".join(["?"] * len(found_terms))
                         art_rows = conn.execute(
@@ -912,9 +938,10 @@ async def term_series_batch(
                 try:
                     encoded = quote(str(local_id), safe="")
                     slow_found = {row[0] for row in slow_rows}
-                    buckets = {hashlib.md5(t.encode("utf-8")).hexdigest()[0] for t in slow_found}
+                    art_col, art_count = _get_bucket_config(top_articles_obj)
+                    buckets = {_murmur_bucket(t, art_count) for t in slow_found}
                     articles_base = f"{top_articles_obj.data_location}/ngram_size={n}/country={encoded}"
-                    bucket_files = [f"{articles_base}/ngram_bucket={b}/data_0.parquet" for b in buckets]
+                    bucket_files = [f"{articles_base}/{art_col}={b}/data_0.parquet" for b in buckets]
                     file_list = ", ".join(f"'{f}'" for f in bucket_files)
                     slow_found_ph = ", ".join(["?"] * len(slow_found))
                     art_rows = conn.execute(

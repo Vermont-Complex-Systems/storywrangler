@@ -87,6 +87,23 @@ No time dimension, no filter dimensions, no granularities, no ngram_sizes here.
 
 Neither field includes the entity column — that is handled by `entity_mapping.local_id_column`.
 
+### `transform.hash_bucket` — content-sharded partition routing
+
+```python
+{"column": "ngram_bucket", "count": 32}
+```
+
+Declares that the dataset distributes rows across hive partition directories
+named `{column}={0..count-1}` by a murmur3_32 hash of the entity/type column.
+The query layer computes the bucket at request time:
+
+    bucket = (mmh3.hash(term, seed=0) & 0x7FFFFFFF) % count
+
+- `& 0x7FFFFFFF` clears the sign bit (mmh3 returns signed int32; bucket IDs must be >= 0).
+- Seed 0 matches DuckDB/DuckLake's `murmur3_32()` default.
+- Bucket count is per-dataset registration (e.g. US gets 32, smaller countries get 16).
+- Not listed in `partition_dimensions` — hash buckets are routing-only, not query axes.
+
 ### `entity_mapping.local_id_column` — dual role (documented, not a bug)
 
 For `parquet_hive`, `local_id_column` is both:

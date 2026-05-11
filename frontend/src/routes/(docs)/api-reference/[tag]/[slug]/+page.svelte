@@ -47,7 +47,14 @@
 			const first = (obj.allOf as Operation[])[0];
 			if (first?.$ref) {
 				const resolved = resolveRef(first.$ref as string);
-				// Wrapper description (from Field(description=...)) takes priority over class docstring
+				return obj.description ? { ...resolved, description: obj.description } : resolved;
+			}
+		}
+		// Pydantic v2 wraps Optional[SomeModel] as anyOf:[{$ref}, {type: null}]
+		if (obj.anyOf && Array.isArray(obj.anyOf)) {
+			const ref = (obj.anyOf as Operation[]).find((v) => v.$ref);
+			if (ref) {
+				const resolved = resolveRef(ref.$ref as string);
 				return obj.description ? { ...resolved, description: obj.description } : resolved;
 			}
 		}
@@ -162,8 +169,13 @@
 
 	const statusCodes = $derived(Object.keys(responses));
 
-	// ── 200 response schema for left-column display ─────────
-	const successResp = $derived((responses['200'] as Operation) ?? null);
+	// ── 2xx response schema for left-column display ─────────
+	const successCode = $derived(
+		Object.keys(responses).find((c) => c.startsWith('2')) ?? ''
+	);
+	const successResp = $derived(
+		successCode ? (responses[successCode] as Operation) : null
+	);
 	const successRespContent = $derived(
 		(successResp?.content as Record<string, Operation> | undefined)?.['application/json'] ?? null
 	);
@@ -241,7 +253,7 @@
 							<code class="rounded bg-muted px-1 py-0.5 text-xs text-muted-foreground">string</code>
 							<span class="text-xs font-medium text-red-600 dark:text-red-400">required</span>
 						</div>
-						<p class="mt-1 text-sm text-muted-foreground [&_p]:m-0 [&_code]:rounded [&_code]:bg-muted [&_code]:px-1 [&_code]:py-0.5 [&_code]:text-xs [&_a]:underline [&_a]:text-foreground">
+						<p class="mt-1 text-sm text-muted-foreground [&_p]:m-0 [&_ul]:my-1.5 [&_ul]:list-disc [&_ul]:pl-5 [&_ol]:my-1.5 [&_ol]:list-decimal [&_ol]:pl-5 [&_li]:my-0.5 [&_pre]:my-2 [&_pre]:rounded [&_pre]:bg-muted [&_pre]:p-2 [&_pre]:text-xs [&_code]:rounded [&_code]:bg-muted [&_code]:px-1 [&_code]:py-0.5 [&_code]:text-xs [&_strong]:text-foreground [&_a]:underline [&_a]:text-foreground">
 							Bearer token. Pass as <code class="text-xs">Authorization: Bearer &lt;token&gt;</code> in the request header.
 						</p>
 					</div>
@@ -264,7 +276,7 @@
 								{/if}
 							</div>
 							{#if p.description}
-								<div class="mt-1 text-sm text-muted-foreground [&_p]:m-0 [&_code]:rounded [&_code]:bg-muted [&_code]:px-1 [&_code]:py-0.5 [&_code]:text-xs [&_a]:underline [&_a]:text-foreground"><Markdown md={p.description as string} plugins={mdPlugins} /></div>
+								<div class="mt-1 text-sm text-muted-foreground [&_p]:m-0 [&_ul]:my-1.5 [&_ul]:list-disc [&_ul]:pl-5 [&_ol]:my-1.5 [&_ol]:list-decimal [&_ol]:pl-5 [&_li]:my-0.5 [&_pre]:my-2 [&_pre]:rounded [&_pre]:bg-muted [&_pre]:p-2 [&_pre]:text-xs [&_code]:rounded [&_code]:bg-muted [&_code]:px-1 [&_code]:py-0.5 [&_code]:text-xs [&_strong]:text-foreground [&_a]:underline [&_a]:text-foreground"><Markdown md={p.description as string} plugins={mdPlugins} /></div>
 							{/if}
 						</div>
 					{/each}
@@ -287,7 +299,7 @@
 								{/if}
 							</div>
 							{#if p.description}
-								<div class="mt-1 text-sm text-muted-foreground [&_p]:m-0 [&_code]:rounded [&_code]:bg-muted [&_code]:px-1 [&_code]:py-0.5 [&_code]:text-xs [&_a]:underline [&_a]:text-foreground"><Markdown md={p.description as string} plugins={mdPlugins} /></div>
+								<div class="mt-1 text-sm text-muted-foreground [&_p]:m-0 [&_ul]:my-1.5 [&_ul]:list-disc [&_ul]:pl-5 [&_ol]:my-1.5 [&_ol]:list-decimal [&_ol]:pl-5 [&_li]:my-0.5 [&_pre]:my-2 [&_pre]:rounded [&_pre]:bg-muted [&_pre]:p-2 [&_pre]:text-xs [&_code]:rounded [&_code]:bg-muted [&_code]:px-1 [&_code]:py-0.5 [&_code]:text-xs [&_strong]:text-foreground [&_a]:underline [&_a]:text-foreground"><Markdown md={p.description as string} plugins={mdPlugins} /></div>
 							{/if}
 						</div>
 					{/each}
@@ -310,7 +322,7 @@
 								{/if}
 							</div>
 							{#if ps?.description}
-								<div class="mt-1 text-sm text-muted-foreground [&_p]:m-0 [&_code]:rounded [&_code]:bg-muted [&_code]:px-1 [&_code]:py-0.5 [&_code]:text-xs [&_a]:underline [&_a]:text-foreground"><Markdown md={ps.description as string} plugins={mdPlugins} /></div>
+								<div class="mt-1 text-sm text-muted-foreground [&_p]:m-0 [&_ul]:my-1.5 [&_ul]:list-disc [&_ul]:pl-5 [&_ol]:my-1.5 [&_ol]:list-decimal [&_ol]:pl-5 [&_li]:my-0.5 [&_pre]:my-2 [&_pre]:rounded [&_pre]:bg-muted [&_pre]:p-2 [&_pre]:text-xs [&_code]:rounded [&_code]:bg-muted [&_code]:px-1 [&_code]:py-0.5 [&_code]:text-xs [&_strong]:text-foreground [&_a]:underline [&_a]:text-foreground"><Markdown md={ps.description as string} plugins={mdPlugins} /></div>
 							{/if}
 						<!-- Nested sub-fields: collapsible toggle -->
 						{#if ps?.properties}
@@ -346,7 +358,7 @@
 													<td class="py-2.5 pr-3 text-red-600 dark:text-red-400">
 														{(ps.required as string[])?.includes(subName) ? '\u2713' : ''}
 													</td>
-													<td class="py-2.5 text-muted-foreground [&_p]:m-0 [&_code]:rounded [&_code]:bg-muted [&_code]:px-1 [&_code]:py-0.5 [&_code]:text-xs [&_a]:underline [&_a]:text-foreground">
+													<td class="py-2.5 text-muted-foreground [&_p]:m-0 [&_ul]:my-1.5 [&_ul]:list-disc [&_ul]:pl-5 [&_ol]:my-1.5 [&_ol]:list-decimal [&_ol]:pl-5 [&_li]:my-0.5 [&_pre]:my-2 [&_pre]:rounded [&_pre]:bg-muted [&_pre]:p-2 [&_pre]:text-xs [&_code]:rounded [&_code]:bg-muted [&_code]:px-1 [&_code]:py-0.5 [&_code]:text-xs [&_strong]:text-foreground [&_a]:underline [&_a]:text-foreground">
 														{#if sps?.description}
 															<Markdown md={sps.description as string} plugins={mdPlugins} />
 														{/if}
@@ -376,7 +388,7 @@
 								<code class="rounded bg-muted px-1 py-0.5 text-xs text-muted-foreground">{typeLabel}</code>
 							</div>
 							{#if ps?.description}
-								<div class="mt-1 text-sm text-muted-foreground [&_p]:m-0 [&_code]:rounded [&_code]:bg-muted [&_code]:px-1 [&_code]:py-0.5 [&_code]:text-xs [&_a]:underline [&_a]:text-foreground"><Markdown md={ps.description as string} plugins={mdPlugins} /></div>
+								<div class="mt-1 text-sm text-muted-foreground [&_p]:m-0 [&_ul]:my-1.5 [&_ul]:list-disc [&_ul]:pl-5 [&_ol]:my-1.5 [&_ol]:list-decimal [&_ol]:pl-5 [&_li]:my-0.5 [&_pre]:my-2 [&_pre]:rounded [&_pre]:bg-muted [&_pre]:p-2 [&_pre]:text-xs [&_code]:rounded [&_code]:bg-muted [&_code]:px-1 [&_code]:py-0.5 [&_code]:text-xs [&_strong]:text-foreground [&_a]:underline [&_a]:text-foreground"><Markdown md={ps.description as string} plugins={mdPlugins} /></div>
 							{/if}
 							<!-- Nested object or array-item sub-properties -->
 							{#if ps?.properties || (isArr && (ps?.items as Operation)?.properties)}
@@ -411,7 +423,7 @@
 														<td class="py-2.5 pr-3">
 															<code class="rounded bg-muted px-1 py-0.5 text-xs text-muted-foreground">{subType}</code>
 														</td>
-														<td class="py-2.5 text-muted-foreground [&_p]:m-0 [&_code]:rounded [&_code]:bg-muted [&_code]:px-1 [&_code]:py-0.5 [&_code]:text-xs [&_a]:underline [&_a]:text-foreground">
+														<td class="py-2.5 text-muted-foreground [&_p]:m-0 [&_ul]:my-1.5 [&_ul]:list-disc [&_ul]:pl-5 [&_ol]:my-1.5 [&_ol]:list-decimal [&_ol]:pl-5 [&_li]:my-0.5 [&_pre]:my-2 [&_pre]:rounded [&_pre]:bg-muted [&_pre]:p-2 [&_pre]:text-xs [&_code]:rounded [&_code]:bg-muted [&_code]:px-1 [&_code]:py-0.5 [&_code]:text-xs [&_strong]:text-foreground [&_a]:underline [&_a]:text-foreground">
 															{#if sps?.description}
 																<Markdown md={sps.description as string} plugins={mdPlugins} />
 															{/if}

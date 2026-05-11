@@ -14,6 +14,7 @@ dependencies = [
     "passlib[bcrypt]>=1.7.4",
     "bcrypt>=3.0,<4.0",
     "allotax>=0.3.0",
+    "mmh3>=4.0.0",
 ]
 
 [tool.uv.sources]

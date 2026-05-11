@@ -23,6 +23,20 @@ from ..core.timing import timed
 
 router = APIRouter()
 
+
+def _apply_partition_defaults(filter_vals: dict, partition_map: dict) -> None:
+    """Inject defaults for missing partition dimensions (mutates filter_vals).
+
+    List values use their first element as the default — the list form means
+    "these are the valid values; first is the safe default".
+    None values are skipped — the caller must always supply those explicitly.
+    """
+    for dim, default_val in partition_map.items():
+        if default_val is not None:
+            actual = default_val[0] if isinstance(default_val, list) else default_val
+            filter_vals.setdefault(dim, actual)
+
+
 def _sanitize_floats(obj):
     """Replace NaN → null, ±Infinity → string, so json.dumps won't choke."""
     if isinstance(obj, float):
@@ -202,10 +216,9 @@ async def allotaxonometer(
 
     # Step 3 — partition defaults: inject default for any partition_dim still missing.
     # Default is the value in the partition_dimensions dict (None = no default, caller must provide).
-    for dim, default_val in partition_map.items():
-        if default_val is not None:
-            filter_vals1.setdefault(dim, default_val)
-            filter_vals2.setdefault(dim, default_val)
+    # Step 3 — partition defaults: inject default for any partition_dim still missing.
+    _apply_partition_defaults(filter_vals1, partition_map)
+    _apply_partition_defaults(filter_vals2, partition_map)
 
     # Validate assembled filter values against pre-introspected distinct values
     for vals_dict in (filter_vals1, filter_vals2):
@@ -295,10 +308,16 @@ def _load_hive_direct(conn, dataset_obj, local_id, date_str, filter_vals, limit)
     entity_col = (dataset_obj.entity_mapping or {}).get("local_id_column")
     time_col = tr.get("time_dimension")
 
-    # Build path: data_location / partition_dims / entity_col / time_col / *.parquet
+    # Build path in partition_dimensions order (must match on-disk hive layout).
+    # filter_vals insertion order is unreliable (alias injection, param order, etc.)
+    partition_map = tr.get("partition_dimensions") or {}
+    if isinstance(partition_map, list):
+        partition_map = {dim: None for dim in partition_map}
+
     path = dataset_obj.data_location
-    for dim, val in filter_vals.items():
-        path += f"/{dim}={quote(str(val), safe='')}"
+    for dim in partition_map:
+        if dim in filter_vals:
+            path += f"/{dim}={quote(str(filter_vals[dim]), safe='')}"
     if entity_col and local_id is not None:
         path += f"/{entity_col}={quote(str(local_id), safe='')}"
     if time_col and date_str:
@@ -414,10 +433,8 @@ async def rank_turbulence_divergence(
         if "n2" in qp and "ngram_size" not in filter_vals2:
             filter_vals2["ngram_size"] = int(qp["n2"])
 
-    for dim, default_val in partition_map.items():
-        if default_val is not None:
-            filter_vals1.setdefault(dim, default_val)
-            filter_vals2.setdefault(dim, default_val)
+    _apply_partition_defaults(filter_vals1, partition_map)
+    _apply_partition_defaults(filter_vals2, partition_map)
 
     # Same entity for both systems (date-vs-date comparison)
     if not filter_vals2:

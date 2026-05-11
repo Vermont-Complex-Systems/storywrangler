@@ -15,9 +15,32 @@ Schema introspection failure (empty data_schema) causes the registration endpoin
 """
 
 import logging
+import os
 from typing import Any, Dict, List, Optional
 
 log = logging.getLogger(__name__)
+
+
+def _discover_levels(root: str) -> List[str]:
+    """Walk one path from hive root to leaf, returning partition key names in order.
+
+    Follows the first hive-named entry (key=value) at each level.
+    Returns e.g. ["ngram_size", "country", "alpha"] for RTD.
+    """
+    levels: List[str] = []
+    current = root
+    while os.path.isdir(current):
+        try:
+            entries = os.listdir(current)
+        except OSError:
+            break
+        hive_entry = next((e for e in entries if "=" in e), None)
+        if hive_entry is None:
+            break
+        dim = hive_entry.split("=", 1)[0]
+        levels.append(dim)
+        current = os.path.join(current, hive_entry)
+    return levels
 
 
 def _path_expr(dataset) -> Optional[str]:
@@ -27,11 +50,14 @@ def _path_expr(dataset) -> Optional[str]:
     (entity, time, granularity, ngram_size, etc.) appear in DESCRIBE output
     and are efficiently scannable via metadata rather than file contents.
 
-    For parquet_hive, when partition_dimensions declares specific values
-    (e.g. {"ngram_size": [1]}), the glob is narrowed to only scan those
-    partitions.  This avoids scanning incomplete/in-progress partitions
-    (e.g. ngram_size=2 that isn't ready yet) and keeps data_location at
-    the true hive root.
+    For parquet_hive, when partition_dimensions declares list values
+    (e.g. {"ngram_size": [1], "alpha": [0.17, 0.33]}), the glob pins those
+    levels to the first declared value.  Undeclared intermediate levels
+    (entity column, hash buckets) use single-level '*' wildcards.  The level
+    order is discovered by probing the directory tree once.
+
+    Example for RTD  (levels: ngram_size → country → alpha):
+      precomputed_rtd/ngram_size=1/*/alpha=0.17/*.parquet
     """
     fmt = dataset.data_format
     loc = dataset.data_location
@@ -40,16 +66,29 @@ def _path_expr(dataset) -> Optional[str]:
         return None
 
     if fmt == "parquet_hive":
-        # Narrow glob using first declared value of each partition dimension
-        # that has an explicit list of allowed values (e.g. {"ngram_size": [1]}).
-        # Scalar defaults (e.g. {"granularity": "daily"}) are query-time defaults
-        # and do NOT restrict which partitions exist on disk — don't narrow on them.
         tr = getattr(dataset, "transform", None)
         pd = (tr.partition_dimensions if tr else None) or {}
+
+        # Collect dimensions to narrow (list values → pin to first value)
+        narrowed: Dict[str, Any] = {}
         if isinstance(pd, dict):
             for dim, vals in pd.items():
                 if isinstance(vals, list) and vals:
-                    loc = f"{loc}/{dim}={vals[0]}"
+                    narrowed[dim] = vals[0]
+
+        if narrowed:
+            levels = _discover_levels(loc)
+            if levels:
+                parts = []
+                for level in levels:
+                    if level in narrowed:
+                        parts.append(f"{level}={narrowed[level]}")
+                    else:
+                        parts.append("*")
+                glob = f"{loc}/{'/'.join(parts)}/*.parquet"
+                return f"read_parquet('{glob}', hive_partitioning=true)"
+
+        # No narrowing needed or probe failed — scan everything
         return f"read_parquet('{loc}/**/*.parquet', hive_partitioning=true)"
 
     if fmt == "parquet":
@@ -103,13 +142,22 @@ def introspect(conn, dataset, provided_schema: Optional[Dict[str, str]] = None) 
     # Source: transform.filter_dimensions + transform.partition_dimensions.
     # For parquet_hive, partition columns are resolved from directory names —
     # no file contents are read, making this efficient even for large datasets.
+    #
+    # For partition_dimensions with declared list values (e.g. alpha: [0.17, 0.33]),
+    # the glob may be pinned to one value.  Use the declared list directly instead
+    # of scanning, since the glob would only find the pinned value.
     tr = dataset.transform
     filter_dims: List[str] = list((tr.filter_dimensions or []) if tr else [])
     partition_dims: List[str] = list((tr.partition_dimensions or []) if tr else [])
+    partition_dims_dict = (tr.partition_dimensions if tr else None) or {}
     all_dims = filter_dims + partition_dims
 
     filter_values: Dict[str, List[Any]] = {}
     for dim in all_dims:
+        # If this dimension has a declared list of values, use it directly
+        if isinstance(partition_dims_dict, dict) and isinstance(partition_dims_dict.get(dim), list):
+            filter_values[dim] = partition_dims_dict[dim]
+            continue
         try:
             rows = conn.execute(
                 f"SELECT DISTINCT {dim} FROM {path_expr} "

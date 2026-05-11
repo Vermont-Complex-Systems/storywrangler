@@ -6,7 +6,7 @@ import logging
 from typing import Any, Dict, List, Optional
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import load_only
 from sqlmodel import select
@@ -38,9 +38,9 @@ _EXAMPLE_DATASET = {
     "updated_at": "2024-01-15T10:00:00Z",
 }
 
-def _ex(body: dict) -> dict:
+def _ex(body: dict, status: str = "200") -> dict:
     """Wrap an example body in the openapi_extra responses structure."""
-    return {"responses": {"200": {"content": {"application/json": {"example": body}}}}}
+    return {"responses": {status: {"content": {"application/json": {"example": body}}}}}
 
 # Domains that have actual registered routers. Update when adding a new router to main.py.
 VALID_DOMAINS = {
@@ -83,20 +83,23 @@ async def _upsert_entities(
 
 @router.post(
     "/register",
+    status_code=201,
     openapi_extra=_ex({
         "message": "RegistryEntry 'ngrams' registered successfully",
         "dataset": {
             "dataset_id": "ngrams",
-            "data_location": "/data/babynames/names.parquet",
-            "data_format": "parquet",
-            "description": "US baby name frequencies by state, year, and sex.",
+            "data_location": "/data/wikigrams",
+            "data_format": "parquet_hive",
+            "description": "Wikipedia n-grams by frequency, date, and location.",
             "manifest": {},
         },
-        "derived": ["data_schema", "filter_values"],
-    }),
+        "derived": ["data_schema", "filter_values", "availability"],
+        "entities_upserted": 12,
+    }, status="201"),
 )
 async def register_dataset(
     dataset: DatasetCreate,
+    response: Response,
     _: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
 ):
@@ -303,6 +306,7 @@ async def register_dataset(
             existing.partition_index = partition_index
         await db.commit()
         await db.refresh(existing)
+        response.status_code = 200
         msg: Dict[str, Any] = {"message": f"RegistryEntry '{dataset.dataset_id}' updated successfully"}
     else:
         db_entry = RegistryEntry(
@@ -415,10 +419,12 @@ _SUMMARY_COLUMNS = [
     RegistryEntry.domain, RegistryEntry.dataset_id, RegistryEntry.version,
     RegistryEntry.data_location, RegistryEntry.data_format,
     RegistryEntry.description, RegistryEntry.catalog,
-    RegistryEntry.manifest,    # now always small (availability only — partition_index excluded)
+    RegistryEntry.manifest,         # always small (availability only — partition_index excluded)
     RegistryEntry.data_schema,      # introspected column types — small, useful for SDK consumers
     RegistryEntry.entity_mapping, RegistryEntry.lineage,
-    RegistryEntry.endpoint_schema,  # query contract without filter_values
+    RegistryEntry.endpoint_schema,
+    RegistryEntry.transform,        # query slice axes — small, needed by consumers
+    RegistryEntry.ownership,        # governance metadata — small
     RegistryEntry.schema_version,
     RegistryEntry.created_at, RegistryEntry.updated_at,
     # excluded: filter_values (medium), partition_index (can be large)
@@ -473,8 +479,10 @@ async def get_dataset_info(
             "manifest": manifest_full,
             "data_schema": ds.data_schema,
             "entity_mapping": ds.entity_mapping,
-            "lineage": ds.lineage,
             "endpoint_schema": ds.endpoint_schema,
+            "transform": ds.transform,
+            "ownership": ds.ownership,
+            "lineage": ds.lineage,
             "filter_values": ds.filter_values,
             "created_at": ds.created_at,
             "updated_at": ds.updated_at,
@@ -506,8 +514,10 @@ async def get_dataset_info(
         "manifest": ds.manifest or {},
         "data_schema": ds.data_schema,
         "entity_mapping": ds.entity_mapping,
-        "lineage": ds.lineage,
         "endpoint_schema": ds.endpoint_schema,
+        "transform": ds.transform,
+        "ownership": ds.ownership,
+        "lineage": ds.lineage,
         "created_at": ds.created_at,
         "updated_at": ds.updated_at,
     }
@@ -666,122 +676,122 @@ async def list_dataset_versions(
 
 # ── Entity graph endpoints ─────────────────────────────────────────────────────
 
-_KNOWN_PREDICATES = {"affiliated_with", "same_as", "country", "broader"}
+# _KNOWN_PREDICATES = {"affiliated_with", "same_as", "country", "broader"}
 
 
-@router.get(
-    "/entity-graph/path",
-    openapi_extra=_ex({
-        "from_id": "openalex:A5002034958",
-        "to_namespace": "wikidata",
-        "path": [
-            {"subject": "openalex:A5002034958", "predicate": "affiliated_with", "object": "openalex:I26873012"},
-            {"subject": "openalex:I26873012",   "predicate": "same_as",         "object": "wikidata:Q1068"},
-            {"subject": "wikidata:Q1068",        "predicate": "country",         "object": "wikidata:Q30"},
-        ],
-        "hops": 3,
-    }),
-)
-async def find_entity_path(
-    from_id: str,
-    to_namespace: str,
-    max_hops: int = 6,
-    db: AsyncSession = Depends(get_session),
-):
-    """BFS traversal of the entity graph from `from_id` until reaching `to_namespace`.
+# @router.get(
+#     "/entity-graph/path",
+#     openapi_extra=_ex({
+#         "from_id": "openalex:A5002034958",
+#         "to_namespace": "wikidata",
+#         "path": [
+#             {"subject": "openalex:A5002034958", "predicate": "affiliated_with", "object": "openalex:I26873012"},
+#             {"subject": "openalex:I26873012",   "predicate": "same_as",         "object": "wikidata:Q1068"},
+#             {"subject": "wikidata:Q1068",        "predicate": "country",         "object": "wikidata:Q30"},
+#         ],
+#         "hops": 3,
+#     }),
+# )
+# async def find_entity_path(
+#     from_id: str,
+#     to_namespace: str,
+#     max_hops: int = 6,
+#     db: AsyncSession = Depends(get_session),
+# ):
+#     """BFS traversal of the entity graph from `from_id` until reaching `to_namespace`.
 
-    Example: from_id=openalex:A5002034958 & to_namespace=wikidata
-    returns the chain openalex:A → openalex:I → wikidata:Q (institution country)
-    which is the join path into any dataset keyed on Wikidata entities (e.g. babynames).
-    """
-    visited = {from_id}
-    # queue entries: (current_id, path_so_far)
-    queue: list[tuple[str, list[dict]]] = [(from_id, [])]
+#     Example: from_id=openalex:A5002034958 & to_namespace=wikidata
+#     returns the chain openalex:A → openalex:I → wikidata:Q (institution country)
+#     which is the join path into any dataset keyed on Wikidata entities (e.g. babynames).
+#     """
+#     visited = {from_id}
+#     # queue entries: (current_id, path_so_far)
+#     queue: list[tuple[str, list[dict]]] = [(from_id, [])]
 
-    while queue:
-        current_id, path = queue.pop(0)
+#     while queue:
+#         current_id, path = queue.pop(0)
 
-        # Reached the target namespace (and moved at least one hop)
-        if path and current_id.startswith(f"{to_namespace}:"):
-            return {"from_id": from_id, "to_namespace": to_namespace, "path": path, "hops": len(path)}
+#         # Reached the target namespace (and moved at least one hop)
+#         if path and current_id.startswith(f"{to_namespace}:"):
+#             return {"from_id": from_id, "to_namespace": to_namespace, "path": path, "hops": len(path)}
 
-        if len(path) >= max_hops:
-            continue
+#         if len(path) >= max_hops:
+#             continue
 
-        result = await db.execute(
-            select(EntityGraph).where(EntityGraph.subject_id == current_id)
-        )
-        for edge in result.scalars().all():
-            if edge.object_id not in visited:
-                visited.add(edge.object_id)
-                queue.append((
-                    edge.object_id,
-                    path + [{"subject": current_id, "predicate": edge.predicate, "object": edge.object_id}],
-                ))
+#         result = await db.execute(
+#             select(EntityGraph).where(EntityGraph.subject_id == current_id)
+#         )
+#         for edge in result.scalars().all():
+#             if edge.object_id not in visited:
+#                 visited.add(edge.object_id)
+#                 queue.append((
+#                     edge.object_id,
+#                     path + [{"subject": current_id, "predicate": edge.predicate, "object": edge.object_id}],
+#                 ))
 
-    raise HTTPException(
-        status_code=404,
-        detail=f"No path found from '{from_id}' to namespace '{to_namespace}' within {max_hops} hops.",
-    )
-
-
-@router.get("/entity-graph/neighbors")
-async def get_entity_neighbors(
-    entity_id: str,
-    db: AsyncSession = Depends(get_session),
-):
-    """Return all direct edges from entity_id in the graph."""
-    result = await db.execute(
-        select(EntityGraph).where(EntityGraph.subject_id == entity_id)
-    )
-    edges = result.scalars().all()
-    return {
-        "entity_id": entity_id,
-        "edges": [
-            {"predicate": e.predicate, "object": e.object_id, "source": e.source}
-            for e in edges
-        ],
-    }
+#     raise HTTPException(
+#         status_code=404,
+#         detail=f"No path found from '{from_id}' to namespace '{to_namespace}' within {max_hops} hops.",
+#     )
 
 
-@admin_router.post("/entity-graph")
-async def upsert_entity_graph_edges(
-    edges: List[Dict[str, str]],
-    _: None = Depends(get_admin_user),
-    db: AsyncSession = Depends(get_session),
-):
-    """Upsert edges into the entity graph. Each edge: {subject_id, predicate, object_id, source}.
+# @router.get("/entity-graph/neighbors")
+# async def get_entity_neighbors(
+#     entity_id: str,
+#     db: AsyncSession = Depends(get_session),
+# ):
+#     """Return all direct edges from entity_id in the graph."""
+#     result = await db.execute(
+#         select(EntityGraph).where(EntityGraph.subject_id == entity_id)
+#     )
+#     edges = result.scalars().all()
+#     return {
+#         "entity_id": entity_id,
+#         "edges": [
+#             {"predicate": e.predicate, "object": e.object_id, "source": e.source}
+#             for e in edges
+#         ],
+#     }
 
-    Predicates: affiliated_with | same_as | country | broader
-    """
-    upserted = 0
-    for edge in edges:
-        subject_id = edge.get("subject_id", "")
-        predicate   = edge.get("predicate", "")
-        object_id   = edge.get("object_id", "")
-        source      = edge.get("source", "manual")
 
-        if not (subject_id and predicate and object_id):
-            raise HTTPException(status_code=422, detail=f"Missing fields in edge: {edge}")
-        if predicate not in _KNOWN_PREDICATES:
-            raise HTTPException(
-                status_code=422,
-                detail=f"Unknown predicate '{predicate}'. Supported: {sorted(_KNOWN_PREDICATES)}",
-            )
+# @admin_router.post("/entity-graph")
+# async def upsert_entity_graph_edges(
+#     edges: List[Dict[str, str]],
+#     _: None = Depends(get_admin_user),
+#     db: AsyncSession = Depends(get_session),
+# ):
+#     """Upsert edges into the entity graph. Each edge: {subject_id, predicate, object_id, source}.
 
-        result = await db.execute(
-            select(EntityGraph).where(
-                EntityGraph.subject_id == subject_id,
-                EntityGraph.predicate  == predicate,
-                EntityGraph.object_id  == object_id,
-            )
-        )
-        existing = result.scalar_one_or_none()
-        if existing:
-            existing.source = source
-        else:
-            db.add(EntityGraph(subject_id=subject_id, predicate=predicate, object_id=object_id, source=source))
-        upserted += 1
+#     Predicates: affiliated_with | same_as | country | broader
+#     """
+#     upserted = 0
+#     for edge in edges:
+#         subject_id = edge.get("subject_id", "")
+#         predicate   = edge.get("predicate", "")
+#         object_id   = edge.get("object_id", "")
+#         source      = edge.get("source", "manual")
 
-    await db.commit()
-    return {"edges_upserted": upserted}
+#         if not (subject_id and predicate and object_id):
+#             raise HTTPException(status_code=422, detail=f"Missing fields in edge: {edge}")
+#         if predicate not in _KNOWN_PREDICATES:
+#             raise HTTPException(
+#                 status_code=422,
+#                 detail=f"Unknown predicate '{predicate}'. Supported: {sorted(_KNOWN_PREDICATES)}",
+#             )
+
+#         result = await db.execute(
+#             select(EntityGraph).where(
+#                 EntityGraph.subject_id == subject_id,
+#                 EntityGraph.predicate  == predicate,
+#                 EntityGraph.object_id  == object_id,
+#             )
+#         )
+#         existing = result.scalar_one_or_none()
+#         if existing:
+#             existing.source = source
+#         else:
+#             db.add(EntityGraph(subject_id=subject_id, predicate=predicate, object_id=object_id, source=source))
+#         upserted += 1
+
+#     await db.commit()
+#     return {"edges_upserted": upserted}

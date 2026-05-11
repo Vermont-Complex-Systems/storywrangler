@@ -131,13 +131,12 @@ class ManifestConfig(BaseModel):
         description=(
             "Time coverage summary for display in the registry UI and for computing "
             "valid date ranges (e.g. the /rtd endpoint requires explicit dates). "
-            "Auto-populated by parquet_introspect at registration time when "
-            "transform.time_dimension is set. Never read at query time for data loading. "
-            "Entity-first, keyed by local_id (or entity_id), with per-granularity min/max — "
-            '`{"United States": {"daily": {"min": "2024-01-01", "max": "2026-04-20"}, '
-            '"weekly": {"min": "2024-09-30", "max": "2026-04-13"}}}`; '
-            "for datasets without entity_mapping (global): "
-            '`{"daily": {"min": "2024-01-01", "max": "2026-04-20"}}`.'
+            "Auto-populated by `parquet_introspect` at registration time when "
+            "`transform.time_dimension` is set. Never read at query time.\n\n"
+            "Entity-first format, keyed by local_id with per-granularity min/max:\n\n"
+            '```json\n{"United States": {"daily": {"min": "2024-01-01", "max": "2026-04-20"}}}\n```\n\n'
+            "For datasets without entity_mapping (global):\n\n"
+            '```json\n{"daily": {"min": "2024-01-01", "max": "2026-04-20"}}\n```'
         ),
     )
     partition_index: Optional[List[Dict]] = Field(
@@ -252,21 +251,52 @@ class EndpointSchemaConfig(BaseModel):
     )
 
 
+class HashBucketConfig(BaseModel):
+    """Hash-bucket partitioning for content-sharded hive datasets.
+
+    Some datasets shard files by a hash of the entity/type column
+    (e.g. ngram_bucket) to keep per-file row counts manageable.
+    This tells the query layer which column holds the bucket ID and
+    how many buckets exist, so it can route to the correct partition
+    without scanning all of them.
+
+    Hash function: murmur3_32, seed 0, positive-int32 mask::
+
+        bucket = (mmh3.hash(term, seed=0) & 0x7FFFFFFF) % count
+    """
+
+    column: str = Field(
+        ...,
+        description="Hive partition column holding the bucket ID (e.g. 'ngram_bucket').",
+    )
+    count: int = Field(
+        ...,
+        gt=0,
+        description=(
+            "Total number of buckets. Bucket IDs range from 0 to count-1. "
+            "May vary per dataset registration (e.g. US=32, others=16)."
+        ),
+    )
+
+
 class TransformConfig(BaseModel):
     """Query slice axes — how to filter the dataset at request time.
 
     Three orthogonal axes, all generating WHERE clauses at query time:
+
     - `time_dimension`: date-range filtering via BETWEEN.
     - `filter_dimensions`: categorical columns where omitting the filter is
       valid (aggregates over all values). E.g. omitting `sex` means all sexes.
-    - `partition_dimensions`: columns where omitting the filter is INVALID —
-      it would mix incompatible rows (e.g. daily + weekly + monthly summed).
-      For `parquet_hive` these are the hive partition keys. Declare safe
-      defaults in `partition_defaults`; they are injected automatically when
-      the caller does not provide the parameter.
+    - `partition_dimensions`: ordered dict of hive partition columns that matter
+      for query slicing. Dict order must match the on-disk nesting order.
+      Values are query-time defaults: scalar = default value, list = enumerated
+      valid values (first is default), None = caller must always provide.
 
-    `entity_mapping.local_id_column` is NOT listed here — it is the entity
-    identity column and is handled separately.
+    Not every hive level needs to appear. Levels that are not query-relevant
+    (entity column) are discovered automatically. Hash buckets, when present,
+    are declared via `hash_bucket` (column name + count).
+
+    `entity_mapping.local_id_column` is handled separately — do not list it here.
     """
 
     time_dimension: Optional[str] = Field(
@@ -281,26 +311,33 @@ class TransformConfig(BaseModel):
         None,
         description=(
             "Categorical filter columns where omitting the filter aggregates over all values "
-            "(valid behaviour). E.g. ['sex'] — omitting sex returns all names. "
-            "Distinct values are auto-introspected at registration."
+            "(valid behaviour). E.g. `['sex']` — omitting sex returns all names."
         ),
     )
     partition_dimensions: Optional[Dict[str, Any]] = Field(
         None,
         description=(
-            "Storage partition key columns — filtering on these is performant because the "
-            "query layer can prune at the storage level rather than scanning file contents. "
-            "For parquet_hive, these map directly to hive directory levels (col=val/); "
-            "DuckDB reads partition values from directory names and skips non-matching "
-            "directories entirely. Future backends (e.g. database connections) may support "
-            "analogous partition pruning. "
-            "Keys are column names; values are safe defaults injected automatically when "
-            "the caller omits the parameter (use None when no safe default exists). "
-            "For datasets where mixing partition slices is semantically invalid "
-            "(e.g. daily + weekly + monthly), providing defaults prevents accidental "
-            "cross-partition aggregation. "
-            "Distinct values are auto-introspected at registration. "
-            "Example: {\"granularity\": \"daily\", \"ngram_size\": 1}."
+            "Ordered dict of hive partition columns relevant for query slicing. "
+            "Dict order must match the on-disk directory nesting order. "
+            "Not every hive level needs to appear — undeclared intermediate levels "
+            "are discovered automatically.\n\n"
+            "Values control the query-time default:\n\n"
+            "- **scalar** (e.g. `\"daily\"`) — default when caller omits the parameter.\n"
+            "- **list** (e.g. `[1]`) — enumerated valid values; first is the default.\n"
+            "- **`None`** — no default, caller must always provide a value.\n\n"
+            "Examples: `{\"ngram_size\": [1], \"granularity\": \"daily\"}`, "
+            "`{\"ngram_size\": [1], \"alpha\": [0.17, 0.33]}`."
+        ),
+    )
+    hash_bucket: Optional[HashBucketConfig] = Field(
+        None,
+        description=(
+            "Hash-bucket partitioning config for content-sharded datasets. "
+            "Declares which hive partition column holds the bucket ID and "
+            "how many buckets exist. The query layer uses murmur3_32 (seed 0) "
+            "to compute the bucket for a given term at request time. "
+            "Not listed in `partition_dimensions` — hash buckets are routing-only, "
+            "not query axes."
         ),
     )
 
@@ -360,26 +397,25 @@ class DatasetCreate(BaseModel):
             "Dataset version. `'latest'` (default) is the mutable development slot — "
             "safe to re-register freely; each re-registration overwrites the previous entry. "
             "Semver strings (e.g. `'1.0.0'`) create immutable snapshots: re-registering the "
-            "same version string returns 409 Conflict. "
-            "Increment PATCH for bug fixes (same schema, corrected values), "
-            "MINOR for new data (new time range, new entities — backward compatible), "
-            "MAJOR for breaking schema changes (column rename, endpoint_schema change). "
+            "same version string returns 409 Conflict.\n\n"
+            "- **PATCH** — bug fixes (same schema, corrected values)\n"
+            "- **MINOR** — new data (new time range, new entities — backward compatible)\n"
+            "- **MAJOR** — breaking schema changes (column rename, endpoint_schema change)\n\n"
             "See https://semver.org/."
         ),
     )
     data_location: Union[str, List[str]] = Field(
         ...,
         description=(
-            "Where to find the data. Three forms are supported for `parquet`:\n"
+            "Where to find the data. Three forms are supported for `parquet`:\n\n"
             "- Single file: `/data/babynames.parquet`\n"
             "- Flat directory: `/data/babynames/` (all `.parquet` files read)\n"
             "- File list: `[\"/data/f1.parquet\", \"/data/f2.parquet\"]` — "
             "use this when the pipeline manages multiple snapshot files (e.g. DuckLake) and "
-            "you need to pin exactly the live files at submit time.\n"
+            "you need to pin exactly the live files at submit time.\n\n"
             "For `parquet_hive`, provide the **root** of the hive partition tree — the directory "
             "directly above the first `col=val/` level (e.g. `/data/ngrams/` where subdirectories "
-            "are `ngram_size=1/granularity=daily/…`). The query layer appends `/**/*.parquet` and "
-            "enables hive partition pruning automatically. Do not point to a subdirectory."
+            "are `ngram_size=1/granularity=daily/…`). Do not point to a subdirectory."
         ),
     )
 
@@ -395,10 +431,9 @@ class DatasetCreate(BaseModel):
     data_schema: Optional[Dict[str, str]] = Field(
         None,
         description=(
-            "Column names → DuckDB type strings (e.g. {'ngram': 'VARCHAR', 'pv_count': 'BIGINT'}). "
-            "When provided, used as the authoritative schema — glob-based schema introspection "
-            "is skipped. When omitted, schema is auto-derived from data files (all files must "
-            "have consistent schemas or registration will be rejected)."
+            "Column names → DuckDB type strings (e.g. `{'ngram': 'VARCHAR', 'pv_count': 'BIGINT'}`). "
+            "When provided, this is the authoritative schema. "
+            "When omitted, schema is auto-derived from the data files."
         ),
     )
     manifest: Optional[ManifestConfig] = Field(
