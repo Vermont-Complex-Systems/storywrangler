@@ -17,7 +17,7 @@ For parquet_hive, hive_partitioning=true handles partition pruning automatically
 import re
 from contextlib import contextmanager
 from types import SimpleNamespace
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, List, Optional
 
 import mmh3
 from fastapi import HTTPException
@@ -31,10 +31,7 @@ from ..models.registry import EntityMapping, RegistryEntry
 
 # ── Hash-bucket routing ─────────────────────────────────────────────────────────
 # Generic helpers for content-sharded hive datasets (transform.hash_bucket).
-# Key convention for per-partition counts:
-#   key = entity_value / partition_dim1_value / partition_dim2_value / ...
-# where entity comes from entity_mapping.local_id_column and partition dims
-# follow partition_dimensions dict order.  Example: "United States/1".
+# Resolution: overrides[entity][str(dim_value)] → default_count.
 
 def murmur_bucket(term: str, num_buckets: int) -> int:
     """Compute hash bucket via murmur3_32 (seed 0, positive mask).
@@ -46,26 +43,31 @@ def murmur_bucket(term: str, num_buckets: int) -> int:
     return (mmh3.hash(term, seed=0) & 0x7FFFFFFF) % num_buckets
 
 
-def get_bucket_config(dataset_obj) -> tuple[str, Union[int, Dict[str, int]]]:
+def get_bucket_config(dataset_obj) -> dict:
     """Read hash_bucket config from a dataset's transform metadata.
 
-    Returns (column_name, counts) where counts is int or dict.
+    Returns the hash_bucket dict (with ``column``, ``default_count``,
+    and optionally ``overrides``), or an empty dict if not configured.
     """
-    hb = ((dataset_obj.transform or {}).get("hash_bucket") or {}) if dataset_obj else {}
-    return hb.get("column", "ngram_bucket"), hb.get("counts", 1)
+    if not dataset_obj:
+        return {}
+    return (dataset_obj.transform or {}).get("hash_bucket") or {}
 
 
-def resolve_bucket_count(counts: Union[int, Dict[str, int]], *partition_vals) -> int:
-    """Look up bucket count for a specific partition combination.
+def resolve_bucket_count(hb: dict, entity: Optional[str] = None, dim_value: Any = None) -> int:
+    """Look up bucket count for a specific entity + partition dimension value.
 
-    Build the lookup key by joining partition values with ``/``
-    (entity first, then partition_dimensions in declaration order).
-    Falls back to ``"default"`` key, then to 1 (single bucket = no sharding).
+    Resolution order: ``overrides[entity][str(dim_value)]`` → ``default_count``.
+    Returns 1 (no sharding) if hash_bucket is not configured.
     """
-    if isinstance(counts, int):
-        return counts
-    key = "/".join(str(v) for v in partition_vals)
-    return counts.get(key, counts.get("default", 1))
+    default = hb.get("default_count", 1)
+    overrides = hb.get("overrides")
+    if not overrides or entity is None:
+        return default
+    entity_overrides = overrides.get(str(entity))
+    if not entity_overrides or dim_value is None:
+        return default
+    return entity_overrides.get(str(dim_value), default)
 
 
 # ── DuckDB error classification ──────────────────────────────────────────────

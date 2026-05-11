@@ -262,23 +262,34 @@ class HashBucketConfig(BaseModel):
 
     Hash function: murmur3_32, seed 0, positive-int32 mask::
 
-        bucket = (mmh3.hash(term, seed=0) & 0x7FFFFFFF) % counts
+        bucket = (mmh3.hash(term, seed=0) & 0x7FFFFFFF) % count
+
+    Resolution order: ``overrides[entity][str(dim_value)]`` → ``default_count``.
     """
 
     column: str = Field(
         ...,
         description="Hive partition column holding the bucket ID (e.g. 'ngram_bucket').",
     )
-    counts: Union[int, Dict[str, int]] = Field(
+    default_count: int = Field(
         ...,
+        gt=0,
         description=(
-            "Bucket count(s). Either a single int for uniform bucketing, or a dict "
-            "mapping partition-key combinations to counts. Dict keys are slash-separated "
-            "partition values (e.g. `\"United States/1\"` for country/ngram_size); "
-            "include a `\"default\"` key as fallback.\n\n"
-            "Examples:\n"
-            "- Uniform: `32`\n"
-            "- Per-partition: `{\"default\": 16, \"United States/1\": 16, \"United States/2\": 32}`"
+            "Fallback bucket count when no override matches. "
+            "Use 1 to disable sharding for unlisted partitions."
+        ),
+    )
+    overrides: Optional[Dict[str, Dict[str, int]]] = Field(
+        None,
+        description=(
+            "Per-entity, per-partition-dimension bucket count overrides. "
+            "Outer key is the entity value (from `entity_mapping.local_id_column`), "
+            "inner key is the string representation of the first partition dimension value. "
+            "Omit entirely for uniform bucketing.\n\n"
+            "Example:\n"
+            "```json\n"
+            '{"United States": {"1": 16, "2": 32}, "United Kingdom": {"1": 8, "2": 32}}\n'
+            "```"
         ),
     )
 
@@ -344,6 +355,18 @@ class TransformConfig(BaseModel):
             "not query axes."
         ),
     )
+
+    @model_validator(mode="after")
+    def _bucket_col_not_in_partition_dims(self):
+        if self.hash_bucket and self.partition_dimensions:
+            col = self.hash_bucket.column
+            if col in self.partition_dimensions:
+                raise ValueError(
+                    f"hash_bucket.column '{col}' must not appear in "
+                    f"partition_dimensions — bucket columns are routing-only, "
+                    f"not query axes"
+                )
+        return self
 
 
 class DatasetCreate(BaseModel):

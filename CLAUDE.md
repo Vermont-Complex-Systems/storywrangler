@@ -90,7 +90,7 @@ Neither field includes the entity column — that is handled by `entity_mapping.
 ### `transform.hash_bucket` — content-sharded partition routing
 
 ```python
-{"column": "ngram_bucket", "counts": {"default": 16, "United States/1": 16, "United States/2": 32}}
+{"column": "ngram_bucket", "default_count": 1, "overrides": {"United States": {"1": 16, "2": 32}}}
 ```
 
 Declares that the dataset distributes rows across hive partition directories
@@ -101,14 +101,13 @@ The query layer computes the bucket at request time:
 
 - `& 0x7FFFFFFF` clears the sign bit (mmh3 returns signed int32; bucket IDs must be >= 0).
 - Seed 0 matches DuckDB/DuckLake's `murmur3_32()` default.
-- `counts` is either a single int (uniform) or a dict mapping slash-separated
-  partition values to counts. The `"default"` key is the fallback.
-  Key convention: `entity_value/partition_dim1_value/partition_dim2_value/...`
-  where entity comes from `entity_mapping.local_id_column` and partition dims
-  follow `partition_dimensions` dict order (e.g. `"United States/1"` for
-  country + ngram_size). No extra `key_dimensions` field needed — the key
-  order is already implied by the existing schema declarations.
+- Bucket count is per-dataset registration (e.g. US gets 32, smaller countries get 16).
+- `default_count` is the fallback when no override matches.
+- `overrides` is a nested dict: `entity → {partition_dim_value → count}`.
+  Resolution: `overrides[entity][str(dim_value)]` → `default_count`.
 - Not listed in `partition_dimensions` — hash buckets are routing-only, not query axes.
+  A model validator enforces that `hash_bucket.column` does not appear in
+  `partition_dimensions` keys.
 - Helpers live in `core/query_utils.py`: `murmur_bucket()`, `get_bucket_config()`,
   `resolve_bucket_count()` — generic, usable by any router.
 

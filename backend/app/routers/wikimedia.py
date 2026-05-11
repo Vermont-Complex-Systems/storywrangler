@@ -542,8 +542,9 @@ async def term_series(
 
     if sparkline_obj:
         encoded_country = quote(str(local_id), safe="")
-        spark_col, spark_counts = get_bucket_config(sparkline_obj)
-        bucket = murmur_bucket(type, resolve_bucket_count(spark_counts, local_id, n))
+        spark_hb = get_bucket_config(sparkline_obj)
+        spark_col = spark_hb.get("column", "ngram_bucket")
+        bucket = murmur_bucket(type, resolve_bucket_count(spark_hb, local_id, n))
         sparkline_path = f"{sparkline_obj.data_location}/ngram_size={n}/country={encoded_country}/{spark_col}={bucket}/data_0.parquet"
 
         with timed("fast_query", "DuckDB sparkline + articles read"):
@@ -561,8 +562,9 @@ async def term_series(
             articles_by_date: dict = {}
             if sparkline_rows and include_articles and top_articles_obj:
                 try:
-                    art_col, art_counts = get_bucket_config(top_articles_obj)
-                    art_bucket = murmur_bucket(type, resolve_bucket_count(art_counts, local_id, n))
+                    art_hb = get_bucket_config(top_articles_obj)
+                    art_col = art_hb.get("column", "ngram_bucket")
+                    art_bucket = murmur_bucket(type, resolve_bucket_count(art_hb, local_id, n))
                     articles_path = f"{top_articles_obj.data_location}/ngram_size={n}/country={encoded_country}/{art_col}={art_bucket}/data_0.parquet"
                     art_rows = conn.execute(
                         f"""
@@ -601,8 +603,9 @@ async def term_series(
             if slow_rows and include_articles and top_articles_obj:
                 try:
                     encoded = quote(str(local_id), safe="")
-                    art_col, art_counts = get_bucket_config(top_articles_obj)
-                    bucket = murmur_bucket(type, resolve_bucket_count(art_counts, local_id, n))
+                    art_hb = get_bucket_config(top_articles_obj)
+                    art_col = art_hb.get("column", "ngram_bucket")
+                    bucket = murmur_bucket(type, resolve_bucket_count(art_hb, local_id, n))
                     articles_path = f"{top_articles_obj.data_location}/ngram_size={n}/country={encoded}/{art_col}={bucket}/data_0.parquet"
                     art_rows = conn.execute(
                         f"""
@@ -839,8 +842,9 @@ async def term_series_batch(
 
     if sparkline_obj:
         encoded_country = quote(str(local_id), safe="")
-        spark_col, spark_counts = get_bucket_config(sparkline_obj)
-        spark_n_buckets = resolve_bucket_count(spark_counts, local_id, n)
+        spark_hb = get_bucket_config(sparkline_obj)
+        spark_col = spark_hb.get("column", "ngram_bucket")
+        spark_n_buckets = resolve_bucket_count(spark_hb, local_id, n)
         sparkline_base = f"{sparkline_obj.data_location}/ngram_size={n}/country={encoded_country}"
         # Compute which buckets contain our terms, then read only those files.
         spark_buckets = {murmur_bucket(t, spark_n_buckets) for t in type_list}
@@ -868,8 +872,9 @@ async def term_series_batch(
                         # Compute which buckets contain our terms, then pass all
                         # matching bucket files as a list so DuckDB can parallelise I/O
                         # (critical on NFS where sequential file opens are expensive).
-                        art_col, art_counts = get_bucket_config(top_articles_obj)
-                        art_n_buckets = resolve_bucket_count(art_counts, local_id, n)
+                        art_hb = get_bucket_config(top_articles_obj)
+                        art_col = art_hb.get("column", "ngram_bucket")
+                        art_n_buckets = resolve_bucket_count(art_hb, local_id, n)
                         buckets = {murmur_bucket(t, art_n_buckets) for t in found_terms}
                         articles_base = f"{top_articles_obj.data_location}/ngram_size={n}/country={encoded_country}"
                         bucket_files = [f"{articles_base}/{art_col}={b}/data_0.parquet" for b in buckets]
@@ -922,8 +927,9 @@ async def term_series_batch(
                 try:
                     encoded = quote(str(local_id), safe="")
                     slow_found = {row[0] for row in slow_rows}
-                    art_col, art_counts = get_bucket_config(top_articles_obj)
-                    art_n_buckets = resolve_bucket_count(art_counts, local_id, n)
+                    art_hb = get_bucket_config(top_articles_obj)
+                    art_col = art_hb.get("column", "ngram_bucket")
+                    art_n_buckets = resolve_bucket_count(art_hb, local_id, n)
                     buckets = {murmur_bucket(t, art_n_buckets) for t in slow_found}
                     articles_base = f"{top_articles_obj.data_location}/ngram_size={n}/country={encoded}"
                     bucket_files = [f"{articles_base}/{art_col}={b}/data_0.parquet" for b in buckets]
