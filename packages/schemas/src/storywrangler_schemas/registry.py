@@ -262,19 +262,23 @@ class HashBucketConfig(BaseModel):
 
     Hash function: murmur3_32, seed 0, positive-int32 mask::
 
-        bucket = (mmh3.hash(term, seed=0) & 0x7FFFFFFF) % count
+        bucket = (mmh3.hash(term, seed=0) & 0x7FFFFFFF) % counts
     """
 
     column: str = Field(
         ...,
         description="Hive partition column holding the bucket ID (e.g. 'ngram_bucket').",
     )
-    count: int = Field(
+    counts: Union[int, Dict[str, int]] = Field(
         ...,
-        gt=0,
         description=(
-            "Total number of buckets. Bucket IDs range from 0 to count-1. "
-            "May vary per dataset registration (e.g. US=32, others=16)."
+            "Bucket count(s). Either a single int for uniform bucketing, or a dict "
+            "mapping partition-key combinations to counts. Dict keys are slash-separated "
+            "partition values (e.g. `\"United States/1\"` for country/ngram_size); "
+            "include a `\"default\"` key as fallback.\n\n"
+            "Examples:\n"
+            "- Uniform: `32`\n"
+            "- Per-partition: `{\"default\": 16, \"United States/1\": 16, \"United States/2\": 32}`"
         ),
     )
 
