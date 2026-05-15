@@ -82,6 +82,7 @@ def make_dataset_obj(
     data_schema=None,
     filter_values=None,
     entity_mapping=None,
+    level_order=None,
 ):
     """Create a SimpleNamespace mimicking a RegistryEntry for query_utils."""
     return SimpleNamespace(
@@ -96,4 +97,5 @@ def make_dataset_obj(
         data_schema=data_schema or {"year": "INTEGER"},
         filter_values=filter_values or {},
         entity_mapping=entity_mapping,
+        level_order=level_order,
     )

@@ -52,6 +52,7 @@ class RegistryEntry(RegistryEntryBase, table=True):
     # Derived at registration — never submitted, always backend-computed
     data_schema: Optional[dict] = Field(default=None, sa_column=Column(JSON))
     filter_values: Optional[dict] = Field(default=None, sa_column=Column(JSON))
+    level_order: Optional[list] = Field(default=None, sa_column=Column(JSON))
 
     # Derived at version registration — null for 'latest' and pre-S3 migration datasets.
     # Set by the platform when POST /register is called with a semver version and

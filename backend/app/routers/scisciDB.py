@@ -18,7 +18,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from ..core.database import get_session
 from ..core.duckdb_client import get_duckdb_client
-from ..core.query_utils import handle_query_error, load_time_series
+from ..core.query_utils import get_partition_defaults, get_queryable_dims, handle_query_error, load_time_series
 from ..core.registry_utils import get_latest_entry
 
 router = APIRouter()
@@ -67,13 +67,8 @@ async def get_metrics(
         )
 
     tr = dataset_obj.transform or {}
-    filter_dims = tr.get("filter_dimensions") or []
-    partition_map = tr.get("partition_dimensions") or {}
-    # backward compat: old registrations may store partition cols as a list
-    if isinstance(partition_map, list):
-        partition_map = {dim: None for dim in partition_map}
-    partition_dims = list(partition_map.keys())
-    all_dims = filter_dims + partition_dims
+    all_dims = get_queryable_dims(dataset_obj)
+    defaults = get_partition_defaults(dataset_obj)
     time_dim = tr.get("time_dimension") or "year"
 
     # Parse and validate group_by columns
@@ -97,10 +92,10 @@ async def get_metrics(
             raw = qp[dim]
             filter_vals[dim] = raw.split(",") if "," in raw else raw
 
-    # Inject partition defaults when dim is NOT in group_by AND NOT in filter_vals.
+    # Inject defaults when dim is NOT in group_by AND NOT in filter_vals.
     # If dim IS in group_by, the user wants to break down by it (no default needed).
-    for dim, default_val in partition_map.items():
-        if default_val is not None and dim not in group_cols and dim not in filter_vals:
+    for dim, default_val in defaults.items():
+        if dim not in group_cols and dim not in filter_vals:
             filter_vals[dim] = default_val
 
     # Validate against pre-introspected distinct values (if available)

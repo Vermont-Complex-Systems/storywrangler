@@ -145,9 +145,15 @@ class TestLoadTimeSeries:
 class TestLoadTimeSeriesHive:
     """Tests for load_time_series with hive-partitioned parquet."""
 
+    # level_order for the sample_hive_parquet fixture (partitioned by field)
+    _HIVE_LEVEL_ORDER = [
+        {"column": "field", "type": "partition", "default_value": "Computer Science"},
+    ]
+
     def test_hive_basic(self, conn, sample_hive_parquet):
         """Hive-partitioned parquet works with the same query logic."""
-        ds = make_dataset_obj(sample_hive_parquet, data_format="parquet_hive")
+        ds = make_dataset_obj(sample_hive_parquet, data_format="parquet_hive",
+                              level_order=self._HIVE_LEVEL_ORDER)
         result = load_time_series(
             conn, ds,
             group_cols=["field", "year"],
@@ -158,7 +164,8 @@ class TestLoadTimeSeriesHive:
 
     def test_hive_filter_partition_column(self, conn, sample_hive_parquet):
         """Filtering on hive partition column (field) prunes directories."""
-        ds = make_dataset_obj(sample_hive_parquet, data_format="parquet_hive")
+        ds = make_dataset_obj(sample_hive_parquet, data_format="parquet_hive",
+                              level_order=self._HIVE_LEVEL_ORDER)
         result = load_time_series(
             conn, ds,
             group_cols=["year"],
@@ -170,7 +177,8 @@ class TestLoadTimeSeriesHive:
 
     def test_hive_multi_value_filter(self, conn, sample_hive_parquet):
         """IN clause works with hive-partitioned data."""
-        ds = make_dataset_obj(sample_hive_parquet, data_format="parquet_hive")
+        ds = make_dataset_obj(sample_hive_parquet, data_format="parquet_hive",
+                              level_order=self._HIVE_LEVEL_ORDER)
         result = load_time_series(
             conn, ds,
             group_cols=["field"],

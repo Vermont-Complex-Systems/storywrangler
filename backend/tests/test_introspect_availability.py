@@ -16,7 +16,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app.core.parquet_introspect import introspect
+from app.core.parquet_introspect import _derive_bucket_config, introspect
 
 
 def _ns(**kwargs):
@@ -121,7 +121,12 @@ class TestAvailabilityEntityPartition:
             ),
             entity_mapping=_ns(local_id_column="country"),
         )
-        result = introspect(conn, ds)
+        level_order = [
+            {"column": "country", "type": "entity", "default_value": "Canada"},
+            {"column": "granularity", "type": "partition", "default_value": "daily"},
+            {"column": "date", "type": "time", "default_value": "2024-01-01"},
+        ]
+        result = introspect(conn, ds, level_order=level_order)
         avail = result["availability"]
 
         assert "United States" in avail
@@ -154,7 +159,10 @@ class TestAvailabilityEntityOnly:
             ),
             entity_mapping=_ns(local_id_column="geo"),
         )
-        result = introspect(conn, ds)
+        level_order = [
+            {"column": "geo", "type": "entity", "default_value": "quebec"},
+        ]
+        result = introspect(conn, ds, level_order=level_order)
         avail = result["availability"]
 
         assert avail["united_states"] == {"min": "1880", "max": "2022"}
@@ -175,7 +183,10 @@ class TestAvailabilityPartitionOnly:
             ),
             entity_mapping=None,
         )
-        result = introspect(conn, ds)
+        level_order = [
+            {"column": "metric_type", "type": "partition", "default_value": "total"},
+        ]
+        result = introspect(conn, ds, level_order=level_order)
         avail = result["availability"]
 
         assert avail["total"] == {"min": "2000", "max": "2024"}
@@ -274,3 +285,77 @@ class TestAvailabilityNoTimeDimension:
         )
         result = introspect(conn, ds)
         assert "availability" not in result
+
+
+# ── bucket config derivation ─────────────────────────────────────────────────
+
+
+class TestDeriveBucketConfig:
+    """Tests for _derive_bucket_config() — auto-discovering bucket counts."""
+
+    def test_uniform_buckets(self, tmp_path):
+        """All entities × partitions have the same bucket count → no overrides."""
+        root = tmp_path / "data"
+        for n in [1, 2]:
+            for country in ["US", "CA"]:
+                for b in range(4):
+                    d = root / f"ngram_size={n}" / f"country={country}" / f"bucket={b}"
+                    d.mkdir(parents=True)
+                    (d / "data.parquet").touch()
+
+        level_order = [
+            {"column": "ngram_size", "type": "partition", "default_value": 1},
+            {"column": "country", "type": "entity", "default_value": "CA"},
+            {"column": "bucket", "type": "hash_bucket", "default_value": 0},
+        ]
+        config = _derive_bucket_config(str(root), level_order)
+        assert config["column"] == "bucket"
+        assert config["default_count"] == 4
+        assert "overrides" not in config
+
+    def test_per_entity_overrides(self, tmp_path):
+        """Different bucket counts per entity × partition → overrides populated."""
+        root = tmp_path / "data"
+        # ngram_size=1: US gets 8 buckets, CA gets 4
+        for b in range(8):
+            d = root / "ngram_size=1" / "country=US" / f"bucket={b}"
+            d.mkdir(parents=True)
+            (d / "data.parquet").touch()
+        for b in range(4):
+            d = root / "ngram_size=1" / "country=CA" / f"bucket={b}"
+            d.mkdir(parents=True)
+            (d / "data.parquet").touch()
+        # ngram_size=2: US gets 16 buckets, CA gets 4
+        for b in range(16):
+            d = root / "ngram_size=2" / "country=US" / f"bucket={b}"
+            d.mkdir(parents=True)
+            (d / "data.parquet").touch()
+        for b in range(4):
+            d = root / "ngram_size=2" / "country=CA" / f"bucket={b}"
+            d.mkdir(parents=True)
+            (d / "data.parquet").touch()
+
+        level_order = [
+            {"column": "ngram_size", "type": "partition", "default_value": 1},
+            {"column": "country", "type": "entity", "default_value": "CA"},
+            {"column": "bucket", "type": "hash_bucket", "default_value": 0},
+        ]
+        config = _derive_bucket_config(str(root), level_order)
+        assert config["column"] == "bucket"
+        # default_count is the mode — 4 appears 2 times (CA×1, CA×2)
+        assert config["default_count"] == 4
+        assert "US" in config["overrides"]
+        assert config["overrides"]["US"]["1"] == 8
+        assert config["overrides"]["US"]["2"] == 16
+        # CA matches default, so no override entry
+        assert "CA" not in config["overrides"]
+
+    def test_no_hash_bucket_level(self, tmp_path):
+        """No hash_bucket type in level_order → returns None."""
+        root = tmp_path / "data"
+        (root / "field=CS").mkdir(parents=True)
+
+        level_order = [
+            {"column": "field", "type": "partition", "default_value": "CS"},
+        ]
+        assert _derive_bucket_config(str(root), level_order) is None

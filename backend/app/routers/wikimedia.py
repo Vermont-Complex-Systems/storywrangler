@@ -4,16 +4,15 @@ Wikimedia endpoints — Wikipedia n-grams, revision histories, and term time ser
 
 from datetime import datetime, timedelta
 from typing import Optional
-from urllib.parse import quote
-
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from ..core.database import get_session
 from ..core.duckdb_client import get_duckdb_client
 from ..core.query_utils import (
-    get_bucket_config, handle_query_error, load_system, murmur_bucket,
-    parse_dates, resolve_bucket_count, resolve_entity,
+    build_hive_path, get_bucket_config, get_partition_defaults, get_queryable_dims,
+    handle_query_error, load_system,
+    murmur_bucket, parse_dates, resolve_bucket_count, resolve_entity,
 )
 from ..core.registry_utils import get_latest_entry
 from ..core.timing import timed
@@ -84,11 +83,10 @@ async def get_top_ngrams(
         raise HTTPException(status_code=404, detail="'wikimedia/ngrams' dataset not found")
 
     fv = dataset_obj.filter_values or {}
-    tr = dataset_obj.transform or {}
-    partition_dims = (tr.get("partition_dimensions") or tr.get("filter_dimensions") or []) if tr else []
+    queryable = get_queryable_dims(dataset_obj)
 
     # Validate granularity against pre-introspected distinct values (if declared)
-    if "granularity" in partition_dims:
+    if "granularity" in queryable:
         valid = fv.get("granularity", [])
         if valid and granularity not in valid:
             raise HTTPException(
@@ -97,7 +95,7 @@ async def get_top_ngrams(
             )
 
     # Validate n against pre-introspected ngram_size values (if declared)
-    if "ngram_size" in partition_dims:
+    if "ngram_size" in queryable:
         valid_n = fv.get("ngram_size", [])
         if valid_n and n not in valid_n:
             raise HTTPException(
@@ -109,9 +107,9 @@ async def get_top_ngrams(
 
     # Build filter_vals: include granularity and ngram_size if declared as partition dims.
     extra: dict = {}
-    if "granularity" in partition_dims:
+    if "granularity" in queryable:
         extra["granularity"] = granularity
-    if "ngram_size" in partition_dims:
+    if "ngram_size" in queryable:
         extra["ngram_size"] = n
 
     with handle_query_error("wikimedia/ngrams"):
@@ -333,22 +331,38 @@ def _entity_base_path(dataset_obj, local_id, filter_vals):
     """Build the Hive path up to the entity level (no date).
 
     Used for DuckDB glob patterns in the slow-path daily partition fallback.
+    Uses build_hive_path with no time_value, so the time level becomes a
+    wildcard.
     """
-    entity_col = (dataset_obj.entity_mapping or {}).get("local_id_column")
-    path = dataset_obj.data_location
-    for dim, val in filter_vals.items():
-        path += f"/{dim}={quote(str(val), safe='')}"
-    if entity_col and local_id is not None:
-        path += f"/{entity_col}={quote(str(local_id), safe='')}"
+    path = build_hive_path(
+        dataset_obj,
+        entity_value=local_id,
+        filter_vals=filter_vals,
+        glob_suffix="",
+    )
+    if path is None:
+        raise ValueError(
+            f"parquet_hive dataset '{dataset_obj.dataset_id}' has no level_order. "
+            "Re-register the dataset to populate level_order."
+        )
     return path
 
 
 def _latest_from_manifest(dataset_obj, local_id, granularity=None):
     """Read the latest available date from manifest.availability.
 
-    Availability is keyed by local_id (entity column value) with
-    per-granularity min/max — populated at registration time by
-    parquet_introspect.  Returns None if not available.
+    Availability is keyed by local_id (entity column value) with nested
+    partition dims and min/max bounds — populated at registration time by
+    parquet_introspect.
+
+    Handles any nesting depth:
+      - {"min": ..., "max": ...}                          (flat)
+      - {"daily": {"min": ..., "max": ...}}               (single partition)
+      - {"1": {"daily": {"min": ..., "max": ...}}}        (multi partition)
+      - {"US": {"1": {"daily": {"min":..,"max":..}}}}     (entity + multi partition)
+
+    Searches recursively for the granularity key, or falls back to traversing
+    the first path at each level until reaching a leaf with "max".
     """
     availability = (dataset_obj.manifest or {}).get("availability", {})
     if not availability:
@@ -359,12 +373,24 @@ def _latest_from_manifest(dataset_obj, local_id, granularity=None):
         entry = availability
     else:
         return None
-    # entry is either {"min":..,"max":..} or {"daily": {"min":..,"max":..}, ...}
-    if granularity and isinstance(entry, dict) and granularity in entry:
-        return entry[granularity].get("max")
-    if isinstance(entry, dict) and "max" in entry:
-        return entry["max"]
-    return None
+
+    def _find_max(d, target):
+        """Recursively find bounds, preferring *target* key at any depth."""
+        if not isinstance(d, dict):
+            return None
+        if "min" in d and "max" in d:
+            return d["max"]
+        if target and target in d:
+            return _find_max(d[target], None)
+        # Follow first available path
+        for v in d.values():
+            if isinstance(v, dict):
+                result = _find_max(v, target)
+                if result is not None:
+                    return result
+        return None
+
+    return _find_max(entry, granularity)
 
 
 @router.get(
@@ -497,15 +523,11 @@ async def term_series(
             raise HTTPException(status_code=404, detail="'wikimedia/ngrams' dataset not found")
         local_id = (await resolve_entity(db, "wikimedia", "ngrams", entity)).local_id
 
-    # Build entity_path for slow-path fallback (daily partition scan)
-    ngrams_tr = ngrams_obj.transform or {}
-    partition_map = (ngrams_tr.get("partition_dimensions") or {})
-    if isinstance(partition_map, list):
-        partition_map = {dim: None for dim in partition_map}
-    # Build filter_vals in partition_map key order (matches hive directory nesting)
+    # Build filter_vals for path construction
     _dim_values = {"granularity": granularity, "ngram_size": n}
+    ngrams_dims = get_queryable_dims(ngrams_obj)
     ngrams_filter_vals: dict = {
-        dim: _dim_values[dim] for dim in partition_map if dim in _dim_values
+        dim: _dim_values[dim] for dim in ngrams_dims if dim in _dim_values
     }
     entity_path = _entity_base_path(ngrams_obj, local_id, ngrams_filter_vals)
 
@@ -541,12 +563,15 @@ async def term_series(
         top_articles_obj = await get_latest_entry(db, "wikimedia", "top_articles_ngrams")
 
     if sparkline_obj:
-        encoded_country = quote(str(local_id), safe="")
         spark_hb = get_bucket_config(sparkline_obj)
-        spark_col = spark_hb.get("column", "ngram_bucket")
         bucket = murmur_bucket(type, resolve_bucket_count(spark_hb, local_id, n))
-        sparkline_path = f"{sparkline_obj.data_location}/ngram_size={n}/country={encoded_country}/{spark_col}={bucket}/data_0.parquet"
-
+        sparkline_path = build_hive_path(
+            sparkline_obj,
+            filter_vals={"ngram_size": n},
+            entity_value=local_id,
+            bucket_value=bucket,
+            glob_suffix="/data_0.parquet",
+        )
         with timed("fast_query", "DuckDB sparkline + articles read"):
             conn = get_duckdb_client().connect()
             sparkline_rows = conn.execute(
@@ -563,9 +588,14 @@ async def term_series(
             if sparkline_rows and include_articles and top_articles_obj:
                 try:
                     art_hb = get_bucket_config(top_articles_obj)
-                    art_col = art_hb.get("column", "ngram_bucket")
                     art_bucket = murmur_bucket(type, resolve_bucket_count(art_hb, local_id, n))
-                    articles_path = f"{top_articles_obj.data_location}/ngram_size={n}/country={encoded_country}/{art_col}={art_bucket}/data_0.parquet"
+                    articles_path = build_hive_path(
+                        top_articles_obj,
+                        filter_vals={"ngram_size": n},
+                        entity_value=local_id,
+                        bucket_value=art_bucket,
+                        glob_suffix="/data_0.parquet",
+                    )
                     art_rows = conn.execute(
                         f"""
                         SELECT date, article_url, score
@@ -602,11 +632,15 @@ async def term_series(
             articles_by_date: dict = {}
             if slow_rows and include_articles and top_articles_obj:
                 try:
-                    encoded = quote(str(local_id), safe="")
                     art_hb = get_bucket_config(top_articles_obj)
-                    art_col = art_hb.get("column", "ngram_bucket")
                     bucket = murmur_bucket(type, resolve_bucket_count(art_hb, local_id, n))
-                    articles_path = f"{top_articles_obj.data_location}/ngram_size={n}/country={encoded}/{art_col}={bucket}/data_0.parquet"
+                    articles_path = build_hive_path(
+                        top_articles_obj,
+                        filter_vals={"ngram_size": n},
+                        entity_value=local_id,
+                        bucket_value=bucket,
+                        glob_suffix="/data_0.parquet",
+                    )
                     art_rows = conn.execute(
                         f"""
                         SELECT date, article_url, score
@@ -774,14 +808,11 @@ async def term_series_batch(
         raise HTTPException(status_code=404, detail="'wikimedia/ngrams' dataset not found")
     local_id = (await resolve_entity(db, "wikimedia", "ngrams", entity)).local_id
 
-    ngrams_tr = ngrams_obj.transform or {}
-    partition_map = (ngrams_tr.get("partition_dimensions") or {})
-    if isinstance(partition_map, list):
-        partition_map = {dim: None for dim in partition_map}
-    # Build filter_vals in partition_map key order (matches hive directory nesting)
+    # Build filter_vals for path construction
     _dim_values = {"granularity": granularity, "ngram_size": n}
+    ngrams_dims = get_queryable_dims(ngrams_obj)
     ngrams_filter_vals: dict = {
-        dim: _dim_values[dim] for dim in partition_map if dim in _dim_values
+        dim: _dim_values[dim] for dim in ngrams_dims if dim in _dim_values
     }
     entity_path = _entity_base_path(ngrams_obj, local_id, ngrams_filter_vals)
     latest_date = _latest_from_manifest(ngrams_obj, local_id, granularity)
@@ -841,14 +872,14 @@ async def term_series_batch(
         top_articles_obj = None
 
     if sparkline_obj:
-        encoded_country = quote(str(local_id), safe="")
         spark_hb = get_bucket_config(sparkline_obj)
-        spark_col = spark_hb.get("column", "ngram_bucket")
         spark_n_buckets = resolve_bucket_count(spark_hb, local_id, n)
-        sparkline_base = f"{sparkline_obj.data_location}/ngram_size={n}/country={encoded_country}"
         # Compute which buckets contain our terms, then read only those files.
         spark_buckets = {murmur_bucket(t, spark_n_buckets) for t in type_list}
-        spark_bucket_files = [f"{sparkline_base}/{spark_col}={b}/data_0.parquet" for b in spark_buckets]
+        spark_bucket_files = [
+            build_hive_path(sparkline_obj, filter_vals={"ngram_size": n}, entity_value=local_id, bucket_value=b, glob_suffix="/data_0.parquet")
+            for b in spark_buckets
+        ]
         spark_file_list = ", ".join(f"'{f}'" for f in spark_bucket_files)
 
         with timed("fast_query", "DuckDB sparkline + articles read"):
@@ -869,15 +900,13 @@ async def term_series_batch(
 
                 if include_articles and found_terms and top_articles_obj:
                     try:
-                        # Compute which buckets contain our terms, then pass all
-                        # matching bucket files as a list so DuckDB can parallelise I/O
-                        # (critical on NFS where sequential file opens are expensive).
                         art_hb = get_bucket_config(top_articles_obj)
-                        art_col = art_hb.get("column", "ngram_bucket")
                         art_n_buckets = resolve_bucket_count(art_hb, local_id, n)
                         buckets = {murmur_bucket(t, art_n_buckets) for t in found_terms}
-                        articles_base = f"{top_articles_obj.data_location}/ngram_size={n}/country={encoded_country}"
-                        bucket_files = [f"{articles_base}/{art_col}={b}/data_0.parquet" for b in buckets]
+                        bucket_files = [
+                            build_hive_path(top_articles_obj, filter_vals={"ngram_size": n}, entity_value=local_id, bucket_value=b, glob_suffix="/data_0.parquet")
+                            for b in buckets
+                        ]
                         file_list = ", ".join(f"'{f}'" for f in bucket_files)
                         found_placeholders = ", ".join(["?"] * len(found_terms))
                         art_rows = conn.execute(
@@ -925,14 +954,14 @@ async def term_series_batch(
             slow_articles: dict = {}  # (ngram, date_str) -> [[url, score], ...]
             if slow_rows and include_articles and use_fast_path and top_articles_obj:
                 try:
-                    encoded = quote(str(local_id), safe="")
                     slow_found = {row[0] for row in slow_rows}
                     art_hb = get_bucket_config(top_articles_obj)
-                    art_col = art_hb.get("column", "ngram_bucket")
                     art_n_buckets = resolve_bucket_count(art_hb, local_id, n)
                     buckets = {murmur_bucket(t, art_n_buckets) for t in slow_found}
-                    articles_base = f"{top_articles_obj.data_location}/ngram_size={n}/country={encoded}"
-                    bucket_files = [f"{articles_base}/{art_col}={b}/data_0.parquet" for b in buckets]
+                    bucket_files = [
+                        build_hive_path(top_articles_obj, filter_vals={"ngram_size": n}, entity_value=local_id, bucket_value=b, glob_suffix="/data_0.parquet")
+                        for b in buckets
+                    ]
                     file_list = ", ".join(f"'{f}'" for f in bucket_files)
                     slow_found_ph = ", ".join(["?"] * len(slow_found))
                     art_rows = conn.execute(
@@ -1013,8 +1042,12 @@ async def precomputed_rtd(
             raise HTTPException(status_code=404, detail="'wikimedia/precomputed_rtd' dataset not found")
         local_id = (await resolve_entity(db, "wikimedia", "ngrams", entity)).local_id
 
-    encoded_country = quote(str(local_id), safe="")
-    path = f"{rtd_obj.data_location}/ngram_size={n}/country={encoded_country}/alpha={alpha}/data_0.parquet"
+    path = build_hive_path(
+        rtd_obj,
+        filter_vals={"ngram_size": n, "alpha": alpha},
+        entity_value=local_id,
+        glob_suffix="/data_0.parquet",
+    )
 
     with timed("query", "DuckDB precomputed RTD read"):
         conn = get_duckdb_client().connect()

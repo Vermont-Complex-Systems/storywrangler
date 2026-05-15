@@ -18,6 +18,7 @@ import re
 from contextlib import contextmanager
 from types import SimpleNamespace
 from typing import Any, List, Optional
+from urllib.parse import quote
 
 import mmh3
 from fastapi import HTTPException
@@ -68,6 +69,99 @@ def resolve_bucket_count(hb: dict, entity: Optional[str] = None, dim_value: Any 
     if not entity_overrides or dim_value is None:
         return default
     return entity_overrides.get(str(dim_value), default)
+
+
+# ── Level-order helpers ──────────────────────────────────────────────────────
+# Utilities that derive query-time metadata from the stored level_order.
+
+def get_partition_defaults(dataset_obj) -> dict:
+    """Build a {column: default_value} dict from the stored level_order.
+
+    Returns defaults for "partition" and "filter" type levels — the columns
+    where omitting a value should inject a safe default rather than aggregate.
+    Entity, time, and hash_bucket levels are excluded (handled separately).
+    """
+    level_order = getattr(dataset_obj, "level_order", None)
+    if not level_order:
+        return {}
+    return {
+        lv["column"]: lv["default_value"]
+        for lv in level_order
+        if lv["type"] in ("partition", "filter") and lv.get("default_value") is not None
+    }
+
+
+def get_queryable_dims(dataset_obj) -> list:
+    """Return column names that callers can filter on (partition + filter types).
+
+    Reads from the stored level_order computed at registration time.
+    """
+    level_order = getattr(dataset_obj, "level_order", None)
+    if not level_order:
+        return []
+    return [
+        lv["column"] for lv in level_order
+        if lv["type"] in ("partition", "filter")
+    ]
+
+
+# ── Hive path construction ───────────────────────────────────────────────────
+# Generic path builder using the stored level_order from registration.
+
+def build_hive_path(
+    dataset_obj,
+    *,
+    entity_value: Optional[str] = None,
+    filter_vals: Optional[dict] = None,
+    time_value: Optional[str] = None,
+    bucket_value: Optional[int] = None,
+    glob_suffix: str = "/*.parquet",
+) -> Optional[str]:
+    """Build an exact hive partition path from the stored level_order.
+
+    Walks the level_order list in sequence. For each level:
+      - "partition" / "filter" → look up value in filter_vals[column]
+      - "entity"               → use entity_value
+      - "hash_bucket"          → use bucket_value
+      - "time"                 → use time_value
+
+    If a level's value is None (not provided), appends ``/*`` (glob wildcard).
+    This allows partial path construction — e.g. omitting time to get
+    an entity-level path for slow-path fallback.
+
+    Returns None when level_order is absent (pre-migration datasets or
+    parquet format), signalling the caller to use the existing glob fallback.
+
+    All values are URL-encoded for safe hive directory names.
+    """
+    level_order = getattr(dataset_obj, "level_order", None)
+    if not level_order:
+        return None
+
+    filter_vals = filter_vals or {}
+    path = dataset_obj.data_location
+
+    for level in level_order:
+        col = level["column"]
+        ltype = level["type"]
+
+        if ltype == "entity":
+            val = entity_value
+        elif ltype == "hash_bucket":
+            val = bucket_value
+        elif ltype == "time":
+            val = time_value
+        elif ltype in ("partition", "filter"):
+            val = filter_vals.get(col)
+        else:
+            val = None
+
+        if val is not None:
+            path += f"/{col}={quote(str(val), safe='')}"
+        else:
+            path += "/*"
+
+    return path + glob_suffix
 
 
 # ── DuckDB error classification ──────────────────────────────────────────────
@@ -225,11 +319,21 @@ def _path_expr(dataset_obj) -> str:
 
     - parquet (single path):  read_parquet('{path}')
     - parquet (file list):    read_parquet([file1, file2, ...])
-    - parquet_hive:           read_parquet('{path}/**/*.parquet', hive_partitioning=true)
+    - parquet_hive:           read_parquet('{path}/*/*/.../*.parquet', hive_partitioning=true)
+
+    For parquet_hive, builds a wildcard path from the stored level_order
+    (all levels become ``/*``), avoiding recursive NFS directory walking.
+    Requires level_order — all datasets must be registered with it.
     """
     loc = dataset_obj.data_location
     if dataset_obj.data_format == "parquet_hive":
-        return f"read_parquet('{loc}/**/*.parquet', hive_partitioning=true)"
+        hive_path = build_hive_path(dataset_obj)
+        if hive_path is None:
+            raise ValueError(
+                f"parquet_hive dataset at '{loc}' has no level_order. "
+                "Re-register the dataset to populate level_order."
+            )
+        return f"read_parquet('{hive_path}', hive_partitioning=true)"
     if isinstance(loc, list):
         quoted = ", ".join(f"'{p}'" for p in loc)
         return f"read_parquet([{quoted}])"

@@ -11,30 +11,28 @@ Currently includes:
 import math
 from importlib.metadata import PackageNotFoundError, version as pkg_version
 from typing import Optional
-from urllib.parse import quote
-
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from ..core.database import get_session
 from ..core.duckdb_client import get_duckdb_client
-from ..core.query_utils import _is_data_missing, handle_query_error, load_system, parse_dates, resolve_entity
+from ..core.query_utils import (
+    _is_data_missing, build_hive_path, get_partition_defaults, get_queryable_dims,
+    handle_query_error, load_system, parse_dates, resolve_entity,
+)
 from ..core.registry_utils import get_latest_entry
 from ..core.timing import timed
 
 router = APIRouter()
 
 
-def _apply_partition_defaults(filter_vals: dict, partition_map: dict) -> None:
+def _apply_defaults(filter_vals: dict, defaults: dict) -> None:
     """Inject defaults for missing partition dimensions (mutates filter_vals).
 
-    List values use their first element as the default — the list form means
-    "these are the valid values; first is the safe default".
-    None values are skipped — the caller must always supply those explicitly.
+    *defaults* comes from ``get_partition_defaults()`` — values are already
+    resolved scalars (no list handling needed).
     """
-    for dim, default_val in partition_map.items():
-        if default_val is not None:
-            actual = default_val[0] if isinstance(default_val, list) else default_val
-            filter_vals.setdefault(dim, actual)
+    for dim, default_val in defaults.items():
+        filter_vals.setdefault(dim, default_val)
 
 
 def _sanitize_floats(obj):
@@ -192,14 +190,8 @@ async def allotaxonometer(
         )
 
     fv = dataset_obj.filter_values or {}
-    tr = dataset_obj.transform or {}
-    filter_dims = (tr.get("filter_dimensions") or []) if tr else []
-    partition_map = (tr.get("partition_dimensions") or {}) if tr else {}
-    # backward compat: old registrations put partition cols in filter_dimensions as a list
-    if isinstance(partition_map, list):
-        partition_map = {dim: None for dim in partition_map}
-    partition_dims = list(partition_map.keys())
-    all_dims = filter_dims + partition_dims
+    all_dims = get_queryable_dims(dataset_obj)
+    defaults = get_partition_defaults(dataset_obj)
 
     # Step 1 — generic: any declared dim passed as ?dim=val / ?dim2=val
     qp = request.query_params
@@ -214,11 +206,9 @@ async def allotaxonometer(
         if "n2" in qp and "ngram_size" not in filter_vals2:
             filter_vals2["ngram_size"] = int(qp["n2"])
 
-    # Step 3 — partition defaults: inject default for any partition_dim still missing.
-    # Default is the value in the partition_dimensions dict (None = no default, caller must provide).
-    # Step 3 — partition defaults: inject default for any partition_dim still missing.
-    _apply_partition_defaults(filter_vals1, partition_map)
-    _apply_partition_defaults(filter_vals2, partition_map)
+    # Step 3 — inject defaults from level_order for any partition dim still missing.
+    _apply_defaults(filter_vals1, defaults)
+    _apply_defaults(filter_vals2, defaults)
 
     # Validate assembled filter values against pre-introspected distinct values
     for vals_dict in (filter_vals1, filter_vals2):
@@ -302,27 +292,20 @@ def _load_hive_direct(conn, dataset_obj, local_id, date_str, filter_vals, limit)
     and date — avoids the expensive /**/*.parquet glob that load_system uses.
     """
     ep = dataset_obj.endpoint_schema or {}
-    tr = dataset_obj.transform or {}
     type_col = ep.get("type_column") or "types"
     count_col = ep.get("count_column") or "counts"
-    entity_col = (dataset_obj.entity_mapping or {}).get("local_id_column")
-    time_col = tr.get("time_dimension")
 
-    # Build path in partition_dimensions order (must match on-disk hive layout).
-    # filter_vals insertion order is unreliable (alias injection, param order, etc.)
-    partition_map = tr.get("partition_dimensions") or {}
-    if isinstance(partition_map, list):
-        partition_map = {dim: None for dim in partition_map}
-
-    path = dataset_obj.data_location
-    for dim in partition_map:
-        if dim in filter_vals:
-            path += f"/{dim}={quote(str(filter_vals[dim]), safe='')}"
-    if entity_col and local_id is not None:
-        path += f"/{entity_col}={quote(str(local_id), safe='')}"
-    if time_col and date_str:
-        path += f"/{time_col}={date_str}"
-    path += "/*.parquet"
+    path = build_hive_path(
+        dataset_obj,
+        entity_value=local_id,
+        filter_vals=filter_vals,
+        time_value=date_str,
+    )
+    if path is None:
+        raise ValueError(
+            f"parquet_hive dataset '{dataset_obj.dataset_id}' has no level_order. "
+            "Re-register the dataset to populate level_order."
+        )
 
     try:
         if limit:
@@ -344,9 +327,9 @@ def _load_hive_direct(conn, dataset_obj, local_id, date_str, filter_vals, limit)
 def _latest_from_manifest(dataset_obj, local_id, granularity=None):
     """Read the latest available date from manifest.availability.
 
-    Availability is keyed by local_id (entity column value) with
-    per-granularity min/max — populated at registration time by
-    parquet_introspect.  Returns None if not available.
+    Availability is keyed by local_id (entity column value) with nested
+    partition dims and min/max bounds.  Searches recursively for the
+    granularity key, falling back to the first path at each level.
     """
     availability = (dataset_obj.manifest or {}).get("availability", {})
     if not availability:
@@ -357,11 +340,22 @@ def _latest_from_manifest(dataset_obj, local_id, granularity=None):
         entry = availability
     else:
         return None
-    if granularity and isinstance(entry, dict) and granularity in entry:
-        return entry[granularity].get("max")
-    if isinstance(entry, dict) and "max" in entry:
-        return entry["max"]
-    return None
+
+    def _find_max(d, target):
+        if not isinstance(d, dict):
+            return None
+        if "min" in d and "max" in d:
+            return d["max"]
+        if target and target in d:
+            return _find_max(d[target], None)
+        for v in d.values():
+            if isinstance(v, dict):
+                result = _find_max(v, target)
+                if result is not None:
+                    return result
+        return None
+
+    return _find_max(entry, granularity)
 
 
 @router.get("/rtd")
@@ -415,13 +409,8 @@ async def rank_turbulence_divergence(
         )
 
     # Build filter vals from query params (same pattern as /allotax)
-    tr = dataset_obj.transform or {}
-    filter_dims = (tr.get("filter_dimensions") or []) if tr else []
-    partition_map = (tr.get("partition_dimensions") or {}) if tr else {}
-    if isinstance(partition_map, list):
-        partition_map = {dim: None for dim in partition_map}
-    partition_dims = list(partition_map.keys())
-    all_dims = filter_dims + partition_dims
+    all_dims = get_queryable_dims(dataset_obj)
+    defaults = get_partition_defaults(dataset_obj)
 
     qp = request.query_params
     filter_vals1 = {dim: qp[dim] for dim in all_dims if dim in qp}
@@ -433,8 +422,8 @@ async def rank_turbulence_divergence(
         if "n2" in qp and "ngram_size" not in filter_vals2:
             filter_vals2["ngram_size"] = int(qp["n2"])
 
-    _apply_partition_defaults(filter_vals1, partition_map)
-    _apply_partition_defaults(filter_vals2, partition_map)
+    _apply_defaults(filter_vals1, defaults)
+    _apply_defaults(filter_vals2, defaults)
 
     # Same entity for both systems (date-vs-date comparison)
     if not filter_vals2:

@@ -251,67 +251,27 @@ class EndpointSchemaConfig(BaseModel):
     )
 
 
-class HashBucketConfig(BaseModel):
-    """Hash-bucket partitioning for content-sharded hive datasets.
-
-    Some datasets shard files by a hash of the entity/type column
-    (e.g. ngram_bucket) to keep per-file row counts manageable.
-    This tells the query layer which column holds the bucket ID and
-    how many buckets exist, so it can route to the correct partition
-    without scanning all of them.
-
-    Hash function: murmur3_32, seed 0, positive-int32 mask::
-
-        bucket = (mmh3.hash(term, seed=0) & 0x7FFFFFFF) % count
-
-    Resolution order: ``overrides[entity][str(dim_value)]`` → ``default_count``.
-    """
-
-    column: str = Field(
-        ...,
-        description="Hive partition column holding the bucket ID (e.g. 'ngram_bucket').",
-    )
-    default_count: int = Field(
-        ...,
-        gt=0,
-        description=(
-            "Fallback bucket count when no override matches. "
-            "Use 1 to disable sharding for unlisted partitions."
-        ),
-    )
-    overrides: Optional[Dict[str, Dict[str, int]]] = Field(
-        None,
-        description=(
-            "Per-entity, per-partition-dimension bucket count overrides. "
-            "Outer key is the entity value (from `entity_mapping.local_id_column`), "
-            "inner key is the string representation of the first partition dimension value. "
-            "Omit entirely for uniform bucketing.\n\n"
-            "Example:\n"
-            "```json\n"
-            '{"United States": {"1": 16, "2": 32}, "United Kingdom": {"1": 8, "2": 32}}\n'
-            "```"
-        ),
-    )
-
-
 class TransformConfig(BaseModel):
     """Query slice axes — how to filter the dataset at request time.
 
-    Three orthogonal axes, all generating WHERE clauses at query time:
+    For `parquet_hive`, the on-disk hive directory levels are auto-discovered
+    at registration time. Each level is classified by matching it against the
+    declarations here and in `entity_mapping`:
 
-    - `time_dimension`: date-range filtering via BETWEEN.
-    - `filter_dimensions`: categorical columns where omitting the filter is
-      valid (aggregates over all values). E.g. omitting `sex` means all sexes.
-    - `partition_dimensions`: ordered dict of hive partition columns that matter
-      for query slicing. Dict order must match the on-disk nesting order.
-      Values are query-time defaults: scalar = default value, list = enumerated
-      valid values (first is default), None = caller must always provide.
+    - `entity_mapping.local_id_column` → entity level
+    - `time_dimension` → time level
+    - `hash_bucket.column` → hash bucket level
+    - everything else → partition level (queryable, gets an auto-default)
 
-    Not every hive level needs to appear. Levels that are not query-relevant
-    (entity column) are discovered automatically. Hash buckets, when present,
-    are declared via `hash_bucket` (column name + count).
+    The discovered order and auto-defaults are stored in `level_order` — you
+    do not need to declare partition columns that match on-disk structure.
 
-    `entity_mapping.local_id_column` is handled separately — do not list it here.
+    Use `partition_dimensions` only when you need to **override** the
+    auto-discovered default for a column (e.g. force `granularity` to default
+    to `"daily"` instead of the alphabetically-first value).
+
+    `filter_dimensions` is for non-hive columns inside parquet files (e.g. `sex`
+    in babynames) where omitting the filter aggregates over all values.
     """
 
     time_dimension: Optional[str] = Field(
@@ -325,44 +285,45 @@ class TransformConfig(BaseModel):
     filter_dimensions: Optional[List[str]] = Field(
         None,
         description=(
-            "Categorical filter columns where omitting the filter aggregates over all values "
-            "(valid behaviour). E.g. `['sex']` — omitting sex returns all names."
+            "Non-hive categorical filter columns where omitting the filter aggregates "
+            "over all values (valid behaviour). E.g. `['sex']` — omitting sex returns "
+            "all names. Not needed for hive partition levels — those are auto-discovered."
         ),
     )
     partition_dimensions: Optional[Dict[str, Any]] = Field(
         None,
         description=(
-            "Ordered dict of hive partition columns relevant for query slicing. "
-            "Dict order must match the on-disk directory nesting order. "
-            "Not every hive level needs to appear — undeclared intermediate levels "
-            "are discovered automatically.\n\n"
-            "Values control the query-time default:\n\n"
-            "- **scalar** (e.g. `\"daily\"`) — default when caller omits the parameter.\n"
-            "- **list** (e.g. `[1]`) — enumerated valid values; first is the default.\n"
-            "- **`None`** — no default, caller must always provide a value.\n\n"
-            "Examples: `{\"ngram_size\": [1], \"granularity\": \"daily\"}`, "
-            "`{\"ngram_size\": [1], \"alpha\": [0.17, 0.33]}`."
+            "Optional overrides for auto-discovered hive partition defaults. "
+            "Usually not needed — the system discovers hive levels and uses the "
+            "first on-disk value as the default.\n\n"
+            "Use this only when you want a different default than what was discovered:\n\n"
+            "- **scalar** (e.g. `{\"granularity\": \"daily\"}`) — override the default.\n"
+            "- **list** (e.g. `{\"alpha\": [0.17, 0.33]}`) — enumerated valid values; "
+            "first is the default.\n\n"
+            "Omitting this field entirely is fine — all hive levels will be "
+            "auto-discovered with their first on-disk value as the default."
         ),
     )
-    hash_bucket: Optional[HashBucketConfig] = Field(
+    hash_bucket: Optional[str] = Field(
         None,
         description=(
-            "Hash-bucket partitioning config for content-sharded datasets. "
-            "Declares which hive partition column holds the bucket ID and "
-            "how many buckets exist. The query layer uses murmur3_32 (seed 0) "
-            "to compute the bucket for a given term at request time. "
-            "Not listed in `partition_dimensions` — hash buckets are routing-only, "
-            "not query axes."
+            "Hash-bucket column name for content-sharded datasets. "
+            "Just the hive partition column holding the bucket ID "
+            "(e.g. 'ngram_bucket'). Bucket counts per entity are "
+            "auto-derived from the directory structure at registration time. "
+            "The query layer uses murmur3_32 (seed 0) to route to the "
+            "correct bucket at request time. "
+            "Not listed in `partition_dimensions` — hash buckets are "
+            "routing-only, not query axes."
         ),
     )
 
     @model_validator(mode="after")
     def _bucket_col_not_in_partition_dims(self):
         if self.hash_bucket and self.partition_dimensions:
-            col = self.hash_bucket.column
-            if col in self.partition_dimensions:
+            if self.hash_bucket in self.partition_dimensions:
                 raise ValueError(
-                    f"hash_bucket.column '{col}' must not appear in "
+                    f"hash_bucket '{self.hash_bucket}' must not appear in "
                     f"partition_dimensions — bucket columns are routing-only, "
                     f"not query axes"
                 )

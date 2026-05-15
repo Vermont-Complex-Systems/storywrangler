@@ -15,7 +15,12 @@ from storywrangler_schemas.registry import DatasetCreate, EntityRow
 
 from ..core.database import get_session
 from ..core.duckdb_client import get_duckdb_client
-from ..core.parquet_introspect import introspect
+from ..core.parquet_introspect import (
+    _derive_bucket_config,
+    _discover_levels,
+    introspect,
+    validate_and_build_level_order,
+)
 from ..core.registry_utils import get_latest_entry
 from ..models.auth import User
 from ..models.registry import RegistryEntry, EntityMapping, EntityGraph
@@ -142,13 +147,35 @@ async def register_dataset(
                 )
 
     # ── Pre-registration validation ─────────────────────────────────────────────
-    # Introspect first (read-only) so we can validate before touching the DB.
-    # When the submitter provides data_schema, glob-based schema introspection
-    # is skipped (allows registration during schema transitions).
+
+    # 1. Discover hive levels first (cheap filesystem walk) — needed by introspect()
+    #    to know which columns to scan for filter_values, even when partition_dimensions
+    #    is omitted from the submission.
     derived: Dict[str, Any] = {}
+    if dataset.data_format == "parquet_hive":
+        levels = _discover_levels(dataset.data_location)
+        if levels:
+            try:
+                level_order = validate_and_build_level_order(levels, dataset)
+                derived["level_order"] = level_order
+            except ValueError as e:
+                raise HTTPException(status_code=422, detail=str(e))
+
+            # Derive hash_bucket config (counts + overrides) from disk
+            if dataset.transform and dataset.transform.hash_bucket:
+                bucket_config = _derive_bucket_config(dataset.data_location, level_order)
+                if bucket_config:
+                    derived["bucket_config"] = bucket_config
+
+    # 2. Introspect parquet files (read-only) — schema, filter_values, availability.
+    #    When the submitter provides data_schema, glob-based schema introspection
+    #    is skipped (allows registration during schema transitions).
     try:
         conn = get_duckdb_client().connect()
-        derived = introspect(conn, dataset, provided_schema=dataset.data_schema)
+        derived.update(
+            introspect(conn, dataset, provided_schema=dataset.data_schema,
+                       level_order=derived.get("level_order"))
+        )
     except Exception as e:
         log.warning("Parquet introspection failed for %s/%s: %s", dataset.domain, dataset.dataset_id, e)
         derived["introspect_error"] = str(e)
@@ -167,6 +194,40 @@ async def register_dataset(
             ),
         )
 
+    # 3. Type-coerce filter_values and level_order default_values using data_schema.
+    #    os.listdir()-based filter_values are always strings ("1", "0.17") but
+    #    query-time validation expects typed values (int 1, float 0.17).
+    #    Use the introspected data_schema to determine the correct type.
+    schema = derived.get("data_schema") or {}
+    _INT_TYPES = {"BIGINT", "INTEGER", "SMALLINT", "TINYINT", "INT", "INT4", "INT8", "INT2"}
+    _FLOAT_TYPES = {"DOUBLE", "FLOAT", "REAL", "DECIMAL", "NUMERIC"}
+
+    def _coerce(val, col_type: str):
+        """Coerce a string value to the appropriate Python type based on schema."""
+        upper = col_type.upper()
+        try:
+            if upper in _INT_TYPES:
+                return int(val)
+            if upper in _FLOAT_TYPES:
+                return float(val)
+        except (ValueError, TypeError):
+            pass
+        return val
+
+    # Coerce filter_values
+    fv = derived.get("filter_values") or {}
+    for col, values in fv.items():
+        col_type = schema.get(col, "")
+        if col_type and values and isinstance(values[0], str):
+            fv[col] = [_coerce(v, col_type) for v in values]
+
+    # Coerce level_order default_values
+    for lv in derived.get("level_order") or []:
+        col = lv["column"]
+        col_type = schema.get(col, "")
+        if col_type and lv.get("default_value") is not None:
+            lv["default_value"] = _coerce(lv["default_value"], col_type)
+
     if dataset.endpoint_schema and dataset.endpoint_schema.type == "types-counts":
         ep = dataset.endpoint_schema
 
@@ -176,11 +237,11 @@ async def register_dataset(
         #   time_dimension        → ?dates=D1  vs ?dates2=D2
         #   filter_dimensions     → ?sex=M     vs ?sex2=F
         #   partition_dimensions  → ?gran=daily vs ?gran2=weekly
-        has_entity    = bool(dataset.entity_mapping)
-        has_time      = bool(dataset.transform and dataset.transform.time_dimension)
-        has_filter    = bool(dataset.transform and dataset.transform.filter_dimensions)
-        has_partition = bool(dataset.transform and dataset.transform.partition_dimensions)
-        if not any([has_entity, has_time, has_filter, has_partition]):
+        has_entity      = bool(dataset.entity_mapping)
+        has_time        = bool(dataset.transform and dataset.transform.time_dimension)
+        has_filter      = bool(dataset.transform and dataset.transform.filter_dimensions)
+        has_hive_levels = bool(derived.get("level_order"))
+        if not any([has_entity, has_time, has_filter, has_hive_levels]):
             raise HTTPException(
                 status_code=422,
                 detail=(
@@ -227,14 +288,15 @@ async def register_dataset(
             )
 
         # 2. Require at least one groupable dimension.
-        has_filter    = bool(dataset.transform.filter_dimensions)
-        has_partition = bool(dataset.transform.partition_dimensions)
-        if not has_filter and not has_partition:
+        has_filter      = bool(dataset.transform.filter_dimensions)
+        has_hive_levels = bool(derived.get("level_order"))
+        if not has_filter and not has_hive_levels:
             raise HTTPException(
                 status_code=422,
                 detail=(
                     "time-series datasets require at least one groupable dimension: "
-                    "declare filter_dimensions or partition_dimensions in transform. "
+                    "declare filter_dimensions or partition_dimensions in transform, "
+                    "or use parquet_hive format (hive levels are auto-discovered). "
                     "See https://github.com/vermont-complex-systems/Storywrangler-Specification for the spec."
                 ),
             )
@@ -290,6 +352,13 @@ async def register_dataset(
     partition_index = manifest_dump.pop("partition_index", None)
     manifest_small = manifest_dump  # manifest without the large partition_index
 
+    # Replace string hash_bucket with the derived full config dict.
+    # Submission sends "ngram_bucket"; stored format is
+    # {"column": "ngram_bucket", "default_count": 1, "overrides": {...}}.
+    transform_dump = _dump(dataset.transform)
+    if "bucket_config" in derived and transform_dump:
+        transform_dump["hash_bucket"] = derived["bucket_config"]
+
     if existing:
         existing.data_location = dataset.data_location
         existing.data_format = dataset.data_format
@@ -297,7 +366,7 @@ async def register_dataset(
         existing.manifest = manifest_small
         existing.entity_mapping = _dump(dataset.entity_mapping)
         existing.endpoint_schema = _dump(dataset.endpoint_schema)
-        existing.transform = _dump(dataset.transform)
+        existing.transform = transform_dump
         existing.catalog = dataset.catalog
         existing.ownership = _dump(dataset.ownership)
         existing.lineage = _dump(dataset.lineage)
@@ -320,7 +389,7 @@ async def register_dataset(
             manifest=manifest_small,
             entity_mapping=_dump(dataset.entity_mapping),
             endpoint_schema=_dump(dataset.endpoint_schema),
-            transform=_dump(dataset.transform),
+            transform=transform_dump,
             ownership=_dump(dataset.ownership),
             lineage=_dump(dataset.lineage),
             schema_version=dataset.schema_version,
@@ -358,6 +427,8 @@ async def register_dataset(
             manifest = dict(entry.manifest or {})
             manifest["availability"] = derived["availability"]
             entry.manifest = manifest
+        if "level_order" in derived:
+            entry.level_order = derived["level_order"]
         await db.commit()
         msg["derived"] = list(derived.keys())
 
@@ -425,6 +496,7 @@ _SUMMARY_COLUMNS = [
     RegistryEntry.endpoint_schema,
     RegistryEntry.transform,        # query slice axes — small, needed by consumers
     RegistryEntry.ownership,        # governance metadata — small
+    RegistryEntry.level_order,      # hive nesting order — small, shows full structure at a glance
     RegistryEntry.schema_version,
     RegistryEntry.created_at, RegistryEntry.updated_at,
     # excluded: filter_values (medium), partition_index (can be large)
@@ -484,6 +556,7 @@ async def get_dataset_info(
             "ownership": ds.ownership,
             "lineage": ds.lineage,
             "filter_values": ds.filter_values,
+            "level_order": ds.level_order,
             "created_at": ds.created_at,
             "updated_at": ds.updated_at,
         }
@@ -518,6 +591,7 @@ async def get_dataset_info(
         "transform": ds.transform,
         "ownership": ds.ownership,
         "lineage": ds.lineage,
+        "level_order": ds.level_order,
         "created_at": ds.created_at,
         "updated_at": ds.updated_at,
     }

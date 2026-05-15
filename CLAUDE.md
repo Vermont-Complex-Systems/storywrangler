@@ -53,6 +53,7 @@ Each top-level field answers a distinct question. Do not conflate them.
 | `endpoint_schema` | What does the API return? | Yes — column names only |
 | `transform` | What axes can callers slice on? | Yes — WHERE clause columns |
 | `entity_mapping` | How to resolve entity identifiers? | Yes — entity column + namespace |
+| `level_order` | What is the on-disk hive nesting order? | Yes — exact path construction |
 | `manifest` | What data exists (coverage/partition index)? | No — UI/discovery only |
 | `ownership` | Who owns this? | No — governance only |
 | `lineage` | Where did it come from? | No — provenance only |
@@ -68,33 +69,56 @@ No time dimension, no filter dimensions, no granularities, no ngram_sizes here.
 
 ### `transform` — query slice axes
 
+For `parquet_hive`, most of the transform is auto-discovered from the hive directory
+tree at registration time. The minimal submission only requires declaring which column
+is the time dimension:
+
 ```python
 {
-  "time_dimension":       "date",
-  "filter_dimensions":    ["sex"],                                       # categorical, safe to omit
-  "partition_dimensions": {"granularity": "daily", "ngram_size": 1},    # dict: col → safe default
+  "time_dimension": "date",
 }
 ```
 
-- `time_dimension`: the column for `WHERE time_col BETWEEN ? AND ?`.
-- `filter_dimensions`: categorical columns where omitting = aggregate over all values (valid).
-  E.g. omitting `sex` returns all names.
-- `partition_dimensions`: dict where keys are columns that are unsafe to omit (mixing them
-  would produce nonsensical aggregations, e.g. daily + weekly + monthly). Values are the safe
-  defaults injected automatically when the caller omits the parameter (`None` = no safe default,
-  caller must always provide). Distinct values for both `filter_dimensions` and
-  `partition_dimensions` are **auto-introspected** at registration into `filter_values`.
+All other hive levels are auto-discovered and classified:
+- Levels matching `entity_mapping.local_id_column` → entity
+- Levels matching `time_dimension` → time
+- Levels matching `hash_bucket` (string column name) → hash_bucket
+- Everything else → partition (gets auto-default from first on-disk value)
+
+Optional fields:
+- `filter_dimensions`: non-hive columns inside parquet files where omitting = aggregate
+  over all values. E.g. `["sex"]` — omitting sex returns all names.
+- `partition_dimensions`: override auto-discovered defaults when needed.
+  E.g. `{"granularity": "daily"}` forces the default instead of alphabetically-first.
+
+Query-time defaults come from `level_order.default_value` (stored at registration).
+Helper functions `get_partition_defaults()` and `get_queryable_dims()` in
+`core/query_utils.py` provide the query layer's view — they read from `level_order`
+first, falling back to `transform.partition_dimensions` for pre-migration datasets.
 
 Neither field includes the entity column — that is handled by `entity_mapping.local_id_column`.
 
 ### `transform.hash_bucket` — content-sharded partition routing
 
+**Submission format** — just the column name:
+
+```python
+"ngram_bucket"
+```
+
+**Stored format** — auto-derived at registration by `_derive_bucket_config()`:
+
 ```python
 {"column": "ngram_bucket", "default_count": 1, "overrides": {"United States": {"1": 16, "2": 32}}}
 ```
 
-Declares that the dataset distributes rows across hive partition directories
-named `{column}={0..count-1}` by a murmur3_32 hash of the entity/type column.
+The submitter declares only which hive partition column holds the bucket ID.
+At registration, `_derive_bucket_config()` walks the directory tree, counts
+bucket directories per entity × partition combination, and derives
+`default_count` (mode of all counts) and `overrides` (entity/partition
+combos that differ from the default). The full config dict replaces the
+string in the stored `transform.hash_bucket` before persisting.
+
 The query layer computes the bucket at request time:
 
     bucket = (mmh3.hash(term, seed=0) & 0x7FFFFFFF) % count
@@ -106,7 +130,7 @@ The query layer computes the bucket at request time:
 - `overrides` is a nested dict: `entity → {partition_dim_value → count}`.
   Resolution: `overrides[entity][str(dim_value)]` → `default_count`.
 - Not listed in `partition_dimensions` — hash buckets are routing-only, not query axes.
-  A model validator enforces that `hash_bucket.column` does not appear in
+  A model validator enforces that `hash_bucket` does not appear in
   `partition_dimensions` keys.
 - Helpers live in `core/query_utils.py`: `murmur_bucket()`, `get_bucket_config()`,
   `resolve_bucket_count()` — generic, usable by any router.
@@ -151,9 +175,20 @@ formats. The only difference is the FROM expression:
 # parquet
 read_parquet('{data_location}')
 
-# parquet_hive
+# parquet_hive (with level_order — exact-depth wildcard path)
+read_parquet('{data_location}/*/*/*/*.parquet', hive_partitioning=true)
+
+# parquet_hive (without level_order — recursive glob fallback)
 read_parquet('{data_location}/**/*.parquet', hive_partitioning=true)
 ```
+
+When `level_order` is populated, `_path_expr()` builds a fixed-depth wildcard
+path (one `/*` per level) instead of the recursive `/**/*.parquet` glob. This
+avoids NFS directory walking overhead.
+
+For routers that need exact partition paths (sparklines, RTD), `build_hive_path()`
+constructs paths from level_order with concrete values for each level. Falls back
+to `None` when level_order is absent, signalling the caller to use legacy path logic.
 
 Callers (wikimedia, allotax routers) pass `granularity` and `ngram_size` as plain
 entries in `filter_vals` — they are just WHERE clause values, not special cases.
@@ -178,6 +213,46 @@ Runs once on `POST /register`. Uses `hive_partitioning=true` for `parquet_hive` 
 - `SELECT DISTINCT dim` reads from directory metadata, not file contents
 
 Never raises — failures are logged and registration proceeds without derived fields.
+
+---
+
+### `level_order` — hive nesting order (derived, query-time)
+
+The single source of truth for a `parquet_hive` dataset's directory structure.
+Derived at registration time, included in default GET responses.
+
+```json
+[
+  {"column": "ngram_size",  "type": "partition", "default_value": 1},
+  {"column": "granularity", "type": "partition", "default_value": "daily"},
+  {"column": "country",     "type": "entity",    "default_value": "Afghanistan"},
+  {"column": "date",        "type": "time",      "default_value": "2020-01-01"}
+]
+```
+
+**Type tags:** `partition` (undeclared hive levels or partition_dimensions key),
+`entity` (entity_mapping.local_id_column), `hash_bucket` (transform.hash_bucket),
+`time` (time_dimension), `filter` (filter_dimensions item).
+
+**`default_value`:** The first on-disk value (sorted alphabetically) for each level.
+If `partition_dimensions` declares an override, that wins. Type-coerced against
+`filter_values` at registration (string `"1"` → int `1` when filter_values has ints).
+
+**Computed by:** `validate_and_build_level_order()` in `parquet_introspect.py`.
+`_discover_levels()` walks one branch of the hive tree, returning both column names
+and first values. Undeclared levels default to type `"partition"`. Registration
+fails with 422 if:
+- Any declared `partition_dimensions` key or `hash_bucket` column is missing on disk
+- `partition_dimensions` key order doesn't match the on-disk nesting order
+
+**Used by:**
+- `build_hive_path()` — exact partition paths at query time
+- `get_partition_defaults()` — query-time default injection
+- `get_queryable_dims()` — list of filterable columns
+- Default GET response — human-readable summary of the full hive structure
+
+**Backward compatibility:** null means "use glob fallback." All helpers fall back to
+`transform.partition_dimensions` when `level_order` is absent.
 
 ---
 
