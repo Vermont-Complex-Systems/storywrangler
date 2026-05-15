@@ -1,6 +1,7 @@
 <script lang="ts">
 	import * as Code from '$lib/components/ui/code';
-	import { Upload, Server, Folder, Monitor } from '@lucide/svelte';
+	import * as TreeView from '$lib/components/ui/tree-view';
+	import { Upload, Server, Folder, Monitor, Check } from '@lucide/svelte';
 
 	const installCode = `uv add storywrangler-sdk`;
 
@@ -93,19 +94,27 @@ Peter,1464,1925,M
 <div class="not-prose mt-6 flex flex-col md:hidden">
 
 	<!-- Row 1: Submitter's Pipeline (full width) -->
-	<div class="border-border rounded-xl border p-3 h-36 relative overflow-hidden group cursor-default">
-		<div class="transition-opacity duration-200 group-hover:opacity-0 flex flex-col items-center justify-center h-full gap-2">
-			<div class="bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400 flex h-10 w-10 items-center justify-center rounded-xl">
-				<Upload class="h-5 w-5" />
+	<div class="rounded-xl border border-zinc-200 bg-zinc-50 p-3 dark:border-zinc-800 dark:bg-zinc-900">
+		<div class="flex items-center gap-2 mb-3">
+			<div class="bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400 flex h-7 w-7 items-center justify-center rounded-lg shrink-0">
+				<Upload class="h-4 w-4" />
 			</div>
-			<p class="text-foreground text-xs font-semibold text-center">Submitter's Pipeline</p>
+			<p class="text-foreground text-xs font-semibold">Submitter's Pipeline</p>
 		</div>
-		<div class="absolute inset-0 p-4 transition-opacity duration-200 opacity-0 group-hover:opacity-100 flex flex-col justify-center">
-			<p class="text-foreground text-xs font-semibold mb-2">Submitter's Pipeline</p>
-			<pre class="text-[10px] font-mono text-muted-foreground leading-relaxed m-0 bg-transparent border-0 p-0">my-pipeline/
-├── extract/   fetch.py
-├── transform/ process.py
-└── load/      <span class="font-bold text-foreground">submit.py</span>  ← adapter script</pre>
+		<div class="text-xs">
+			<TreeView.Root>
+				<TreeView.Folder name="my-pipeline">
+					<TreeView.Folder name="extract">
+						<TreeView.File name="fetch.py" />
+					</TreeView.Folder>
+					<TreeView.Folder name="transform">
+						<TreeView.File name="process.py" />
+					</TreeView.Folder>
+					<TreeView.Folder name="load">
+						<TreeView.File name="submit.py" class="font-bold text-foreground" />
+					</TreeView.Folder>
+				</TreeView.Folder>
+			</TreeView.Root>
 		</div>
 	</div>
 
@@ -129,33 +138,26 @@ Peter,1464,1925,M
 
 	<!-- Row 2: Platform (left) + Storage (right) -->
 	<div class="grid grid-cols-2 gap-3">
-		<!-- Card 2: Storywrangler Platform -->
-		<div class="border-border rounded-xl border p-3 h-28 relative overflow-hidden group cursor-default">
-			<div class="transition-opacity duration-200 group-hover:opacity-0 flex flex-col items-center justify-center h-full gap-2">
-				<div class="bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400 flex h-10 w-10 items-center justify-center rounded-xl">
-					<Server class="h-5 w-5" />
+		<!-- Card 2: Storywrangler Catalog -->
+		<div class="border-border rounded-xl border p-3">
+			<div class="flex items-center gap-2 mb-3">
+				<div class="bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400 flex h-7 w-7 items-center justify-center rounded-lg shrink-0">
+					<Server class="h-4 w-4" />
 				</div>
-				<p class="text-foreground text-xs font-semibold text-center">Storywrangler Platform</p>
+				<p class="text-foreground text-xs font-semibold">Storywrangler Catalog</p>
 			</div>
-			<div class="absolute inset-0 p-3 transition-opacity duration-200 opacity-0 group-hover:opacity-100 flex flex-col justify-center gap-1">
-				<p class="text-foreground text-xs font-semibold mb-1">Storywrangler Platform</p>
-				<p class="text-muted-foreground text-[10px]">Validates schemas and exposes instrument-ready API endpoints, querying Parquet directly at request time.</p>
-			</div>
+			<ul class="text-muted-foreground text-[10px] space-y-1">
+				<li class="flex items-start gap-1.5"><Check class="h-3 w-3 mt-0.5 shrink-0 text-foreground" />Schema validation on register</li>
+				<li class="flex items-start gap-1.5"><Check class="h-3 w-3 mt-0.5 shrink-0 text-foreground" />Instrument wiring</li>
+				<li class="flex items-start gap-1.5"><Check class="h-3 w-3 mt-0.5 shrink-0 text-foreground" />Ownership &amp; lineage tracking</li>
+			</ul>
 		</div>
 		<!-- Card 3: Storage: Parquet -->
-		<div class="border-border rounded-xl border p-3 h-28 relative overflow-hidden group cursor-default">
-			<div class="transition-opacity duration-200 group-hover:opacity-0 flex flex-col items-center justify-center h-full gap-2">
-				<div class="relative inline-flex items-end justify-center">
-					<Folder class="h-10 w-10 text-zinc-300 dark:text-zinc-600" strokeWidth={1} />
-					<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 1000" class="absolute bottom-0.5 right-0.5 h-5 w-5">
-						<path fill="rgb(85,168,237)" d="M 375.007812 498.863281 L 252.613281 586.578125 L 311.058594 646.273438 L 434.609375 549.871094 L 375.007812 498.863281 M 697.5625 267.691406 L 397.355469 482.84375 L 457.074219 532.34375 L 755.898438 299.246094 L 697.5625 267.691406 M 533.703125 288.480469 L 182.832031 515.363281 L 234.335938 567.949219 L 587.402344 321.589844 L 533.703125 288.480469 M 625.835938 228.910156 L 549.972656 277.96875 L 603.609375 310.28125 L 679.007812 257.667969 L 625.835938 228.910156 M 580.953125 467.296875 L 331.851562 667.496094 L 398.777344 735.796875 L 648.023438 515.363281 L 580.953125 467.296875 M 776.296875 310.28125 L 599.765625 452.175781 L 666.679688 498.863281 L 840.589844 345.050781 L 776.296875 310.28125 M 361.859375 310.28125 L 120.9375 452.175781 L 166.691406 498.886719 L 410.378906 345.050781 L 361.859375 310.28125 M 863.109375 357.246094 L 422.683594 760.230469 L 500 839.164062 L 934.320312 395.761719 L 863.109375 357.246094 M 560.242188 193.421875 L 380.597656 299.246094 L 429.210938 333.164062 L 608.90625 219.742188 L 560.242188 193.421875 M 500 160.835938 L 544.703125 185.03125 L 106.554688 437.488281 L 65.679688 395.761719 Z M 500 160.835938" />
-					</svg>
-				</div>
-				<p class="text-foreground text-xs font-semibold">Storage: Parquet</p>
-			</div>
-			<div class="absolute inset-0 p-3 transition-opacity duration-200 opacity-0 group-hover:opacity-100 flex flex-col justify-center gap-1">
-				<p class="text-foreground text-xs font-semibold mb-1">Storage: Parquet</p>
-				<p class="text-muted-foreground text-[10px]">Columnar Parquet files owned and managed by submitters. Supports flat files and hive-partitioned trees.</p>
+		<div class="border-border rounded-xl border p-3">
+			<p class="text-foreground text-xs mb-3"><span class="font-semibold">Storage:</span> Parquet</p>
+			<div class="flex items-start gap-3">
+				<p class="text-muted-foreground text-[10px] min-w-0">Columnar Parquet files owned and managed by submitters. Supports flat files and hive-partitioned trees.</p>
+				<img src="/parquet_folder.svg" alt="Parquet folder" class="h-10 shrink-0" />
 			</div>
 		</div>
 	</div>
@@ -171,17 +173,14 @@ Peter,1464,1925,M
 	</div>
 
 	<!-- Row 3: Web Applications (full width) -->
-	<div class="border-border rounded-xl border p-3 h-36 relative overflow-hidden group cursor-default">
-		<div class="transition-opacity duration-200 group-hover:opacity-0 flex flex-col items-center justify-center h-full gap-2">
-			<div class="bg-orange-100 dark:bg-orange-950 text-orange-600 dark:text-orange-400 flex h-10 w-10 items-center justify-center rounded-xl">
-				<Monitor class="h-5 w-5" />
+	<div class="border-border rounded-xl border p-3">
+		<div class="flex items-center gap-2 mb-3">
+			<div class="bg-orange-100 dark:bg-orange-950 text-orange-600 dark:text-orange-400 flex h-7 w-7 items-center justify-center rounded-lg shrink-0">
+				<Monitor class="h-4 w-4" />
 			</div>
-			<p class="text-foreground text-xs font-semibold text-center">Web Applications</p>
+			<p class="text-foreground text-xs font-semibold">Web Applications</p>
 		</div>
-		<div class="absolute inset-0 p-3 transition-opacity duration-200 opacity-0 group-hover:opacity-100 flex flex-col justify-center gap-1">
-			<p class="text-foreground text-xs font-semibold mb-1">Web Applications</p>
-			<p class="text-muted-foreground text-[10px]">Feeds downstream applications like <a href="https://complexstories.uvm.edu">complex-stories</a> and <a href="https://wikimedia.uvm.edu">wikimedia.uvm.edu</a>, and surfaces queryable endpoints for any registered dataset.</p>
-		</div>
+		<p class="text-muted-foreground text-[10px]">Feeds downstream applications like <a href="https://complexstories.uvm.edu">complex-stories</a> and <a href="https://wikimedia.uvm.edu">wikimedia.uvm.edu</a>, and surfaces queryable endpoints for any registered dataset.</p>
 	</div>
 </div>
 
@@ -200,7 +199,7 @@ Peter,1464,1925,M
 			</marker>
 		</defs>
 
-		<rect x="10" y="10" width="185" height="280" rx="12" fill="var(--color-card)" stroke="var(--color-border)" stroke-width="1" />
+		<rect x="10" y="10" width="185" height="280" rx="12" class="fill-zinc-50 stroke-zinc-200 dark:fill-zinc-900 dark:stroke-zinc-800" stroke-width="1" />
 		<rect x="255" y="10" width="185" height="130" rx="12" fill="var(--color-card)" stroke="var(--color-border)" stroke-width="1" />
 		<rect x="255" y="160" width="185" height="130" rx="12" fill="var(--color-card)" stroke="var(--color-border)" stroke-width="1" />
 		<rect x="500" y="10" width="190" height="280" rx="12" fill="var(--color-card)" stroke="var(--color-border)" stroke-width="1" />
@@ -214,75 +213,70 @@ Peter,1464,1925,M
 
 		<!-- Card 1: Submitter's Pipeline -->
 		<foreignObject x="10" y="10" width="185" height="280">
-			<div xmlns="http://www.w3.org/1999/xhtml" class="p-3 h-full relative overflow-hidden group cursor-default">
-				<div class="transition-opacity duration-200 group-hover:opacity-0 flex flex-col items-center justify-center h-full gap-2">
-					<div class="bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400 flex h-10 w-10 items-center justify-center rounded-xl">
-						<Upload class="h-5 w-5" />
+			<div xmlns="http://www.w3.org/1999/xhtml" class="p-3 h-full">
+				<div class="flex items-center gap-2 mb-3">
+					<div class="bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400 flex h-7 w-7 items-center justify-center rounded-lg shrink-0">
+						<Upload class="h-4 w-4" />
 					</div>
-					<p class="text-foreground text-[10px] font-semibold text-center">Submitter's Pipeline</p>
+					<p class="text-foreground text-[10px] font-semibold">Submitter's Pipeline</p>
 				</div>
-				<div class="absolute inset-0 p-4 transition-opacity duration-200 opacity-0 group-hover:opacity-100 flex flex-col justify-center">
-					<p class="text-foreground text-[10px] font-semibold mb-2">Submitter's Pipeline</p>
-					<pre class="text-[10px] font-mono text-muted-foreground leading-relaxed m-0 bg-transparent border-0 p-0">my-pipeline/
-├── extract/
-│   └── fetch.py
-├── transform/
-│   └── process.py
-└── load/
-    └── <span class="font-bold text-foreground">submit.py</span>
-       ← adapter script</pre>
+				<div class="text-[10px]">
+					<TreeView.Root>
+						<TreeView.Folder name="my-pipeline">
+							<TreeView.Folder name="extract">
+								<TreeView.File name="fetch.py" />
+							</TreeView.Folder>
+							<TreeView.Folder name="transform">
+								<TreeView.File name="process.py" />
+							</TreeView.Folder>
+							<TreeView.Folder name="load">
+								<TreeView.File name="submit.py" class="font-bold text-foreground" />
+							</TreeView.Folder>
+						</TreeView.Folder>
+					</TreeView.Root>
 				</div>
 			</div>
 		</foreignObject>
 
-		<!-- Card 2: Storywrangler Platform -->
+		<!-- Card 2: Storywrangler Catalog -->
 		<foreignObject x="255" y="10" width="185" height="130">
-			<div xmlns="http://www.w3.org/1999/xhtml" class="p-3 h-full relative overflow-hidden group cursor-default">
-				<div class="transition-opacity duration-200 group-hover:opacity-0 flex flex-col items-center justify-center h-full gap-2">
-					<div class="bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400 flex h-10 w-10 items-center justify-center rounded-xl">
-						<Server class="h-5 w-5" />
+			<div xmlns="http://www.w3.org/1999/xhtml" class="p-3 h-full">
+				<div class="flex items-center gap-2 mb-3">
+					<div class="bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400 flex h-7 w-7 items-center justify-center rounded-lg shrink-0">
+						<Server class="h-4 w-4" />
 					</div>
-					<p class="text-foreground text-[10px] font-semibold text-center">Storywrangler Platform</p>
+					<p class="text-foreground text-[10px] font-semibold">Storywrangler Catalog</p>
 				</div>
-				<div class="absolute inset-0 p-3 transition-opacity duration-200 opacity-0 group-hover:opacity-100 flex flex-col justify-center gap-1">
-					<p class="text-foreground text-[10px] font-semibold mb-1">Storywrangler Platform</p>
-					<p class="text-muted-foreground text-[9px]">Validates schemas and exposes instrument-ready API endpoints, querying Parquet directly at request time.</p>
-				</div>
+				<ul class="text-muted-foreground text-[9px] space-y-1">
+					<li class="flex items-start gap-1.5"><Check class="h-3 w-3 mt-0.5 shrink-0 text-foreground" />Instrument wiring</li>
+					<li class="flex items-start gap-1.5"><Check class="h-3 w-3 mt-0.5 shrink-0 text-foreground" />Versioning</li>
+					<li class="flex items-start gap-1.5"><Check class="h-3 w-3 mt-0.5 shrink-0 text-foreground" />Ownership &amp; lineage tracking</li>
+					<li class="flex items-start gap-1.5"><Check class="h-3 w-3 mt-0.5 shrink-0 text-foreground" />Schema validation on register</li>
+				</ul>
 			</div>
 		</foreignObject>
 
 		<!-- Card 3: Storage: Parquet -->
 		<foreignObject x="255" y="160" width="185" height="130">
-			<div xmlns="http://www.w3.org/1999/xhtml" class="p-3 h-full relative overflow-hidden group cursor-default">
-				<div class="transition-opacity duration-200 group-hover:opacity-0 flex flex-col items-center justify-center h-full gap-2">
-					<div class="relative inline-flex items-end justify-center">
-						<Folder class="h-16 w-16 text-zinc-300 dark:text-zinc-600" strokeWidth={1}/>
-						<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 1000" class="absolute bottom-3.5 right-4.5 h-7 w-7">
-							<path fill="rgb(85,168,237)" d="M 375.007812 498.863281 L 252.613281 586.578125 L 311.058594 646.273438 L 434.609375 549.871094 L 375.007812 498.863281 M 697.5625 267.691406 L 397.355469 482.84375 L 457.074219 532.34375 L 755.898438 299.246094 L 697.5625 267.691406 M 533.703125 288.480469 L 182.832031 515.363281 L 234.335938 567.949219 L 587.402344 321.589844 L 533.703125 288.480469 M 625.835938 228.910156 L 549.972656 277.96875 L 603.609375 310.28125 L 679.007812 257.667969 L 625.835938 228.910156 M 580.953125 467.296875 L 331.851562 667.496094 L 398.777344 735.796875 L 648.023438 515.363281 L 580.953125 467.296875 M 776.296875 310.28125 L 599.765625 452.175781 L 666.679688 498.863281 L 840.589844 345.050781 L 776.296875 310.28125 M 361.859375 310.28125 L 120.9375 452.175781 L 166.691406 498.886719 L 410.378906 345.050781 L 361.859375 310.28125 M 863.109375 357.246094 L 422.683594 760.230469 L 500 839.164062 L 934.320312 395.761719 L 863.109375 357.246094 M 560.242188 193.421875 L 380.597656 299.246094 L 429.210938 333.164062 L 608.90625 219.742188 L 560.242188 193.421875 M 500 160.835938 L 544.703125 185.03125 L 106.554688 437.488281 L 65.679688 395.761719 Z M 500 160.835938" />
-						</svg>
-					</div>
-					<p class="text-foreground text-[10px] font-semibold">Storage: Parquet</p>
-				</div>
-				<div class="absolute inset-0 p-3 transition-opacity duration-200 opacity-0 group-hover:opacity-100 flex flex-col justify-center gap-1">
-					<p class="text-foreground text-[10px] font-semibold mb-1">Storage: Parquet</p>
-					<p class="text-muted-foreground text-[9px]">Columnar Parquet files owned and managed by submitters. Supports flat files and hive-partitioned trees.</p>
+			<div xmlns="http://www.w3.org/1999/xhtml" class="p-3 h-full">
+				<p class="text-foreground text-[10px] mb-3"><span class="font-semibold">Storage:</span> Parquet</p>
+				<div class="flex items-start gap-3">
+					<p class="text-muted-foreground text-[9px] min-w-0">Parquet files can be stored on local disk or in object storage.</p>
+					<img src="/parquet_folder.svg" alt="Parquet folder" class="h-10 shrink-0" />
 				</div>
 			</div>
 		</foreignObject>
 
 		<!-- Card 4: Web Applications -->
 		<foreignObject x="500" y="10" width="190" height="280">
-			<div xmlns="http://www.w3.org/1999/xhtml" class="p-3 h-full relative overflow-hidden group cursor-default">
-				<div class="transition-opacity duration-200 group-hover:opacity-0 flex flex-col items-center justify-center h-full gap-2">
-					<div class="bg-orange-100 dark:bg-orange-950 text-orange-600 dark:text-orange-400 flex h-10 w-10 items-center justify-center rounded-xl">
-						<Monitor class="h-5 w-5" />
+			<div xmlns="http://www.w3.org/1999/xhtml" class="p-3 h-full">
+				<div class="flex items-center gap-2 mb-3">
+					<div class="bg-orange-100 dark:bg-orange-950 text-orange-600 dark:text-orange-400 flex h-7 w-7 items-center justify-center rounded-lg shrink-0">
+						<Monitor class="h-4 w-4" />
 					</div>
-					<p class="text-foreground text-[10px] font-semibold text-center">Web Applications</p>
+					<p class="text-foreground text-[10px] font-semibold">Web Applications</p>
 				</div>
-				<div class="absolute inset-0 p-3 transition-opacity duration-200 opacity-0 group-hover:opacity-100 flex flex-col justify-center gap-1">
-					<p class="text-foreground text-[10px] font-semibold mb-1">Web Applications</p>
-					<p class="text-muted-foreground text-[9px]">Feeds downstream applications like complex-stories and wikimedia.uvm.edu, and surfaces queryable endpoints for any registered dataset.</p>
-				</div>
+				<p class="text-muted-foreground text-[9px]">Feeds downstream applications like complex-stories and wikimedia.uvm.edu, and surfaces queryable endpoints for any registered dataset.</p>
 			</div>
 		</foreignObject>
 	</svg>
@@ -392,7 +386,7 @@ Peter,1464,1925,M
 	<Code.CopyButton />
 </Code.Root>
 
-<p>Under the hood, we are versioning the interaction of the allotaxonometer tool and the submitted babynames pipeline for reproducibility.</p>
+<p>Under the hood, we are <a href="/versioning">versioning</a> the interaction of the allotaxonometer tool and the submitted babynames pipeline for reproducibility.</p>
 
 <div class="not-prose mb-12 flex gap-3 rounded-lg border border-amber-200 bg-amber-50 p-4 dark:border-amber-800 dark:bg-amber-950/40">
 	<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="mt-0.5 h-5 w-5 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden="true">

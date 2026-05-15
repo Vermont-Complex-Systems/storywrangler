@@ -1,4 +1,4 @@
-# Storywrangler Entity Standards v1.0
+# Storywrangler Entity Standards v0.0.1
 
 ## Table of Contents
 
@@ -47,7 +47,7 @@ The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "S
 A distinguishable person, place, organization, concept, event, or work referenced in a corpus.
 
 ### Entity Identifier
-A persistent, unique identifier from a recognized identifier system (Wikidata, ORCID, ROR, DOI, ISBN).
+A persistent, unique identifier from a recognized identifier system (Wikidata, ORCID, OpenAlex, ROR, DOI, ISBN).
 
 ### Field Taxonomy
 A classification system for organizing knowledge domains, academic disciplines, or subject areas.
@@ -110,11 +110,53 @@ A corpus-specific identifier used when no standard identifier exists.
 
 **When to use:**
 - REQUIRED for academic authors when available
-- Preferred over Wikidata for researchers with publications
+- Preferred over OpenAlex and Wikidata for researchers with publications
 
 ---
 
-#### 3.1.3 ROR (Research Organization Registry)
+#### 3.1.3 OpenAlex
+
+**Namespace:** `openalex`
+
+**Format:** `openalex:[AWICSFP][0-9]+`
+
+**Usage:** Any entity type from the OpenAlex knowledge graph. The letter prefix encodes the entity type:
+
+| Prefix | Entity type | Example |
+|--------|-------------|---------|
+| `A` | Author | `openalex:A5002034958` |
+| `W` | Work (paper, preprint, book, dataset) | `openalex:W2741809807` |
+| `I` | Institution | `openalex:I114027177` |
+| `C` | Concept / field of study | `openalex:C41008148` |
+| `S` | Source (journal, repository, conference) | `openalex:S1983995261` |
+| `F` | Funder | `openalex:F4320332161` |
+| `P` | Publisher | `openalex:P4310319965` |
+
+**Resolution Base URL:** `https://openalex.org/`
+
+**External Specifications:**
+- OpenAlex API: https://docs.openalex.org/
+- Author disambiguation: https://docs.openalex.org/api-entities/authors/author-disambiguation
+
+**Validation:**
+- MUST match regular expression: `^openalex:[AWICSFP][0-9]+$`
+- SHOULD verify entity exists via OpenAlex API
+
+**When to use:**
+- Any dataset derived from OpenAlex
+- Authors (`A`): when ORCID is unavailable; OpenAlex covers ~250M authors including those who have not self-registered
+- Works (`W`): when DOI is unavailable (preprints, grey literature, books)
+- Institutions (`I`): when ROR is unavailable
+- Concepts (`C`): preferred over `mag:` namespace for field classifications (see §3.2.3)
+
+**Notes:**
+- OpenAlex IDs are algorithmically assigned; author records may occasionally merge or split as disambiguation improves
+- OpenAlex is the actively maintained successor to Microsoft Academic Graph
+- Unlike ORCID, OpenAlex IDs are not self-certified — ORCID remains the preferred identifier for authors when available
+
+---
+
+#### 3.1.4 ROR (Research Organization Registry)
 
 **Namespace:** `ror`
 
@@ -140,7 +182,7 @@ A corpus-specific identifier used when no standard identifier exists.
 ---
 
 
-#### 3.1.4 IPEDS (Integrated Postsecondary Education Data System)
+#### 3.1.5 IPEDS (Integrated Postsecondary Education Data System)
 
 **Namespace:** `ipeds`
 
@@ -182,7 +224,7 @@ A corpus-specific identifier used when no standard identifier exists.
 
 ---
 
-#### 3.1.5 DOI (Digital Object Identifier)
+#### 3.1.6 DOI (Digital Object Identifier)
 
 **Namespace:** `doi`
 
@@ -208,7 +250,7 @@ A corpus-specific identifier used when no standard identifier exists.
 
 ---
 
-#### 3.1.6 ISBN (International Standard Book Number)
+#### 3.1.7 ISBN (International Standard Book Number)
 
 **Namespace:** `isbn`
 
@@ -323,7 +365,7 @@ Field and subject classifications enable thematic organization and discovery acr
 - When leveraging MAG's hierarchical field structure
 - Papers with existing MAG classifications
 
-**Note:** Microsoft Academic Graph was retired in 2021. Use OpenAlex Concepts API for current field mappings and validation.
+**Note:** Microsoft Academic Graph was retired in 2021. For new datasets use `openalex:C...` (§3.1.3) instead of `mag:`. The `mag:` namespace is retained for backwards compatibility with existing data.
 
 ---
 
@@ -427,13 +469,21 @@ Adapters SHOULD:
 When multiple identifier systems could apply:
 
 **For people:**
-1. ORCID (if academic/researcher with publications)
-2. Wikidata Q-code (otherwise)
+1. ORCID (if academic/researcher — self-certified ground truth)
+2. `openalex:A...` (if researcher with publications and no ORCID)
+3. Wikidata Q-code (for scholars, public figures, or historical persons not in OpenAlex)
+
+**For works:**
+1. DOI (if available)
+2. `openalex:W...` (for works without DOIs: preprints, grey literature, book chapters)
+3. ISBN (if book)
+4. Wikidata Q-code (otherwise)
 
 **For organizations:**
 1. ROR (if research institution, preferred for international interoperability)
 2. IPEDS (if US higher education institution)
-3. Wikidata Q-code (otherwise)
+3. `openalex:I...` (if institution is in OpenAlex but lacks ROR)
+4. Wikidata Q-code (otherwise)
 
 **Note:** US higher education institutions SHOULD include both ROR and IPEDS when available.
 
@@ -508,54 +558,36 @@ When using local identifiers, adapters SHOULD document:
 
 ### 3.6 API Endpoint Schemas
 
-Datasets declare their output shape via `endpoint_schema` at registration time. The platform
-normalises raw column names to canonical names at query time — callers always receive `types`
-and `counts` regardless of what the underlying parquet files use.
+This section defines required schemas for standardized API endpoints across Storywrangler datasets.
 
-#### 3.6.1 Output shape declaration (`endpoint_schema`)
+#### 3.6.1 Top N-Grams Endpoint
 
+All datasets implementing a "top-ngrams" endpoint MUST conform to the following schema:
+
+**Required Columns:**
+- `types` (VARCHAR): The n-gram text content
+- `counts` (INTEGER): Frequency count for the n-gram
+
+**Example Query Response:**
 ```json
-{
-  "type": "types-counts",
-  "type_column":  "ngram",     // raw column name in parquet; defaults to "types"
-  "count_column": "pv_count"   // raw column name in parquet; defaults to "counts"
-}
+[
+  {"types": "John", "counts": 1234},
+  {"types": "Mary", "counts": 987},
+  {"types": "Michael", "counts": 856}
+]
 ```
 
-`type_column` and `count_column` are optional. If omitted the platform assumes the parquet
-files already use `types` / `counts`.
+**Column Requirements:**
+- Column names MUST be exactly `types` and `counts`
+- `types` MUST be a text/varchar data type
+- `counts` MUST be an integer data type
+- Response MUST return data as a JSON array
+- Results SHOULD be ordered by count in descending order
 
-#### 3.6.2 Response envelope
-
-All `types-counts` endpoints return a consistent envelope:
-
-```json
-{
-  "data": [
-    {"types": "John",    "counts": 1234},
-    {"types": "Mary",    "counts": 987},
-    {"types": "Michael", "counts": 856}
-  ],
-  "metadata": {
-    "location": "wikidata:Q30",
-    "sex": "M"
-  }
-}
-```
-
-`data` is always ordered by count descending. `metadata` echoes back the resolved entity and
-any filter values applied — its exact keys vary by dataset.
-
-When called with a second time range (`?dates2=`) or second entity (`?entity2=`) the response
-uses date-range strings as top-level keys instead of `data`:
-
-```json
-{
-  "1990-1993": [{"types": "James", "counts": 85234}, ...],
-  "1980-1983": [{"types": "Michael", "counts": 91000}, ...],
-  "metadata":  {"location": "wikidata:Q30", "sex": "M"}
-}
-```
+**Implementation Notes:**
+- Optional filter parameters (year, location, sex, limit) are implementation-specific
+- Aggregation and filtering logic is handled by individual adapters
+- Response format MUST be lightweight (array only, no wrapper objects)
 
 ---
 
@@ -656,6 +688,20 @@ To convert ISBN-10 to ISBN-13:
 ---
 
 ## Appendix B: Revision History
+
+### Version 0.0.2 (2026-03-24)
+
+**Added entity identifier systems:**
+- OpenAlex (`openalex:[AWICSFP][0-9]+`) — covers all OpenAlex entity types: authors (A), works (W), institutions (I), concepts (C), sources (S), funders (F), publishers (P)
+
+**Updated priority rules (§3.3.2):**
+- People: ORCID > `openalex:A...` > Wikidata
+- Works: DOI > `openalex:W...` > ISBN > Wikidata
+- Organizations: ROR > IPEDS > `openalex:I...` > Wikidata
+
+**Updated §3.2.3:** `mag:` namespace retained for backwards compatibility; new datasets should use `openalex:C...`
+
+---
 
 ### Version 0.0.1 (2025-11-09)
 
