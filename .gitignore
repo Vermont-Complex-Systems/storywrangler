@@ -21,3 +21,7 @@ packages/frontend/.svelte-kit/
 .vscode/
 .idea/
 *.swp
+README_files/
+README.html
+*.sql
+backend/storywrangler.db

@@ -1,0 +1,16 @@
+# Entity mappings: local_id → canonical Storywrangler entity
+#
+# local_id:   the value that appears in your data's entity column (e.g. geo, country)
+# entity_id:  canonical identifier, e.g. "wikidata:Q30" for the United States
+# entity_name: human-readable label
+# entity_ids: optional list of alternate identifiers
+#
+# Example:
+#
+# united_states:
+#   entity_id: "wikidata:Q30"
+#   entity_name: "United States"
+#   entity_ids:
+#     - "iso:US"
+#
+# Add one entry per distinct value of your entity column.

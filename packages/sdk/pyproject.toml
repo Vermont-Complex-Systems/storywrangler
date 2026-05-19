@@ -5,8 +5,15 @@ description = "Entity and taxonomy validation for Storywrangler"
 requires-python = ">=3.11"
 dependencies = [
     "pydantic>=2.0.0",
-    "requests>=2.31.0"
+    "requests>=2.31.0",
+    "storywrangler-schemas",
 ]
+
+[tool.uv.sources]
+storywrangler-schemas = { workspace = true }
+
+[project.scripts]
+storywrangler = "storywrangler.cli:main"
 
 [build-system]
 requires = ["hatchling"]

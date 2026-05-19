@@ -4,7 +4,7 @@
 Tests for entity validation
 
 Based on examples from Storywrangler Specification v0.0.1
-https://github.com/vermont-complex-systems/Storywrangler-Specification/blob/main/versions/0.0.1.md
+https://github.com/vermont-complex-systems/Storywrangler-Specification/blob/main/versions/0.0.3.md
 """
 
 from storywrangler.validation import EntityValidator
