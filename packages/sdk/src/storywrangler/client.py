@@ -113,6 +113,10 @@ class Storywrangler:
             "Content-Type": "application/json",
             "Authorization": f"Bearer {api_key}",
         })
+        if base_url.startswith("https"):
+            self._session.verify = False
+            import urllib3
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
         self.registry = RegistryClient(self._session, base_url)
         self.users = UsersClient(self._session, base_url)
 
@@ -125,9 +129,11 @@ class Storywrangler:
             print(client.users.whoami())
         """
         base_url = (base_url or os.getenv("STORYWRANGLER_URL", "http://localhost:8000")).rstrip("/")
+        verify = not base_url.startswith("https")
         resp = requests.post(
             f"{base_url}/auth/login",
             json={"username": username, "password": password},
+            verify=verify,
         )
         resp.raise_for_status()
         api_key = resp.json()["api_key"]
