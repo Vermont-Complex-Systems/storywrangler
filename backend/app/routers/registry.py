@@ -115,42 +115,10 @@ async def register_dataset(
             detail=f"Unknown domain '{dataset.domain}'. Valid: {sorted(VALID_DOMAINS)}",
         )
 
-    # ── data_location / partition_dimensions consistency ────────────────────────
-    # For parquet_hive, data_location must be the root of the hive tree — the
-    # directory directly above the first col=val/ level.  If the path already
-    # embeds a partition dimension (e.g. "/data/ngram_size=1") and the same key
-    # appears in partition_dimensions, queries will double the path segment.
-    if dataset.data_format == "parquet_hive" and dataset.transform:
-        partition_keys = set()
-        pd = dataset.transform.partition_dimensions
-        if isinstance(pd, dict):
-            partition_keys = set(pd.keys())
-        elif isinstance(pd, list):
-            partition_keys = set(pd)
-        if partition_keys:
-            from pathlib import PurePosixPath
-            path_parts = PurePosixPath(dataset.data_location or "").parts
-            embedded = [
-                part for part in path_parts
-                if "=" in part and part.split("=", 1)[0] in partition_keys
-            ]
-            if embedded:
-                raise HTTPException(
-                    status_code=422,
-                    detail=(
-                        f"data_location contains hive partition segment(s) {embedded} that also "
-                        f"appear in partition_dimensions {sorted(partition_keys)}. "
-                        "data_location must be the root of the hive tree (the directory above "
-                        "the first col=val/ level) so that query code can append partition paths "
-                        "without duplication."
-                    ),
-                )
-
     # ── Pre-registration validation ─────────────────────────────────────────────
 
     # 1. Discover hive levels first (cheap filesystem walk) — needed by introspect()
-    #    to know which columns to scan for filter_values, even when partition_dimensions
-    #    is omitted from the submission.
+    #    to know which columns to scan for filter_values.
     derived: Dict[str, Any] = {}
     if dataset.data_format == "parquet_hive":
         levels = _discover_levels(dataset.data_location)
@@ -236,7 +204,7 @@ async def register_dataset(
         #   entity_mapping        → ?entity=X  vs ?entity2=Y
         #   time_dimension        → ?dates=D1  vs ?dates2=D2
         #   filter_dimensions     → ?sex=M     vs ?sex2=F
-        #   partition_dimensions  → ?gran=daily vs ?gran2=weekly
+        #   hive_levels           → ?gran=daily vs ?gran2=weekly (auto-discovered)
         has_entity      = bool(dataset.entity_mapping)
         has_time        = bool(dataset.transform and dataset.transform.time_dimension)
         has_filter      = bool(dataset.transform and dataset.transform.filter_dimensions)
@@ -248,7 +216,7 @@ async def register_dataset(
                     "types-counts datasets require at least one comparison axis so the "
                     "allotaxonometer can distinguish system 1 from system 2. Declare one of: "
                     "entity_mapping, transform.time_dimension, transform.filter_dimensions, "
-                    "or transform.partition_dimensions. "
+                    "or use parquet_hive format (hive levels are auto-discovered). "
                     "See https://github.com/vermont-complex-systems/Storywrangler-Specification for the spec."
                 ),
             )
@@ -295,8 +263,8 @@ async def register_dataset(
                 status_code=422,
                 detail=(
                     "time-series datasets require at least one groupable dimension: "
-                    "declare filter_dimensions or partition_dimensions in transform, "
-                    "or use parquet_hive format (hive levels are auto-discovered). "
+                    "declare transform.filter_dimensions or use parquet_hive format "
+                    "(hive levels are auto-discovered). "
                     "See https://github.com/vermont-complex-systems/Storywrangler-Specification for the spec."
                 ),
             )

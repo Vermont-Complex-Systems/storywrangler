@@ -5,13 +5,13 @@ Both backend/app and packages/sdk import from here. Neither owns a copy.
 
 Field responsibilities (see DatasetCreate for full detail):
   endpoint_schema : output shape only — {"type": "types-counts", "type_column": "ngram"}
-  transform       : query slice axes — {"time_dimension": "date", "filter_dimensions": ["granularity", "ngram_size"]}
+  transform       : query slice axes — {"time_dimension": "date", "filter_dimensions": ["sex"]}
   entity_mapping  : entity identity — {"local_id_column": "location", "entity_namespace": "wikidata"}
   manifest        : coverage index (never query-time) — {"availability": {...}, "partition_index": [...]}
 """
 
 from importlib.metadata import PackageNotFoundError, version as pkg_version
-from typing import Any, Dict, List, Literal, Optional, Union
+from typing import Dict, List, Literal, Optional, Union
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from .standards import Standards
 
@@ -260,15 +260,11 @@ class TransformConfig(BaseModel):
 
     - `entity_mapping.local_id_column` → entity level
     - `time_dimension` → time level
-    - `hash_bucket.column` → hash bucket level
+    - `hash_bucket` → hash bucket level
     - everything else → partition level (queryable, gets an auto-default)
 
     The discovered order and auto-defaults are stored in `level_order` — you
-    do not need to declare partition columns that match on-disk structure.
-
-    Use `partition_dimensions` only when you need to **override** the
-    auto-discovered default for a column (e.g. force `granularity` to default
-    to `"daily"` instead of the alphabetically-first value).
+    do not need to declare partition columns.
 
     `filter_dimensions` is for non-hive columns inside parquet files (e.g. `sex`
     in babynames) where omitting the filter aggregates over all values.
@@ -290,20 +286,6 @@ class TransformConfig(BaseModel):
             "all names. Not needed for hive partition levels — those are auto-discovered."
         ),
     )
-    partition_dimensions: Optional[Dict[str, Any]] = Field(
-        None,
-        description=(
-            "Optional overrides for auto-discovered hive partition defaults. "
-            "Usually not needed — the system discovers hive levels and uses the "
-            "first on-disk value as the default.\n\n"
-            "Use this only when you want a different default than what was discovered:\n\n"
-            "- **scalar** (e.g. `{\"granularity\": \"daily\"}`) — override the default.\n"
-            "- **list** (e.g. `{\"alpha\": [0.17, 0.33]}`) — enumerated valid values; "
-            "first is the default.\n\n"
-            "Omitting this field entirely is fine — all hive levels will be "
-            "auto-discovered with their first on-disk value as the default."
-        ),
-    )
     hash_bucket: Optional[str] = Field(
         None,
         description=(
@@ -313,21 +295,9 @@ class TransformConfig(BaseModel):
             "auto-derived from the directory structure at registration time. "
             "The query layer uses murmur3_32 (seed 0) to route to the "
             "correct bucket at request time. "
-            "Not listed in `partition_dimensions` — hash buckets are "
-            "routing-only, not query axes."
+            "Hash buckets are routing-only, not query axes."
         ),
     )
-
-    @model_validator(mode="after")
-    def _bucket_col_not_in_partition_dims(self):
-        if self.hash_bucket and self.partition_dimensions:
-            if self.hash_bucket in self.partition_dimensions:
-                raise ValueError(
-                    f"hash_bucket '{self.hash_bucket}' must not appear in "
-                    f"partition_dimensions — bucket columns are routing-only, "
-                    f"not query axes"
-                )
-        return self
 
 
 class DatasetCreate(BaseModel):

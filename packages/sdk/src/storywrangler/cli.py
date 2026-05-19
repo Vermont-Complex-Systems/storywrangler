@@ -208,7 +208,6 @@ from pathlib import Path
 from pyprojroot import here
 from storywrangler import Storywrangler
 from dotenv import load_dotenv
-import duckdb
 
 load_dotenv(override=True)
 
@@ -218,18 +217,6 @@ def get_entities() -> list[dict]:
     with open(entities_path) as f:
         mappings = yaml.safe_load(f)
     return [{{"local_id": k, **v}} for k, v in mappings.items()]
-
-
-def get_availability(data_path: Path) -> dict:
-    \"\"\"Compute coverage metadata. TODO: adapt query to your schema.\"\"\"
-    conn = duckdb.connect()
-    try:
-        rows = conn.execute(f\"\"\"
-            SELECT geo, MIN(year), MAX(year) FROM read_parquet('{{data_path}}') GROUP BY geo
-        \"\"\").fetchall()
-        return {{"yearly": {{"available": {{r[0]: {{"min": r[1], "max": r[2]}} for r in rows}}}}}}
-    finally:
-        conn.close()
 
 
 def main():
@@ -246,9 +233,6 @@ def main():
         "data_location": str(data_path),
         "data_format": "parquet",
         "description": "TODO",
-        "manifest": {{
-            "availability": get_availability(data_path),
-        }},
         "entity_mapping": {{"local_id_column": "geo"}},  # TODO: adjust column name
         "entities": entities,
         "endpoint_schema": {{
@@ -256,7 +240,7 @@ def main():
         }},
         "transform": {{
             "time_dimension": "year",       # TODO: adjust time column name
-            # "filter_dimensions": ["sex"], # optional filter columns
+            # "filter_dimensions": ["sex"], # optional: non-hive columns to expose as query filters
         }},
         "ownership": {{"owner_group": "vcsi", "contact": "your@email.edu", "storage_risk": "institutional"}},
         "lineage": {{"sources": {{}}, "derived_from": []}},
@@ -272,7 +256,12 @@ if __name__ == "__main__":
 """,
 
 "parquet_hive": """\
-\"\"\"Adapter — Submit (parquet_hive)\"\"\"
+\"\"\"Adapter — Submit (parquet_hive)
+
+Hive partition levels are auto-discovered from the directory structure.
+You only need to declare time_dimension and (optionally) hash_bucket.
+Availability is auto-computed by the server at registration time.
+\"\"\"
 
 import os
 import yaml
@@ -281,7 +270,6 @@ from pathlib import Path
 from pyprojroot import here
 from storywrangler import Storywrangler
 from dotenv import load_dotenv
-import duckdb
 
 load_dotenv(override=True)
 
@@ -291,21 +279,6 @@ def get_entities() -> list[dict]:
     with open(entities_path) as f:
         mappings = yaml.safe_load(f)
     return [{{"local_id": k, **v}} for k, v in mappings.items()]
-
-
-def get_availability(data_path: Path) -> dict:
-    \"\"\"Compute coverage metadata from parquet files. TODO: adapt to your schema.\"\"\"
-    conn = duckdb.connect()
-    try:
-        pq = data_path / "**" / "*.parquet"
-        rows = conn.execute(f\"\"\"
-            SELECT geo, MIN(date)::TEXT, MAX(date)::TEXT
-            FROM read_parquet('{{pq}}', hive_partitioning=true)
-            GROUP BY geo
-        \"\"\").fetchall()
-        return {{"daily": {{"available": {{r[0]: {{"min": r[1], "max": r[2]}} for r in rows}}}}}}
-    finally:
-        conn.close()
 
 
 def main():
@@ -322,9 +295,6 @@ def main():
         "data_location": str(data_path),
         "data_format": "parquet_hive",
         "description": "TODO",
-        "manifest": {{
-            "availability": get_availability(data_path),
-        }},
         "entity_mapping": {{"local_id_column": "geo"}},  # TODO: adjust column name
         "entities": entities,
         "endpoint_schema": {{
@@ -332,7 +302,8 @@ def main():
         }},
         "transform": {{
             "time_dimension": "date",               # hive partition column for time
-            "filter_dimensions": ["granularity"],   # TODO: list all filterable partition columns
+            # "filter_dimensions": ["sex"],          # optional: non-hive columns inside parquet files
+            # "hash_bucket": "ngram_bucket",         # optional: content-sharded partition column
         }},
         "ownership": {{"owner_group": "vcsi", "contact": "your@email.edu", "storage_risk": "institutional"}},
         "lineage": {{"sources": {{}}, "derived_from": []}},

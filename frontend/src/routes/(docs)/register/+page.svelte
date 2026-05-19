@@ -76,32 +76,19 @@ client.registry.register({
   &year=1990&year2=2020\\
   &geo=united_states&sex=F"`;
 
-	// Diff: move year to time_dimension, add manifest.availability.
+	// Diff: move year to time_dimension — availability is auto-derived by the server.
 	const step2time = `  "transform": {
 -     "filter_dimensions": ["year", "sex", "geo"],
 +     "filter_dimensions": ["sex", "geo"],
 +     "time_dimension":    "year",
   },
++ # availability is auto-populated at registration:
++ # {"united_states": {"min": 1880, "max": 2022}, "quebec": {"min": 1980, "max": 2022}}`;
 
-+ "manifest": {
-+     "availability": {
-+         "united_states": {"yearly": {"min": 1880, "max": 2022}},
-+         "quebec":        {"yearly": {"min": 1980, "max": 2022}},
-+     }
-+ },`;
-
-	// Step 3b — diff: remove geo from filter_dimensions, add entity_mapping, upgrade manifest keys.
+	// Step 3b — diff: remove geo from filter_dimensions, add entity_mapping.
+	// Availability keys auto-upgrade to canonical entity IDs when entity_mapping is set.
 	const step2b = `- "filter_dimensions": ["sex", "geo"],
 + "filter_dimensions": ["sex"],
-
-  "manifest": {
-      "availability": {
--         "united_states": {"yearly": {"min": 1880, "max": 2022}},
--         "quebec":        {"yearly": {"min": 1980, "max": 2022}},
-+         "wikidata:Q30":  {"yearly": {"min": 1880, "max": 2022}},
-+         "wikidata:Q176": {"yearly": {"min": 1980, "max": 2022}},
-      }
-  },
 
 + "entity_mapping": {"local_id_column": "geo", "entity_namespace": "wikidata"},
 + "entities": [
@@ -116,28 +103,26 @@ client.registry.register({
   &dates=1990&dates2=2020\\
   &sex=F"`;
 
-	// Step 4 — wikimedia: parquet_hive + partition_dimensions + non-default column names.
+	// Step 4 — wikimedia: parquet_hive + auto-discovered partitions + non-default column names.
 	const step4 = `from storywrangler import Storywrangler
 
 client = Storywrangler()
 client.registry.register({
     "domain":     "wikimedia",
     "dataset_id": "ngrams",
-	  # data_location is the root of the hive tree
+    # data_location is the root of the hive tree
     "data_location": "/netfiles/compethicslab/wikimedia/1grams",
     "data_format":   "parquet_hive",
     "description":   "Wikipedia n-gram frequencies by country and date.",
     "endpoint_schema": {
         "type":         "types-counts",
-        "type_column":  "ngram",     # non-override when column name differs
+        "type_column":  "ngram",     # non-default column name
         "count_column": "pv_count",  # non-default
     },
     "transform": {
         "time_dimension": "date",      # hive partition key; callers use ?dates= (standardized)
-        # partition_dimensions: a dict, not a list.
-        # Keys are columns unsafe to mix (daily + monthly = nonsense aggregation).
-        # Values are the safe defaults injected when the caller omits the param.
-        "partition_dimensions": {"granularity": "daily", "ngram_size": 1},
+        # All other hive levels (ngram_size, granularity, country) are auto-discovered
+        # from the directory structure — no need to declare them.
     },
     "entity_mapping": {"local_id_column": "country", "entity_namespace": "wikidata"},
     "entities": [
@@ -151,12 +136,13 @@ client.registry.register({
 })`;
 
 	// DuckDB translation for Step 4 — what the API runs internally per system.
-	const step4duckdb = `FROM read_parquet('1grams/ngram_size=1/**/*.parquet', hive_partitioning=true)
+	const step4duckdb = `FROM read_parquet('1grams/*/*/*/*.parquet', hive_partitioning=true)
 WHERE country     = 'United States'    -- entity_mapping.local_id_column
   AND date BETWEEN ? AND ?             -- time_dimension
-  AND granularity = 'daily'            -- partition_dimensions (default injected)`;
+  AND granularity = 'daily'            -- auto-discovered partition (default injected)
+  AND ngram_size  = 1                  -- auto-discovered partition (default injected)`;
 
-	// Curl preview for Step 4 — partition_dimensions passed as regular query params.
+	// Curl preview for Step 4 — auto-discovered partitions passed as regular query params.
 	const step4curl = `curl "https://storywrangler.uvm.edu/storywrangler/allotax\\
   ?domain=wikimedia&dataset=ngrams\\
   &entity=wikidata:Q30&entity2=wikidata:Q145\\
@@ -231,7 +217,7 @@ WHERE country     = 'United States'    -- entity_mapping.local_id_column
 	or same time range across two locations (e.g. US 2020 vs Quebec 2020). When
 	<code>time_dimension</code> is set, the platform auto-populates
 	<code>manifest.availability</code> at registration time — computing min/max date coverage
-	per entity and partition dimension, so the UI knows valid ranges without querying the data.
+	per entity, so the UI knows valid ranges without querying the data.
 </p>
 
 <p>
@@ -251,8 +237,8 @@ WHERE country     = 'United States'    -- entity_mapping.local_id_column
 
 <p>Moving <code>year</code> to <code>time_dimension</code> unlocks range queries and standardizes
 the API parameter: regardless of the underlying column name (<code>year</code>, <code>date</code>…),
-callers always use <code>?dates=</code> and <code>?dates2=</code>. <code>manifest.availability</code>
-is auto-populated at registration — it tells the UI what date ranges are valid per entity
+callers always use <code>?dates=</code> and <code>?dates2=</code>. Availability is
+auto-derived at registration — it tells the UI what date ranges are valid per entity
 without touching the data:</p>
 
 <Code.Root code={step2time} lang="diff" hideLines={true}>
@@ -260,7 +246,7 @@ without touching the data:</p>
 
 <p>
 	Adding <code>entity_mapping</code> promotes <code>geo</code> out of
-	<code>filter_dimensions</code> and upgrades the manifest keys to canonical entity IDs:
+	<code>filter_dimensions</code>. Availability keys auto-upgrade to canonical entity IDs:
 </p>
 
 <Code.Root code={step2b} lang="diff" hideLines={true}>
@@ -274,7 +260,7 @@ without touching the data:</p>
 <h2>hive-partitioned storage</h2>
 
 <p>
-	The final form introduces <a href="https://duckdb.org/docs/current/data/partitioning/hive_partitioning">hive_partitioning</a> by specifying the `data_format`,  the relevant <code>partition_dimensions</code>. When using the hive partitioning strategy, <code>data_location</code> encodes the root of the hive tree:
+	The final form introduces <a href="https://duckdb.org/docs/current/data/partitioning/hive_partitioning">hive_partitioning</a> by setting <code>data_format</code> to <code>parquet_hive</code>. All hive partition levels are auto-discovered from the directory structure — you only need to declare <code>time_dimension</code>. <code>data_location</code> points to the root of the hive tree:
 </p>
 
 <pre><code>1grams/                          ← data_location
@@ -300,8 +286,8 @@ without touching the data:</p>
 </Code.Root>
 
 <p>
-	That result set is handed to the instrument as-is. Partition dimensions are passed as regular
-	query params — the platform validates them against the introspected <code>filter_values</code>
+	That result set is handed to the instrument as-is. Auto-discovered partition levels become
+	regular query params — the platform validates them against the introspected <code>filter_values</code>
 	and injects defaults for any omitted ones:
 </p>
 
@@ -313,6 +299,5 @@ without touching the data:</p>
 <p>
 	The <a href="/case-studies/wikimedia">Wikimedia pipeline</a> shows what a complete
 	<code>submit.py</code> looks like for <code>parquet_hive</code>: raw Wikipedia dump → silver
-	n-gram frequencies, partitioned by country, granularity, and date. Covers
-	<code>transform.partition_dimensions</code> and <code>manifest.availability</code>.
+	n-gram frequencies, partitioned by country, granularity, and date.
 </p>

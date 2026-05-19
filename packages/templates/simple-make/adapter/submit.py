@@ -5,17 +5,16 @@ Builds the dataset registration payload and submits it to the Storywrangler API.
 
 What to implement:
   - get_entities(): load from config/entities.yaml
-  - get_availability(): compute coverage metadata (date ranges, year ranges, etc.)
   - build the dataset_metadata dict
   - call register(dataset_metadata)
 
+Availability (date ranges) is auto-computed by the server at registration time.
 The API validates the registration payload structure.
 prepare.py validated the data itself.
 """
 
 import os
 import yaml
-from pathlib import Path
 
 from pyprojroot import here
 from storywrangler import Storywrangler
@@ -32,28 +31,12 @@ def get_entities() -> list[dict]:
     return [{"local_id": local_id, **mapping} for local_id, mapping in mappings.items()]
 
 
-def get_availability(conn) -> dict:
-    """Compute data coverage metadata (e.g. date ranges per entity).
-
-    Example for a yearly dataset keyed by geo:
-
-        rows = conn.execute(
-            "SELECT geo, MIN(year), MAX(year) FROM my_table GROUP BY geo"
-        ).fetchall()
-        return {"yearly": {"available": {geo: {"min": mn, "max": mx} for geo, mn, mx in rows}}}
-    """
-    raise NotImplementedError("Implement get_availability for your dataset")
-
-
 def main():
     dataset_id = os.getenv("DATASET_ID")
     domain = os.getenv("DOMAIN")
     data_location = os.getenv("DATA_PATH")
 
     entities = get_entities()
-
-    # conn = ...  connect to your storage
-    # availability = get_availability(conn)
 
     dataset_metadata = {
         "catalog": "vcsi",
@@ -62,9 +45,6 @@ def main():
         "data_location": data_location,
         "data_format": "parquet",           # parquet | parquet_hive
         "description": "...",
-        "manifest": {
-            # "availability": availability,
-        },
         "entity_mapping": {
             "local_id_column": "geo",       # column in your data holding the local entity ID
         },
@@ -74,7 +54,7 @@ def main():
         },
         "transform": {
             "time_dimension": "year",       # time column in your data (e.g. "year", "date")
-            # "filter_dimensions": ["sex"], # hive partition columns to expose as query filters
+            # "filter_dimensions": ["sex"], # optional: non-hive columns to expose as query filters
         },
         "ownership": {
             "owner_group": "vcsi",

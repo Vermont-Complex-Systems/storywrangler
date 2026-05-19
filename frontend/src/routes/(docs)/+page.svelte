@@ -1,7 +1,9 @@
 <script lang="ts">
 	import * as Code from '$lib/components/ui/code';
-	import * as TreeView from '$lib/components/ui/tree-view';
-	import { Upload, Server, Folder, Monitor, Check } from '@lucide/svelte';
+	import ArchitectureDiagram from '$lib/components/ArchitectureDiagram.svelte';
+	import KeyFeatures from '$lib/components/KeyFeatures.svelte';
+	import { Callout } from '$lib/components/ui/callout';
+	import HomeFaq from '$lib/components/HomeFaq.svelte';
 
 	const installCode = `uv add storywrangler-sdk`;
 
@@ -61,29 +63,15 @@ Peter,1464,1925,M
 	</p>
 </div>
 
-{#snippet iconCorpora()}
-	<path stroke-linecap="round" stroke-linejoin="round" d="M3.75 3v11.25A2.25 2.25 0 0 0 6 16.5h2.25M3.75 3h-1.5m1.5 0h16.5m0 0h1.5m-1.5 0v11.25A2.25 2.25 0 0 1 18 16.5h-2.25m-7.5 0h7.5m-7.5 0-1 3m8.5-3 1 3m0 0 .5 1.5m-.5-1.5h-9.5m0 0-.5 1.5m.75-9 3-3 2.148 2.148A12.061 12.061 0 0 1 16.5 7.605" />
-{/snippet}
+<h2 class="font-baskerville font-regular text-xl md:text-4xl leading-snug tracking-tight mb-2 md:mb-5">Text as ecological signal</h2>
 
-{#snippet iconLineage()}
-	<path stroke-linecap="round" stroke-linejoin="round" d="M7.217 10.907a2.25 2.25 0 1 0 0 2.186m0-2.186c.18.324.283.696.283 1.093s-.103.77-.283 1.093m0-2.186 9.566-5.314m-9.566 7.5 9.566 5.314m0 0a2.25 2.25 0 1 0 3.935 2.186 2.25 2.25 0 0 0-3.935-2.186Zm0-12.814a2.25 2.25 0 1 0 3.933-2.185 2.25 2.25 0 0 0-3.933 2.185Z" />
-{/snippet}
+<p>
+	Storywrangler is hosting a set of tools to facilitate the study of large-scale text corpora. Text produced on social media (Bluesky, Reddit, Twitter), news outlets, Wikipedia, and higher education are treated as ecological time series — living records of how collective attention shifts across populations and over time.
+</p>
 
-{#snippet iconInstruments()}
-	<path stroke-linecap="round" stroke-linejoin="round" d="M11.42 15.17 17.25 21A2.652 2.652 0 0 0 21 17.25l-5.877-5.877M11.42 15.17l2.496-3.03c.317-.384.74-.626 1.208-.766M11.42 15.17l-4.655 5.653a2.548 2.548 0 1 1-3.586-3.586l5.654-4.654m5.65-4.65 3.029-2.497a.532.532 0 0 1 .765.766L12.873 9.63M11.42 15.17l1.453-1.453" />
-{/snippet}
-
-{#snippet iconInterop()}
-	<path stroke-linecap="round" stroke-linejoin="round" d="M13.19 8.688a4.5 4.5 0 0 1 1.242 7.244l-4.5 4.5a4.5 4.5 0 0 1-6.364-6.364l1.757-1.757m13.35-.622 1.757-1.757a4.5 4.5 0 0 0-6.364-6.364l-4.5 4.5a4.5 4.5 0 0 0 1.242 7.244" />
-{/snippet}
-
-{#snippet iconGovernance()}
-	<path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75 11.25 15 15 9.75m-3-7.036A11.959 11.959 0 0 1 3.598 6 11.99 11.99 0 0 0 3 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285Z" />
-{/snippet}
-
-{#snippet iconDiscover()}
-	<path stroke-linecap="round" stroke-linejoin="round" d="m21 21-5.197-5.197m0 0A7.5 7.5 0 1 0 5.196 5.196a7.5 7.5 0 0 0 10.607 10.607Z" />
-{/snippet}
+<div class="not-prose mt-6 mb-2">
+	<img src="/storywrangler.png" alt="Text sources flow into the Storywrangler platform and produce analytical instruments like time series and allotaxonometer visualizations" class="w-full rounded-lg" />
+</div>
 
 <h2 class="font-baskerville font-regular text-xl md:text-4xl leading-snug tracking-tight mb-2 md:mb-5">Storywrangler's architecture</h2>
 
@@ -91,272 +79,21 @@ Peter,1464,1925,M
 	Submitters write datasets as parquet files to shared storage and register their metadata via a simple POST request. The API validates schema compatibility and availability, wires datasets to instruments automatically where applicable, and records ownership, lineage, and discoverability. 
 </p>
 
-<div class="not-prose mt-6 flex flex-col md:hidden">
+<ArchitectureDiagram />
 
-	<!-- Row 1: Submitter's Pipeline (full width) -->
-	<div class="rounded-xl border border-zinc-200 bg-zinc-50 p-3 dark:border-zinc-800 dark:bg-zinc-900">
-		<div class="flex items-center gap-2 mb-3">
-			<div class="bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400 flex h-7 w-7 items-center justify-center rounded-lg shrink-0">
-				<Upload class="h-4 w-4" />
-			</div>
-			<p class="text-foreground text-xs font-semibold">Submitter's Pipeline</p>
-		</div>
-		<div class="text-xs">
-			<TreeView.Root>
-				<TreeView.Folder name="my-pipeline">
-					<TreeView.Folder name="extract">
-						<TreeView.File name="fetch.py" />
-					</TreeView.Folder>
-					<TreeView.Folder name="transform">
-						<TreeView.File name="process.py" />
-					</TreeView.Folder>
-					<TreeView.Folder name="load">
-						<TreeView.File name="submit.py" class="font-bold text-foreground" />
-					</TreeView.Folder>
-				</TreeView.Folder>
-			</TreeView.Root>
-		</div>
-	</div>
-
-	<!-- Connectors: register → Card 2, write → Card 3 -->
-	<div class="relative h-10 text-muted-foreground">
-		<div class="absolute left-1/4 -translate-x-1/2 flex flex-col items-center gap-0.5">
-			<span class="text-[9px] font-mono">register</span>
-			<svg width="12" height="14" viewBox="0 0 12 14" fill="none">
-				<line x1="6" y1="0" x2="6" y2="10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-				<path d="M 3 7.5 L 6 11.5 L 9 7.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-			</svg>
-		</div>
-		<div class="absolute left-3/4 -translate-x-1/2 flex flex-col items-center gap-0.5">
-			<span class="text-[9px] font-mono">write</span>
-			<svg width="12" height="14" viewBox="0 0 12 14" fill="none">
-				<line x1="6" y1="0" x2="6" y2="10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-				<path d="M 3 7.5 L 6 11.5 L 9 7.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-			</svg>
-		</div>
-	</div>
-
-	<!-- Row 2: Platform (left) + Storage (right) -->
-	<div class="grid grid-cols-2 gap-3">
-		<!-- Card 2: Storywrangler Catalog -->
-		<div class="border-border rounded-xl border p-3">
-			<div class="flex items-center gap-2 mb-3">
-				<div class="bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400 flex h-7 w-7 items-center justify-center rounded-lg shrink-0">
-					<Server class="h-4 w-4" />
-				</div>
-				<p class="text-foreground text-xs font-semibold">Storywrangler Catalog</p>
-			</div>
-			<ul class="text-muted-foreground text-[10px] space-y-1">
-				<li class="flex items-start gap-1.5"><Check class="h-3 w-3 mt-0.5 shrink-0 text-foreground" />Schema validation on register</li>
-				<li class="flex items-start gap-1.5"><Check class="h-3 w-3 mt-0.5 shrink-0 text-foreground" />Instrument wiring</li>
-				<li class="flex items-start gap-1.5"><Check class="h-3 w-3 mt-0.5 shrink-0 text-foreground" />Ownership &amp; lineage tracking</li>
-			</ul>
-		</div>
-		<!-- Card 3: Storage: Parquet -->
-		<div class="border-border rounded-xl border p-3">
-			<p class="text-foreground text-xs mb-3"><span class="font-semibold">Storage:</span> Parquet</p>
-			<div class="flex items-start gap-3">
-				<p class="text-muted-foreground text-[10px] min-w-0">Columnar Parquet files owned and managed by submitters. Supports flat files and hive-partitioned trees.</p>
-				<img src="/parquet_folder.svg" alt="Parquet folder" class="h-10 shrink-0" />
-			</div>
-		</div>
-	</div>
-
-	<!-- Connector: serve (from Platform side) -->
-	<div class="relative h-8 text-muted-foreground">
-		<div class="absolute left-1/4 -translate-x-1/2 flex flex-col items-center">
-			<svg width="12" height="14" viewBox="0 0 12 14" fill="none">
-				<line x1="6" y1="0" x2="6" y2="10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-				<path d="M 3 7.5 L 6 11.5 L 9 7.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-			</svg>
-		</div>
-	</div>
-
-	<!-- Row 3: Web Applications (full width) -->
-	<div class="border-border rounded-xl border p-3">
-		<div class="flex items-center gap-2 mb-3">
-			<div class="bg-orange-100 dark:bg-orange-950 text-orange-600 dark:text-orange-400 flex h-7 w-7 items-center justify-center rounded-lg shrink-0">
-				<Monitor class="h-4 w-4" />
-			</div>
-			<p class="text-foreground text-xs font-semibold">Web Applications</p>
-		</div>
-		<p class="text-muted-foreground text-[10px]">Feeds downstream applications like <a href="https://complexstories.uvm.edu">complex-stories</a> and <a href="https://wikimedia.uvm.edu">wikimedia.uvm.edu</a>, and surfaces queryable endpoints for any registered dataset.</p>
-	</div>
-</div>
-
-<div class="not-prose mt-6 hidden md:block">
-	<svg
-		viewBox="0 0 700 300"
-		xmlns="http://www.w3.org/2000/svg"
-		class="w-full"
-		role="img"
-		aria-label="Architecture: Submitter pipeline registers with the platform and writes parquet to storage; the platform queries storage and serves web applications"
-	>
-		<defs>
-			<marker id="arch-arrow" viewBox="0 0 10 10" refX="9" refY="5"
-				markerWidth="4" markerHeight="4" orient="auto">
-				<path d="M 0 1 L 9 5 L 0 9 Z" fill="var(--color-border)" />
-			</marker>
-		</defs>
-
-		<rect x="10" y="10" width="185" height="280" rx="12" class="fill-zinc-50 stroke-zinc-200 dark:fill-zinc-900 dark:stroke-zinc-800" stroke-width="1" />
-		<rect x="255" y="10" width="185" height="130" rx="12" fill="var(--color-card)" stroke="var(--color-border)" stroke-width="1" />
-		<rect x="255" y="160" width="185" height="130" rx="12" fill="var(--color-card)" stroke="var(--color-border)" stroke-width="1" />
-		<rect x="500" y="10" width="190" height="280" rx="12" fill="var(--color-card)" stroke="var(--color-border)" stroke-width="1" />
-
-		<path d="M 196 75 H 250" stroke="var(--color-border)" stroke-width="1.5" stroke-linecap="round" fill="none" marker-end="url(#arch-arrow)" />
-		<text x="223" y="68" text-anchor="middle" fill="var(--color-muted-foreground)" font-size="9" font-family="ui-monospace,monospace">register</text>
-		<path d="M 196 225 H 250" stroke="var(--color-border)" stroke-width="1.5" stroke-linecap="round" fill="none" marker-end="url(#arch-arrow)" />
-		<text x="223" y="218" text-anchor="middle" fill="var(--color-muted-foreground)" font-size="9" font-family="ui-monospace,monospace">write</text>
-		<path d="M 347 141 V 154" stroke="var(--color-border)" stroke-width="1.5" stroke-linecap="round" fill="none" marker-end="url(#arch-arrow)" />
-		<path d="M 441 75 C 476 75, 476 150, 494 150" stroke="var(--color-border)" stroke-width="1.5" stroke-linecap="round" fill="none" marker-end="url(#arch-arrow)" />
-
-		<!-- Card 1: Submitter's Pipeline -->
-		<foreignObject x="10" y="10" width="185" height="280">
-			<div xmlns="http://www.w3.org/1999/xhtml" class="p-3 h-full">
-				<div class="flex items-center gap-2 mb-3">
-					<div class="bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400 flex h-7 w-7 items-center justify-center rounded-lg shrink-0">
-						<Upload class="h-4 w-4" />
-					</div>
-					<p class="text-foreground text-[10px] font-semibold">Submitter's Pipeline</p>
-				</div>
-				<div class="text-[10px]">
-					<TreeView.Root>
-						<TreeView.Folder name="my-pipeline">
-							<TreeView.Folder name="extract">
-								<TreeView.File name="fetch.py" />
-							</TreeView.Folder>
-							<TreeView.Folder name="transform">
-								<TreeView.File name="process.py" />
-							</TreeView.Folder>
-							<TreeView.Folder name="load">
-								<TreeView.File name="submit.py" class="font-bold text-foreground" />
-							</TreeView.Folder>
-						</TreeView.Folder>
-					</TreeView.Root>
-				</div>
-			</div>
-		</foreignObject>
-
-		<!-- Card 2: Storywrangler Catalog -->
-		<foreignObject x="255" y="10" width="185" height="130">
-			<div xmlns="http://www.w3.org/1999/xhtml" class="p-3 h-full">
-				<div class="flex items-center gap-2 mb-3">
-					<div class="bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400 flex h-7 w-7 items-center justify-center rounded-lg shrink-0">
-						<Server class="h-4 w-4" />
-					</div>
-					<p class="text-foreground text-[10px] font-semibold">Storywrangler Catalog</p>
-				</div>
-				<ul class="text-muted-foreground text-[9px] space-y-1">
-					<li class="flex items-start gap-1.5"><Check class="h-3 w-3 mt-0.5 shrink-0 text-foreground" />Instrument wiring</li>
-					<li class="flex items-start gap-1.5"><Check class="h-3 w-3 mt-0.5 shrink-0 text-foreground" />Versioning</li>
-					<li class="flex items-start gap-1.5"><Check class="h-3 w-3 mt-0.5 shrink-0 text-foreground" />Ownership &amp; lineage tracking</li>
-					<li class="flex items-start gap-1.5"><Check class="h-3 w-3 mt-0.5 shrink-0 text-foreground" />Schema validation on register</li>
-				</ul>
-			</div>
-		</foreignObject>
-
-		<!-- Card 3: Storage: Parquet -->
-		<foreignObject x="255" y="160" width="185" height="130">
-			<div xmlns="http://www.w3.org/1999/xhtml" class="p-3 h-full">
-				<p class="text-foreground text-[10px] mb-3"><span class="font-semibold">Storage:</span> Parquet</p>
-				<div class="flex items-start gap-3">
-					<p class="text-muted-foreground text-[9px] min-w-0">Parquet files can be stored on local disk or in object storage.</p>
-					<img src="/parquet_folder.svg" alt="Parquet folder" class="h-10 shrink-0" />
-				</div>
-			</div>
-		</foreignObject>
-
-		<!-- Card 4: Web Applications -->
-		<foreignObject x="500" y="10" width="190" height="280">
-			<div xmlns="http://www.w3.org/1999/xhtml" class="p-3 h-full">
-				<div class="flex items-center gap-2 mb-3">
-					<div class="bg-orange-100 dark:bg-orange-950 text-orange-600 dark:text-orange-400 flex h-7 w-7 items-center justify-center rounded-lg shrink-0">
-						<Monitor class="h-4 w-4" />
-					</div>
-					<p class="text-foreground text-[10px] font-semibold">Web Applications</p>
-				</div>
-				<p class="text-muted-foreground text-[9px]">Feeds downstream applications like complex-stories and wikimedia.uvm.edu, and surfaces queryable endpoints for any registered dataset.</p>
-			</div>
-		</foreignObject>
-	</svg>
-</div>
-
-<h2 class="font-baskerville font-regular text-xl md:text-4xl leading-snug tracking-tight mb-2 md:mb-5">Storywrangler's key features</h2>
+<h2 class="font-baskerville font-regular text-xl md:text-4xl leading-snug tracking-tight mb-2 md:mb-5">Key features</h2>
 
 <p>
-	The platform is a digital commons, where participants can nurture our collective data garden, learn about each others' work, tied together by the common theme of using complex system tools. 
+	Storywrangler is a digital commons where participants nurture a collective data garden, learn about each others' work, and share complex system tools.
 </p>
 
-<div class="not-prose mt-8 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-	{#each [
-		{
-			icon: iconCorpora,
-			color: 'purple',
-			title: 'Text as Ecological Signal',
-			body: 'Social media (Bluesky, Reddit, Twitter), news outlets, Wikipedia, and higher education are treated as ecological time series — living records of how collective attention shifts across populations and over time.',
-		},
-		{
-			icon: iconInstruments,
-			color: 'purple',
-			title: 'Analysis-Ready Instruments',
-			body: 'The allotaxonometer and other VCSI tools become available the moment a dataset is registered. The schema contract is the wiring — no per-dataset integration work required.',
-		},
-		{
-			icon: iconInterop,
-			color: 'purple',
-			title: 'Interoperability by Design',
-			body: 'Datasets declare their query axes and output shape once. The platform bridges heterogeneous identifier namespaces — Wikidata, OpenAlex, local IDs — through a unified entity graph.',
-		},
-		{
-			icon: iconGovernance,
-			color: 'orange',
-			title: 'Selective Sharing & Succession',
-			body: 'Fine-grained access control means datasets that cannot be fully open can still be shared: expose aggregate results only, a filtered row subset, or full access per collaborator. Ownership succession ensures datasets survive student turnover.',
-		},
-		{
-			icon: iconDiscover,
-			color: 'orange',
-			title: 'Discoverable Analysis',
-			body: "Search the registry to find datasets that are already instrument-ready. The schema contract tells you not just where the data lives, but what analyses are immediately available — discovery and reproducibility are the same guarantee.",
-		},
-		{
-			icon: iconLineage,
-			color: 'orange',
-			title: 'Lineage & Impact',
-			body: 'Downstream groups that build on your data register their dependency in the registry. Their work appears in your impact record automatically — research credit propagates without either group coordinating directly.',
-		},
-	] as card (card.title)}
-		<div class="border-border rounded-lg border p-5 flex flex-col gap-3">
-			<div class={[
-				'flex h-9 w-9 items-center justify-center rounded-md',
-				card.color === 'purple'
-					? 'bg-purple-100 dark:bg-purple-950 text-purple-600 dark:text-purple-400'
-					: 'bg-orange-100 dark:bg-orange-950 text-orange-600 dark:text-orange-400'
-			]}>
-				<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="h-5 w-5" aria-hidden="true">
-					{@render card.icon()}
-				</svg>
-			</div>
-			<p class="text-foreground text-sm font-semibold">{card.title}</p>
-			<p class="text-muted-foreground text-sm leading-relaxed">{card.body}</p>
-		</div>
-	{/each}
-</div>
+<KeyFeatures />
 
 <h2 class="font-baskerville font-regular text-xl md:text-4xl leading-snug tracking-tight mb-2 md:mb-5">Registering your first data pipeline</h2>
 
-<div class="not-prose mb-6 flex gap-3 rounded-lg border border-amber-200 bg-amber-50 p-4 dark:border-amber-800 dark:bg-amber-950/40">
-	<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="mt-0.5 h-5 w-5 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden="true">
-		<path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z" />
-	</svg>
-	<div class="text-sm text-amber-800 dark:text-amber-200">
-		<p class="font-semibold">Beta release — manual account provisioning</p>
-		<p class="mt-1 leading-relaxed">
-			Account creation is not yet self-serve. To get access, contact the VCSI team to have an account created and your API key issued. The key should then be stored in your <code class="rounded bg-amber-100 px-1 dark:bg-amber-900">API_KEY</code> environment variable.
-		</p>
-	</div>
-</div>
+<Callout title="Beta release — manual account provisioning" class="mb-6">
+	Account creation is not yet self-serve. To get access, contact the VCSI team to have an account created and your API key issued. The key should then be stored in your <code class="rounded bg-zinc-200 px-1 dark:bg-zinc-800">API_KEY</code> environment variable.
+</Callout>
 
 <p>The registration process is a simple POST request documented <a href="/api-reference/registry/post-registry-register">here</a>.</p>
 
@@ -388,26 +125,11 @@ Peter,1464,1925,M
 
 <p>Under the hood, we are <a href="/versioning">versioning</a> the interaction of the allotaxonometer tool and the submitted babynames pipeline for reproducibility.</p>
 
-<div class="not-prose mb-12 flex gap-3 rounded-lg border border-amber-200 bg-amber-50 p-4 dark:border-amber-800 dark:bg-amber-950/40">
-	<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="mt-0.5 h-5 w-5 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden="true">
-		<path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z" />
-	</svg>
-	<div class="text-sm text-amber-800 dark:text-amber-200">
-		<p class="font-semibold">Making your data accessible</p>
-		<p class="mt-1 leading-relaxed">
-			We are still working to find the best way for the API to easily access external datasets. At the moment, the API can serve groups at the University of Vermont by accessing the netfiles shared storage system. It is not an automatic process yet. The research VM where the platform is hosted needs the permission to mount the relevant netfiles before accessing it. Alternatively, one could use low-cost <a href="https://aws.amazon.com/s3/pricing/?loc=ft#AWS_Free_Tier">S3 buckets</a> to make their parquet files accessible to the platform. 
-		</p>
-	</div>
-</div>
- 
+<p>For more details on entity mapping, discoverability, and storage options, see <a href="/register">Registering a dataset</a>.</p>
 
-<p>We are also offering utilities for increased discoverability and interoperability. For instance, submitters might have babynames data from all over the world. While registering "country" as <code>filter_dimensions</code> is directly usable, it decreases overall discoverability because the platform remains agnostic of what is going in the <code>filter_dimensions</code>. Instead, the users can submit their <code>entity_mapping</code> where they provide the link between their local ids and identifiers part of our global namespace (see <a href="/specification">Storywrangler Specifications</a>). See our more detailed <a href="/register">Registering a dataset</a> section to see how the registration of entity mapping is done.</p>
+<h2 class="font-baskerville font-regular text-xl md:text-4xl leading-snug tracking-tight mb-2 md:mb-5">Frequently asked questions</h2>
 
-<h2 class="font-baskerville font-regular text-xl md:text-4xl leading-snug tracking-tight mb-2 md:mb-5">Next steps</h2>
-
-<ul>
-	<li><a href="/case-studies/wikimedia">Wikimedia case study</a> — How we are using Storywrangler internally to make our Wikimedia pipeline available to all.</li>
-</ul>
+<HomeFaq />
 
 <style>
 	h2 {

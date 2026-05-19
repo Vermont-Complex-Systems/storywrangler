@@ -117,7 +117,7 @@ class TestAvailabilityEntityPartition:
             transform=_ns(
                 time_dimension="date",
                 filter_dimensions=None,
-                partition_dimensions={"granularity": "daily"},
+                hash_bucket=None,
             ),
             entity_mapping=_ns(local_id_column="country"),
         )
@@ -155,7 +155,7 @@ class TestAvailabilityEntityOnly:
             transform=_ns(
                 time_dimension="year",
                 filter_dimensions=["sex"],
-                partition_dimensions=None,
+                hash_bucket=None,
             ),
             entity_mapping=_ns(local_id_column="geo"),
         )
@@ -179,7 +179,7 @@ class TestAvailabilityPartitionOnly:
             transform=_ns(
                 time_dimension="year",
                 filter_dimensions=["field"],
-                partition_dimensions={"metric_type": "total"},
+                hash_bucket=None,
             ),
             entity_mapping=None,
         )
@@ -203,7 +203,7 @@ class TestAvailabilityGlobal:
             transform=_ns(
                 time_dimension="year",
                 filter_dimensions=None,
-                partition_dimensions=None,
+                hash_bucket=None,
             ),
             entity_mapping=None,
         )
@@ -233,7 +233,7 @@ class TestAvailabilityTimeDimensionTypes:
             transform=_ns(
                 time_dimension="ts",
                 filter_dimensions=None,
-                partition_dimensions=None,
+                hash_bucket=None,
             ),
             entity_mapping=None,
         )
@@ -250,7 +250,7 @@ class TestAvailabilityTimeDimensionTypes:
             transform=_ns(
                 time_dimension="year",
                 filter_dimensions=None,
-                partition_dimensions=None,
+                hash_bucket=None,
             ),
             entity_mapping=None,
         )
@@ -269,7 +269,7 @@ class TestAvailabilityNoTimeDimension:
             transform=_ns(
                 time_dimension=None,
                 filter_dimensions=None,
-                partition_dimensions=None,
+                hash_bucket=None,
             ),
             entity_mapping=None,
         )

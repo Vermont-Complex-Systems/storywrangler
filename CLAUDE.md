@@ -85,16 +85,13 @@ All other hive levels are auto-discovered and classified:
 - Levels matching `hash_bucket` (string column name) → hash_bucket
 - Everything else → partition (gets auto-default from first on-disk value)
 
-Optional fields:
+Optional field:
 - `filter_dimensions`: non-hive columns inside parquet files where omitting = aggregate
   over all values. E.g. `["sex"]` — omitting sex returns all names.
-- `partition_dimensions`: override auto-discovered defaults when needed.
-  E.g. `{"granularity": "daily"}` forces the default instead of alphabetically-first.
 
 Query-time defaults come from `level_order.default_value` (stored at registration).
 Helper functions `get_partition_defaults()` and `get_queryable_dims()` in
-`core/query_utils.py` provide the query layer's view — they read from `level_order`
-first, falling back to `transform.partition_dimensions` for pre-migration datasets.
+`core/query_utils.py` provide the query layer's view — they read from `level_order`.
 
 Neither field includes the entity column — that is handled by `entity_mapping.local_id_column`.
 
@@ -129,9 +126,7 @@ The query layer computes the bucket at request time:
 - `default_count` is the fallback when no override matches.
 - `overrides` is a nested dict: `entity → {partition_dim_value → count}`.
   Resolution: `overrides[entity][str(dim_value)]` → `default_count`.
-- Not listed in `partition_dimensions` — hash buckets are routing-only, not query axes.
-  A model validator enforces that `hash_bucket` does not appear in
-  `partition_dimensions` keys.
+- Hash buckets are routing-only, not query axes.
 - Helpers live in `core/query_utils.py`: `murmur_bucket()`, `get_bucket_config()`,
   `resolve_bucket_count()` — generic, usable by any router.
 
@@ -230,20 +225,17 @@ Derived at registration time, included in default GET responses.
 ]
 ```
 
-**Type tags:** `partition` (undeclared hive levels or partition_dimensions key),
-`entity` (entity_mapping.local_id_column), `hash_bucket` (transform.hash_bucket),
-`time` (time_dimension), `filter` (filter_dimensions item).
+**Type tags:** `partition` (undeclared hive levels), `entity` (entity_mapping.local_id_column),
+`hash_bucket` (transform.hash_bucket), `time` (time_dimension), `filter` (filter_dimensions item).
 
 **`default_value`:** The first on-disk value (sorted alphabetically) for each level.
-If `partition_dimensions` declares an override, that wins. Type-coerced against
-`filter_values` at registration (string `"1"` → int `1` when filter_values has ints).
+Type-coerced against `filter_values` at registration (string `"1"` → int `1` when
+filter_values has ints).
 
 **Computed by:** `validate_and_build_level_order()` in `parquet_introspect.py`.
 `_discover_levels()` walks one branch of the hive tree, returning both column names
 and first values. Undeclared levels default to type `"partition"`. Registration
-fails with 422 if:
-- Any declared `partition_dimensions` key or `hash_bucket` column is missing on disk
-- `partition_dimensions` key order doesn't match the on-disk nesting order
+fails with 422 if `hash_bucket` column is missing on disk.
 
 **Used by:**
 - `build_hive_path()` — exact partition paths at query time
@@ -251,8 +243,8 @@ fails with 422 if:
 - `get_queryable_dims()` — list of filterable columns
 - Default GET response — human-readable summary of the full hive structure
 
-**Backward compatibility:** null means "use glob fallback." All helpers fall back to
-`transform.partition_dimensions` when `level_order` is absent.
+**Required for parquet_hive:** `level_order` must be populated — `_path_expr()` raises
+if absent. All datasets must be registered (or re-registered) to populate it.
 
 ---
 
@@ -290,3 +282,8 @@ All registered under `domain="open-academic-analytics"`. Router resolves
 Scaffolds `parquet` or `parquet_hive` project templates only. `ducklake` and `duckdb`
 format templates were removed. The generated `submit.py` uses the current `DatasetCreate`
 structure: `endpoint_schema` for output shape, `transform` for slice axes.
+
+Templates do **not** compute availability client-side — the server auto-derives it at
+registration time from `parquet_introspect.py`. The `parquet_hive` template declares
+only `time_dimension` (and optionally `filter_dimensions` / `hash_bucket`); all hive
+partition levels are auto-discovered.

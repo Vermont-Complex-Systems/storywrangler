@@ -317,25 +317,20 @@ def validate_and_build_level_order(
     *discovered_levels* comes from ``_discover_levels()`` and is a list of
     ``{"column": name, "value": first_value}`` dicts in on-disk nesting order.
 
-    Each level must map to exactly one of:
-      - transform.partition_dimensions key  → type "partition"
+    Each level is classified by matching it against declarations in
+    ``transform`` and ``entity_mapping``:
+
       - entity_mapping.local_id_column      → type "entity"
-      - transform.hash_bucket.column        → type "hash_bucket"
+      - transform.hash_bucket               → type "hash_bucket"
       - transform.time_dimension            → type "time"
       - transform.filter_dimensions item    → type "filter"
-
-    Undeclared levels default to type "partition" — this is the common case
-    when a user omits partition_dimensions and lets discovery handle it.
+      - everything else                     → type "partition"
 
     The first on-disk value is stored as ``default_value`` for each level.
     At query time, partition/filter levels use this as the injected default
     when the caller omits the parameter.
 
-    Additionally:
-      - partition_dimensions keys (when declared) and hash_bucket.column MUST
-        appear in the discovered levels.
-      - partition_dimensions keys must appear in the same relative order as
-        the dict key order in the submission.
+    hash_bucket MUST appear in the discovered levels when declared.
 
     Raises ValueError with a descriptive message on any mismatch.
     """
@@ -345,19 +340,8 @@ def validate_and_build_level_order(
     # Build column → type lookup from explicit declarations
     declared: Dict[str, str] = {}
 
-    pd = (tr.partition_dimensions if tr else None) or {}
-    pd_keys: List[str] = list(pd.keys()) if isinstance(pd, dict) else list(pd)
-    for k in pd_keys:
-        declared[k] = "partition"
-
     if em and getattr(em, "local_id_column", None):
-        col = em.local_id_column
-        if col in declared:
-            raise ValueError(
-                f"entity_mapping.local_id_column '{col}' conflicts with "
-                f"partition_dimensions key '{col}'"
-            )
-        declared[col] = "entity"
+        declared[em.local_id_column] = "entity"
 
     hb = (tr.hash_bucket if tr else None)
     if hb:
@@ -382,57 +366,26 @@ def validate_and_build_level_order(
         if fd not in declared:
             declared[fd] = "filter"
 
-    # Declared overrides for default_value (from partition_dimensions dict values)
-    declared_defaults: Dict[str, Any] = {}
-    if isinstance(pd, dict):
-        for dim, val in pd.items():
-            if isinstance(val, list) and val:
-                declared_defaults[dim] = val[0]
-            elif val is not None:
-                declared_defaults[dim] = val
-
     # Match each discovered level
     discovered_names = [lv["column"] for lv in discovered_levels]
     result: List[Dict[str, Any]] = []
-    for i, lv in enumerate(discovered_levels):
+    for lv in discovered_levels:
         col_name = lv["column"]
         col_type = declared.get(col_name, "partition")  # undeclared → partition
-        entry: Dict[str, Any] = {"column": col_name, "type": col_type}
-
-        # default_value: declared override wins, otherwise use discovered first value
-        if col_name in declared_defaults:
-            entry["default_value"] = declared_defaults[col_name]
-        else:
-            entry["default_value"] = lv["value"]
-
+        entry: Dict[str, Any] = {
+            "column": col_name,
+            "type": col_type,
+            "default_value": lv["value"],
+        }
         result.append(entry)
 
-    # Validate that mandatory declared columns appear in discovered levels
-    discovered_set = set(discovered_names)
-    for k in pd_keys:
-        if k not in discovered_set:
-            raise ValueError(
-                f"partition_dimensions key '{k}' not found in on-disk hive "
-                f"levels {discovered_names}. partition_dimensions keys must "
-                f"correspond to actual hive directory levels."
-            )
-
-    if hb and hb not in discovered_set:
+    # Validate that hash_bucket column appears in discovered levels
+    if hb and hb not in set(discovered_names):
         raise ValueError(
             f"hash_bucket '{hb}' not found in on-disk hive "
             f"levels {discovered_names}. The hash bucket column must be "
             f"an actual hive directory level."
         )
-
-    # Validate relative order of partition_dimensions keys (when declared)
-    if len(pd_keys) > 1:
-        pd_subsequence = [l for l in discovered_names if l in set(pd_keys)]
-        if pd_subsequence != pd_keys:
-            raise ValueError(
-                f"partition_dimensions key order {pd_keys} does not match "
-                f"on-disk nesting order {pd_subsequence}. Reorder "
-                f"partition_dimensions to match the hive directory structure."
-            )
 
     return result
 
@@ -479,8 +432,7 @@ def introspect(
 
     When *level_order* is given (computed by validate_and_build_level_order before
     this call), it is used to determine which columns to introspect for filter_values
-    and which to group by for availability — replacing the need for
-    partition_dimensions in the submission.
+    and which to group by for availability.
 
     Performance strategy for parquet_hive with level_order:
       - Schema: pin ALL levels to first values → DuckDB reads one partition (instant)
@@ -535,25 +487,14 @@ def introspect(
         all_dims = [lv["column"] for lv in level_order
                     if lv["type"] in ("partition", "filter")]
     else:
-        filter_dims: List[str] = list((tr.filter_dimensions or []) if tr else [])
-        partition_dims: List[str] = list((tr.partition_dimensions or []) if tr else [])
-        all_dims = filter_dims + partition_dims
+        all_dims = list((tr.filter_dimensions or []) if tr else [])
 
     # Columns that are hive-level (present in level_order) — use os.listdir()
     hive_columns = {lv["column"] for lv in (level_order or [])}
 
-    # For partition_dimensions with declared list values, use the declared list
-    # directly rather than scanning.
-    partition_dims_dict = (tr.partition_dimensions if tr else None) or {}
-
     filter_values: Dict[str, List[Any]] = {}
     for dim in all_dims:
-        # Priority 1: declared list values from partition_dimensions
-        if isinstance(partition_dims_dict, dict) and isinstance(partition_dims_dict.get(dim), list):
-            filter_values[dim] = partition_dims_dict[dim]
-            continue
-
-        # Priority 2: os.listdir() for hive-level columns (instant on NFS)
+        # Priority 1: os.listdir() for hive-level columns (instant on NFS)
         if has_level_order and dim in hive_columns:
             try:
                 values = _hive_distinct_values(loc, level_order, dim)
@@ -563,7 +504,7 @@ def introspect(
                 log.debug("Hive listdir failed for dim '%s': %s", dim, e)
             continue
 
-        # Priority 3: DuckDB SELECT DISTINCT for non-hive columns
+        # Priority 2: DuckDB SELECT DISTINCT for non-hive columns
         try:
             rows = conn.execute(
                 f"SELECT DISTINCT {dim} FROM {path_expr} "

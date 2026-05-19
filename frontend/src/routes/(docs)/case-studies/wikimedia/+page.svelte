@@ -9,7 +9,6 @@
         "data_location": "/netfiles/wikimedia_snapshots/wikigrams",
         "data_format": "parquet_hive",
         "description": "Wikipedia n-grams by frequency, date, and location with entity mappings and ranks",
-        "manifest": {},
         "entity_mapping": {
             "entity_namespace": "wikidata",
             "local_id_column": "country",
@@ -22,11 +21,12 @@
         },
         "transform": {
             "time_dimension": "date",
-            "partition_dimensions": {"granularity": "daily"},
+            # Hive levels (ngram_size, granularity, country, date) are auto-discovered.
+            # hash_bucket: "ngram_bucket",  # optional: content-sharded partition
         },
         "lineage": {
             "sources": {
-			    "url": 
+			    "url":
 			      "https://dumps.wikimedia.org/other/enterprise_html/"
 			},
             "repo": "https://github.com/Vermont-Complex-Systems/wikipedia-parsing",
@@ -92,12 +92,12 @@ This is how we go from 100Gb of daily dumps to about 165G of parquets for the da
 </p>
 
 <ul>
-	<li><strong>Where the data lives</strong> — a file path (parquet, ducklake, etc.)</li>
+	<li><strong>Where the data lives</strong> — a file path to parquet files</li>
 	<li>
-		<strong>What shape it has</strong> — which column is the "type", which is the "count", what
-		time column exists, what other dimensions can be filtered on
+		<strong>What shape it has</strong> — which column is the "type", which is the "count", and
+		what time column exists
 	</li>
-	<li><strong>What format</strong> — flat parquet, hive-partitioned, ducklake, etc.</li>
+	<li><strong>What format</strong> — flat parquet or hive-partitioned</li>
 </ul>
 
 <p>
@@ -111,8 +111,8 @@ This is how we go from 100Gb of daily dumps to about 165G of parquets for the da
 
 <p>
 	Two things this dataset declares beyond the minimum: non-default column names
-	(<code>ngram</code>, <code>pv_count</code>) and a hive granularity map
-	(<code>daily/weekly/monthly</code>). Both are read by the allotax endpoint at query time.
+	(<code>ngram</code>, <code>pv_count</code>) and entity mapping. Hive partition levels
+	(ngram_size, granularity, country, date) are auto-discovered from the directory structure.
 </p>
 
 <h2>What you gain by registering entities</h2>

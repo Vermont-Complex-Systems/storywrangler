@@ -92,7 +92,6 @@ def make_dataset_obj(
         transform=transform or {
             "time_dimension": "year",
             "filter_dimensions": ["field", "venue"],
-            "partition_dimensions": {"metric_type": "total"},
         },
         data_schema=data_schema or {"year": "INTEGER"},
         filter_values=filter_values or {},

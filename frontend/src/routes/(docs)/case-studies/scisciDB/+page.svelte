@@ -51,7 +51,8 @@ GET /scisciDB/metrics?group_by=venue,year&venue=Nature,Science,PLOS+ONE&metric_t
     "transform": {
         "time_dimension": "year",
         "filter_dimensions": ["field", "venue"],
-        "partition_dimensions": {"metric_type": "total"},
+        # metric_type is a hive partition level — auto-discovered with default "has_abstract"
+        # (alphabetically first). The query layer injects this default when callers omit it.
     },
     "lineage": {
         "sources": {"semantic_scholar": {"s2_papers": "https://api.semanticscholar.org/datasets/v1/release/"}},
@@ -145,13 +146,13 @@ GET /scisciDB/metrics?group_by=venue,year&venue=Nature,Science,PLOS+ONE&metric_t
 		<code>load_time_series()</code> instead of <code>load_system()</code>
 	</li>
 	<li>
-		<strong><code>filter_dimensions</code></strong> (field, venue) are safe to omit — omitting
-		aggregates over all values
+		<strong><code>filter_dimensions</code></strong> (field, venue) are non-hive columns safe to
+		omit — omitting aggregates over all values
 	</li>
 	<li>
-		<strong><code>partition_dimensions</code></strong> (metric_type) with default
-		<code>"total"</code> prevents accidental double-counting when the caller doesn't specify a
-		metric type
+		<strong><code>metric_type</code></strong> is a hive partition level, auto-discovered from
+		the directory structure. The query layer injects a default when callers omit it,
+		preventing accidental double-counting
 	</li>
 	<li>
 		Adding a new dataset (e.g. field-topic-metrics) is just another registration — same endpoint,
