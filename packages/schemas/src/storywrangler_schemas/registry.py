@@ -293,11 +293,34 @@ class TransformConfig(BaseModel):
             "Just the hive partition column holding the bucket ID "
             "(e.g. 'ngram_bucket'). Bucket counts per entity are "
             "auto-derived from the directory structure at registration time. "
-            "The query layer uses murmur3_32 (seed 0) to route to the "
-            "correct bucket at request time. "
             "Hash buckets are routing-only, not query axes."
         ),
     )
+    hash_algorithm: Literal["murmur3_32"] = Field(
+        "murmur3_32",
+        description=(
+            "Hash algorithm for bucket routing. Currently only murmur3_32 "
+            "is supported. Pipelines MUST use storywrangler.hashing.assign_bucket() "
+            "to ensure consistency with the query layer."
+        ),
+    )
+    hash_seed: int = Field(
+        0,
+        description=(
+            "Seed for the hash function. Seed 0 matches DuckDB's "
+            "built-in murmur3_32() default."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _hash_params_require_bucket(self):
+        """hash_algorithm/hash_seed only make sense when hash_bucket is set."""
+        if self.hash_bucket is None:
+            if self.hash_algorithm != "murmur3_32" or self.hash_seed != 0:
+                raise ValueError(
+                    "hash_algorithm and hash_seed require hash_bucket to be set."
+                )
+        return self
 
 
 class DatasetCreate(BaseModel):

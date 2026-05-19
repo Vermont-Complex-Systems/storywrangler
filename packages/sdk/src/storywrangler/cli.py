@@ -261,6 +261,12 @@ if __name__ == "__main__":
 Hive partition levels are auto-discovered from the directory structure.
 You only need to declare time_dimension and (optionally) hash_bucket.
 Availability is auto-computed by the server at registration time.
+
+If your dataset uses hash buckets, use assign_bucket() in your transform
+step to partition files consistently with the query layer:
+
+    from storywrangler.hashing import assign_bucket
+    bucket = assign_bucket(term, num_buckets=16)
 \"\"\"
 
 import os

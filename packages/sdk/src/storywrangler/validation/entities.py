@@ -2,7 +2,7 @@
 Entity ID validation
 
 Implements validation rules from Storywrangler Entity Standards v0.0.1:
-https://github.com/vermont-complex-systems/Storywrangler-Specification/blob/main/versions/0.0.1.md
+https://github.com/vermont-complex-systems/Storywrangler-Specification/blob/main/versions/0.0.3.md
 """
 
 from storywrangler_schemas.standards import Standards as Standards_v0_0_1

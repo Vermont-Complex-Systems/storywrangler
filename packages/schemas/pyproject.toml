@@ -5,6 +5,7 @@ description = "Shared Pydantic schemas for the Storywrangler platform"
 requires-python = ">=3.11"
 dependencies = [
     "pydantic>=2.0.0",
+    "mmh3>=4.0.0",
 ]
 
 [build-system]

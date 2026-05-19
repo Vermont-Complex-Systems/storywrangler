@@ -116,18 +116,28 @@ bucket directories per entity × partition combination, and derives
 combos that differ from the default). The full config dict replaces the
 string in the stored `transform.hash_bucket` before persisting.
 
-The query layer computes the bucket at request time:
+The hash algorithm and seed are explicit schema fields on `TransformConfig`:
+- `hash_algorithm`: `Literal["murmur3_32"]`, default `"murmur3_32"`
+- `hash_seed`: `int`, default `0`
 
-    bucket = (mmh3.hash(term, seed=0) & 0x7FFFFFFF) % count
+The canonical hashing implementation lives in a single source of truth:
+`storywrangler_schemas.hashing.assign_bucket()`. Both the backend and pipeline
+code import from this module. The SDK re-exports it as
+`storywrangler.hashing.assign_bucket()`.
+
+The query layer computes the bucket at request time via `assign_bucket()`:
+
+    bucket = (mmh3.hash(term, seed=hash_seed) & 0x7FFFFFFF) % count
 
 - `& 0x7FFFFFFF` clears the sign bit (mmh3 returns signed int32; bucket IDs must be >= 0).
-- Seed 0 matches DuckDB/DuckLake's `murmur3_32()` default.
+- Seed 0 (the default `hash_seed`) matches DuckDB/DuckLake's `murmur3_32()` default.
 - Bucket count is per-dataset registration (e.g. US gets 32, smaller countries get 16).
 - `default_count` is the fallback when no override matches.
 - `overrides` is a nested dict: `entity → {partition_dim_value → count}`.
   Resolution: `overrides[entity][str(dim_value)]` → `default_count`.
 - Hash buckets are routing-only, not query axes.
-- Helpers live in `core/query_utils.py`: `murmur_bucket()`, `get_bucket_config()`,
+- Helpers in `core/query_utils.py`: `assign_bucket()` (imported from
+  `storywrangler_schemas.hashing`), `get_bucket_config()`,
   `resolve_bucket_count()` — generic, usable by any router.
 
 ### `entity_mapping.local_id_column` — dual role (documented, not a bug)

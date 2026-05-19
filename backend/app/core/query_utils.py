@@ -20,11 +20,11 @@ from types import SimpleNamespace
 from typing import Any, List, Optional
 from urllib.parse import quote
 
-import mmh3
 from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
+from storywrangler_schemas.hashing import assign_bucket
 from storywrangler_schemas.standards import Standards
 from ..core.exceptions import DataNotAvailableError, QueryError
 from ..models.registry import EntityMapping, RegistryEntry
@@ -33,15 +33,9 @@ from ..models.registry import EntityMapping, RegistryEntry
 # ── Hash-bucket routing ─────────────────────────────────────────────────────────
 # Generic helpers for content-sharded hive datasets (transform.hash_bucket).
 # Resolution: overrides[entity][str(dim_value)] → default_count.
-
-def murmur_bucket(term: str, num_buckets: int) -> int:
-    """Compute hash bucket via murmur3_32 (seed 0, positive mask).
-
-    The ``& 0x7FFFFFFF`` clears the sign bit — mmh3.hash() returns a signed
-    int32 which can be negative, but bucket IDs must be non-negative.
-    Seed 0 matches DuckDB/DuckLake's built-in murmur3_32() default.
-    """
-    return (mmh3.hash(term, seed=0) & 0x7FFFFFFF) % num_buckets
+#
+# assign_bucket() is imported from storywrangler_schemas.hashing — the single
+# source of truth shared by backend, SDK, and pipeline code.
 
 
 def get_bucket_config(dataset_obj) -> dict:

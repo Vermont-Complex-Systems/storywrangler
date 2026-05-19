@@ -89,5 +89,5 @@ class Standards:
 
     @staticmethod
     def spec_url(section: str = "") -> str:
-        base = "https://github.com/vermont-complex-systems/Storywrangler-Specification/blob/main/versions/0.0.1.md"
+        base = "https://github.com/vermont-complex-systems/Storywrangler-Specification/blob/main/versions/0.0.3.md"
         return f"{base}#{section}" if section else base

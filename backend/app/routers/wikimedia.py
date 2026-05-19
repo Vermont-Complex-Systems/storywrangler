@@ -10,9 +10,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..core.database import get_session
 from ..core.duckdb_client import get_duckdb_client
 from ..core.query_utils import (
-    build_hive_path, get_bucket_config, get_partition_defaults, get_queryable_dims,
-    handle_query_error, load_system,
-    murmur_bucket, parse_dates, resolve_bucket_count, resolve_entity,
+    assign_bucket, build_hive_path, get_bucket_config, get_partition_defaults,
+    get_queryable_dims, handle_query_error, load_system,
+    parse_dates, resolve_bucket_count, resolve_entity,
 )
 from ..core.registry_utils import get_latest_entry
 from ..core.timing import timed
@@ -564,7 +564,7 @@ async def term_series(
 
     if sparkline_obj:
         spark_hb = get_bucket_config(sparkline_obj)
-        bucket = murmur_bucket(type, resolve_bucket_count(spark_hb, local_id, n))
+        bucket = assign_bucket(type, resolve_bucket_count(spark_hb, local_id, n))
         sparkline_path = build_hive_path(
             sparkline_obj,
             filter_vals={"ngram_size": n},
@@ -588,7 +588,7 @@ async def term_series(
             if sparkline_rows and include_articles and top_articles_obj:
                 try:
                     art_hb = get_bucket_config(top_articles_obj)
-                    art_bucket = murmur_bucket(type, resolve_bucket_count(art_hb, local_id, n))
+                    art_bucket = assign_bucket(type, resolve_bucket_count(art_hb, local_id, n))
                     articles_path = build_hive_path(
                         top_articles_obj,
                         filter_vals={"ngram_size": n},
@@ -633,7 +633,7 @@ async def term_series(
             if slow_rows and include_articles and top_articles_obj:
                 try:
                     art_hb = get_bucket_config(top_articles_obj)
-                    bucket = murmur_bucket(type, resolve_bucket_count(art_hb, local_id, n))
+                    bucket = assign_bucket(type, resolve_bucket_count(art_hb, local_id, n))
                     articles_path = build_hive_path(
                         top_articles_obj,
                         filter_vals={"ngram_size": n},
@@ -875,7 +875,7 @@ async def term_series_batch(
         spark_hb = get_bucket_config(sparkline_obj)
         spark_n_buckets = resolve_bucket_count(spark_hb, local_id, n)
         # Compute which buckets contain our terms, then read only those files.
-        spark_buckets = {murmur_bucket(t, spark_n_buckets) for t in type_list}
+        spark_buckets = {assign_bucket(t, spark_n_buckets) for t in type_list}
         spark_bucket_files = [
             build_hive_path(sparkline_obj, filter_vals={"ngram_size": n}, entity_value=local_id, bucket_value=b, glob_suffix="/data_0.parquet")
             for b in spark_buckets
@@ -902,7 +902,7 @@ async def term_series_batch(
                     try:
                         art_hb = get_bucket_config(top_articles_obj)
                         art_n_buckets = resolve_bucket_count(art_hb, local_id, n)
-                        buckets = {murmur_bucket(t, art_n_buckets) for t in found_terms}
+                        buckets = {assign_bucket(t, art_n_buckets) for t in found_terms}
                         bucket_files = [
                             build_hive_path(top_articles_obj, filter_vals={"ngram_size": n}, entity_value=local_id, bucket_value=b, glob_suffix="/data_0.parquet")
                             for b in buckets
@@ -957,7 +957,7 @@ async def term_series_batch(
                     slow_found = {row[0] for row in slow_rows}
                     art_hb = get_bucket_config(top_articles_obj)
                     art_n_buckets = resolve_bucket_count(art_hb, local_id, n)
-                    buckets = {murmur_bucket(t, art_n_buckets) for t in slow_found}
+                    buckets = {assign_bucket(t, art_n_buckets) for t in slow_found}
                     bucket_files = [
                         build_hive_path(top_articles_obj, filter_vals={"ngram_size": n}, entity_value=local_id, bucket_value=b, glob_suffix="/data_0.parquet")
                         for b in buckets
