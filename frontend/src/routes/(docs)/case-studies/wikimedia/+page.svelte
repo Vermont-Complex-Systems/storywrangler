@@ -58,7 +58,7 @@ GET /storywrangler/allotax
 </p>
 
 <p>
-	This pipeline is also a story about how large data problems have become tractable on accessible hardware. Crunching 1 TB of n-gram counts on a consumer laptop was unthinkable a decade ago; today it is routine, thanks to open formats like Apache Arrow and out-of-core execution engines like DuckDB. This case study follows the full Storywrangler workflow: we start with the pipeline itself, walk through how its outputs are registered with the platform using the <code>storywrangler-sdk</code>, and then look at how the Storywrangler API serves over 500 GB of Parquet data from a SvelteKit application. 
+	This pipeline is also a story about how large data problems have become tractable on accessible hardware. Crunching 1 TB of n-gram counts on a consumer laptop was unthinkable a decade ago; today it is routine, thanks to open formats like Apache Arrow and out-of-core execution engines like DuckDB. This case study follows the full Storywrangler workflow: we start with the pipeline itself, walk through how its outputs are registered with the platform using the <code>storywrangler</code> SDK, and then look at how the Storywrangler API serves over 500 GB of Parquet data from a SvelteKit application. 
 </p>
 	
 <p>

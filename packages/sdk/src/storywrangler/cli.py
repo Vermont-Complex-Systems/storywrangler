@@ -31,14 +31,14 @@ dependencies = [
     "python-dotenv>=1.0",
     "pyyaml>=6.0",
     "requests>=2.31",
-    "storywrangler-sdk",
+    "storywrangler",
 ]
 
 [project.optional-dependencies]
 test = ["pytest>=8.0"]
 
 [tool.uv.sources]
-storywrangler-sdk = {{ path = "../storywrangler/packages/sdk", editable = true }}
+storywrangler = {{ path = "../storywrangler/packages/sdk", editable = true }}
 """
 
 ENV_EXAMPLE = """\

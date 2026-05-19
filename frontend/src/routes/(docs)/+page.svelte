@@ -5,7 +5,7 @@
 	import { Callout } from '$lib/components/ui/callout';
 	import HomeFaq from '$lib/components/HomeFaq.svelte';
 
-	const installCode = `uv add storywrangler-sdk`;
+	const installCode = `uv add storywrangler`;
 
 	const usageCode = `# Import the SDK and the client module
 from storywrangler import Storywrangler, DatasetCreate

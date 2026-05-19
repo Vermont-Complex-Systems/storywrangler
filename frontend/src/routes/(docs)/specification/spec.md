@@ -1048,7 +1048,7 @@ The Technical Steering Committee reviews proposals quarterly.
 
 **Upon approval:**
 1. Specification added to next minor version
-2. Implementation in storywrangler-sdk required
+2. Implementation in storywrangler SDK required
 3. Migration guide published
 4. Announcement to community
 

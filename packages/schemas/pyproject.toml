@@ -1,12 +1,33 @@
 [project]
 name = "storywrangler-schemas"
-version = "1.0.0"
+version = "0.0.1"
 description = "Shared Pydantic schemas for the Storywrangler platform"
 requires-python = ">=3.11"
+readme = "README.md"
+license = "MIT"
+authors = [
+    { name = "Vermont Complex Systems Institute", email = "compstorylab@uvm.edu" },
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering",
+]
 dependencies = [
     "pydantic>=2.0.0",
     "mmh3>=4.0.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/vermont-complex-systems/storywrangler"
+Documentation = "https://complexstories.uvm.edu"
+Repository = "https://github.com/vermont-complex-systems/storywrangler/tree/main/packages/schemas"
+Specification = "https://github.com/vermont-complex-systems/Storywrangler-Specification"
 
 [build-system]
 requires = ["hatchling"]

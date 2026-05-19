@@ -6,7 +6,7 @@ Implements the [Storywrangler Specification v0.0.3](https://github.com/vermont-c
 
 ## Installation
 ```bash
-pip install storywrangler-sdk
+pip install storywrangler
 ```
 
 ## Quick Start

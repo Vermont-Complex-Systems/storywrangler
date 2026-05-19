@@ -1,13 +1,34 @@
 [project]
-name = "storywrangler-sdk"
-version = "1.0.0"
-description = "Entity and taxonomy validation for Storywrangler"
+name = "storywrangler"
+version = "0.0.1"
+description = "Dataset registration client, entity validation, and project scaffolding for Storywrangler"
 requires-python = ">=3.11"
+readme = "README.md"
+license = "MIT"
+authors = [
+    { name = "Vermont Complex Systems Institute", email = "compstorylab@uvm.edu" },
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering",
+]
 dependencies = [
     "pydantic>=2.0.0",
     "requests>=2.31.0",
     "storywrangler-schemas",
 ]
+
+[project.urls]
+Homepage = "https://github.com/vermont-complex-systems/storywrangler"
+Documentation = "https://complexstories.uvm.edu"
+Repository = "https://github.com/vermont-complex-systems/storywrangler/tree/main/packages/sdk"
+Specification = "https://github.com/vermont-complex-systems/Storywrangler-Specification"
 
 [tool.uv.sources]
 storywrangler-schemas = { workspace = true }
