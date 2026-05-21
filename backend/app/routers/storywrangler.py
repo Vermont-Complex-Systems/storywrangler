@@ -35,6 +35,36 @@ def _apply_defaults(filter_vals: dict, defaults: dict) -> None:
         filter_vals.setdefault(dim, default_val)
 
 
+def _validate_and_coerce_filters(filter_dicts: list, filter_values: dict) -> None:
+    """Validate filter values against introspected filter_values, with type coercion.
+
+    Query params arrive as strings but filter_values stores typed values
+    (ints, floats). Coerces string → int → float before checking membership.
+    Raises 400 if a value is not in the valid set.
+    """
+    for vals_dict in filter_dicts:
+        for dim, val in list(vals_dict.items()):
+            valid = filter_values.get(dim, [])
+            if not valid:
+                continue
+            if val not in valid:
+                coerced = val
+                if isinstance(val, str):
+                    try:
+                        coerced = int(val)
+                    except (ValueError, TypeError):
+                        try:
+                            coerced = float(val)
+                        except (ValueError, TypeError):
+                            pass
+                if coerced not in valid:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"{dim} must be one of {sorted(map(str, valid))}",
+                    )
+                vals_dict[dim] = coerced
+
+
 def _sanitize_floats(obj):
     """Replace NaN → null, ±Infinity → string, so json.dumps won't choke."""
     if isinstance(obj, float):
@@ -150,12 +180,10 @@ async def allotaxonometer(
     entity2: Optional[str] = Query(None, description="Global entity ID for system 2, e.g. 'wikidata:Q145' (United Kingdom). Optional — omit for datasets using filter_dimensions as the comparison axis."),
     dates: Optional[str] = Query(None, description="Date/year range for system 1. Single value '2024-10-01' or range '2024-10-01,2024-10-31'. Omit to load all time."),
     dates2: Optional[str] = Query(None, description="Date/year range for system 2. Omit to load all time."),
-    granularity: str = Query("daily", description="Hive granularity (parquet_hive only): daily | weekly | monthly"),
     alpha: str = Query("1.0", description="RTD alpha parameter (number or 'inf')"),
     alphas: Optional[str] = Query(None, description="Comma-separated alphas for multi-alpha mode, e.g. '0.5,1.0,inf'"),
     ngram_limit: int = Query(10000, description="Max types to load per system before computing"),
     wordshift_limit: int = Query(200, description="Truncate wordshift output to top N entries"),
-    n: int = Query(1, description="N-gram size (1 = unigrams, 2 = bigrams). Only used when 'ngram_size' is in transform.filter_dimensions."),
     db: AsyncSession = Depends(get_session),
 ):
     """Compares two type-frequency systems using the allotaxonometer (rank-turbulence divergence).
@@ -193,32 +221,20 @@ async def allotaxonometer(
     all_dims = get_queryable_dims(dataset_obj)
     defaults = get_partition_defaults(dataset_obj)
 
-    # Step 1 — generic: any declared dim passed as ?dim=val / ?dim2=val
+    # Extract declared filter dimensions from query params.
+    # Any column in level_order (partition/filter type) can be passed as
+    # ?dim=val (system 1) or ?dim2=val (system 2). Use actual column names
+    # from the dataset — e.g. ?ngram_size=1 for wikimedia, ?n=1 for reddit.
     qp = request.query_params
     filter_vals1 = {dim: qp[dim]       for dim in all_dims if dim in qp}
     filter_vals2 = {dim: qp[f"{dim}2"] for dim in all_dims if f"{dim}2" in qp}
 
-    # Step 2 — alias injection: n → ngram_size (n is not a dim name).
-    # Use the raw query param to detect explicit caller intent before defaults run.
-    if "ngram_size" in all_dims:
-        if "n" in qp and "ngram_size" not in filter_vals1:
-            filter_vals1["ngram_size"] = n
-        if "n2" in qp and "ngram_size" not in filter_vals2:
-            filter_vals2["ngram_size"] = int(qp["n2"])
-
-    # Step 3 — inject defaults from level_order for any partition dim still missing.
+    # Inject defaults from level_order for any partition dim still missing.
     _apply_defaults(filter_vals1, defaults)
     _apply_defaults(filter_vals2, defaults)
 
-    # Validate assembled filter values against pre-introspected distinct values
-    for vals_dict in (filter_vals1, filter_vals2):
-        for dim, val in vals_dict.items():
-            valid = fv.get(dim, [])
-            if valid and val not in valid:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"{dim} must be one of {sorted(map(str, valid))}",
-                )
+    # Validate and coerce filter values against introspected distinct values.
+    _validate_and_coerce_filters([filter_vals1, filter_vals2], fv)
 
     dr1 = parse_dates(dates)
     dr2 = parse_dates(dates2)
@@ -277,7 +293,6 @@ async def allotaxonometer(
                 "domain": domain,
                 "dataset": dataset,
                 "dataset_version": dataset_obj.version,
-                "granularity": granularity,
                 "allotax_version": _allotax_version(),
             },
         })
@@ -366,12 +381,10 @@ async def rank_turbulence_divergence(
     entity: Optional[str] = Query(None, description="Global entity ID, e.g. 'wikidata:Q30' (United States)"),
     dates: Optional[str] = Query(None, description="Target date, e.g. '2026-02-17'"),
     dates2: Optional[str] = Query(None, description="Reference date, e.g. '2026-02-10'"),
-    granularity: str = Query("daily", description="Hive granularity: daily | weekly | monthly"),
     alpha: str = Query("0.25", description="RTD alpha parameter (number or 'inf')"),
     alphas: Optional[str] = Query(None, description="Comma-separated alphas for multi-alpha mode, e.g. '0.25,1.0,inf'"),
     ngram_limit: int = Query(10000, description="Max types to load per system (0 = no limit)"),
     limit: int = Query(10000, description="Max wordshift entries to return (0 = no limit)"),
-    n: int = Query(1, description="N-gram size (1 = unigrams, 2 = bigrams)"),
     db: AsyncSession = Depends(get_session),
 ):
     """Lightweight rank-turbulence divergence between two dates for a single entity.
@@ -384,6 +397,11 @@ async def rank_turbulence_divergence(
 
     Both `dates` and `dates2` must be provided. The frontend should compute
     valid dates from manifest.availability metadata.
+
+    **Filter dimensions** are passed as extra query params (not listed above).
+    Look up available filters via `GET /registry/{domain}/{dataset_id}`
+    (`transform.filter_dimensions`). Use the `dim` / `dim2` suffix convention:
+    `?sex=M` filters both systems, `?sex=M&sex2=F` compares across filter values.
     """
     try:
         alpha_f = float(alpha)
@@ -412,18 +430,15 @@ async def rank_turbulence_divergence(
     all_dims = get_queryable_dims(dataset_obj)
     defaults = get_partition_defaults(dataset_obj)
 
+    fv = dataset_obj.filter_values or {}
     qp = request.query_params
     filter_vals1 = {dim: qp[dim] for dim in all_dims if dim in qp}
     filter_vals2 = {dim: qp[f"{dim}2"] for dim in all_dims if f"{dim}2" in qp}
 
-    if "ngram_size" in all_dims:
-        if "n" in qp and "ngram_size" not in filter_vals1:
-            filter_vals1["ngram_size"] = n
-        if "n2" in qp and "ngram_size" not in filter_vals2:
-            filter_vals2["ngram_size"] = int(qp["n2"])
-
     _apply_defaults(filter_vals1, defaults)
     _apply_defaults(filter_vals2, defaults)
+
+    _validate_and_coerce_filters([filter_vals1, filter_vals2], fv)
 
     # Same entity for both systems (date-vs-date comparison)
     if not filter_vals2:
@@ -448,7 +463,7 @@ async def rank_turbulence_divergence(
         )
 
     with timed("discover", "Latest date from manifest"):
-        latest_date = _latest_from_manifest(dataset_obj, local_id, granularity)
+        latest_date = _latest_from_manifest(dataset_obj, local_id, filter_vals1.get("granularity"))
 
     with timed("query", "DuckDB data load"):
         with handle_query_error(f"{domain}/{dataset}"):
@@ -505,7 +520,7 @@ async def rank_turbulence_divergence(
                     "domain": domain,
                     "dataset": dataset,
                     "dataset_version": dataset_obj.version,
-                    "granularity": granularity,
+                    "filters": filter_vals1,
                     "ngram_limit": ngram_limit,
                     "limit": limit,
                     "types_target": len(sys_target["types"]),

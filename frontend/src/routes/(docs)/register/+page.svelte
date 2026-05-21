@@ -1,8 +1,13 @@
 <script lang="ts">
 	import * as Code from '$lib/components/ui/code';
+	import RegistrationFlowchart from '$lib/components/RegistrationFlowchart.svelte';
+	import { Check } from '@lucide/svelte';
+	import { Tooltip } from 'bits-ui';
 
-  import diagram from '$lib/assets/simple-diagram.png?enhanced';
-  
+	import diagram from '$lib/assets/simple-diagram.png?enhanced';
+
+	let { data } = $props();
+
 	// Step 1 — types-counts with filter_dimensions only. No entity axis, no time.
 	// The allotaxonometer can compare ?town=Arlington vs ?town2=Addison.
 	const step1 = `from storywrangler import Storywrangler
@@ -136,11 +141,13 @@ client.registry.register({
 })`;
 
 	// DuckDB translation for Step 4 — what the API runs internally per system.
-	const step4duckdb = `FROM read_parquet('1grams/*/*/*/*.parquet', hive_partitioning=true)
-WHERE country     = 'United States'    -- entity_mapping.local_id_column
-  AND date BETWEEN ? AND ?             -- time_dimension
-  AND granularity = 'daily'            -- auto-discovered partition (default injected)
-  AND ngram_size  = 1                  -- auto-discovered partition (default injected)`;
+	// build_hive_path() constructs exact paths from level_order, with wildcards
+	// for unspecified levels and concrete values where the caller provides them.
+	const step4duckdb = `FROM read_parquet(
+  'ngram_size=1/granularity=daily/country=United%20States/date=*/*.parquet',
+  hive_partitioning=true
+)
+WHERE date BETWEEN '2024-10-01' AND '2024-10-31'`;
 
 	// Curl preview for Step 4 — auto-discovered partitions passed as regular query params.
 	const step4curl = `curl "https://storywrangler.uvm.edu/storywrangler/allotax\\
@@ -148,13 +155,57 @@ WHERE country     = 'United States'    -- entity_mapping.local_id_column
   &entity=wikidata:Q30&entity2=wikidata:Q145\\
   &dates=2024-10-01,2024-10-31&dates2=2024-10-01,2024-10-31\\
   &granularity=daily"`;
+
+	// Step 5 — hash-bucketed hive partitions for ngram-first lookups.
+	const step5 = `from storywrangler import Storywrangler
+
+client = Storywrangler()
+client.registry.register({
+    "catalog": "vcsi",
+    "domain": "wikimedia",
+    "dataset_id": "sparklines",
+    "data_location": "/netfiles/compethicslab/wikimedia/sparklines",
+    "data_format": "parquet_hive",
+    "description": "Precomputed per-term sparkline time series (counts + rank) across all dates.",
+    "entity_mapping": {"local_id_column": "country", "entity_namespace": "wikidata"},
+    "entities": [
+        {"local_id": "United States",  "entity_id": "wikidata:Q30",  "entity_name": "United States"},
+        {"local_id": "United Kingdom", "entity_id": "wikidata:Q145", "entity_name": "United Kingdom"},
+        # ...
+    ],
+    "transform": {
+        "time_dimension": "date",
+        "hash_bucket": "ngram_bucket",   # ← content-sharded partition
+    },
+    "lineage": {
+        "repo": "https://github.com/Vermont-Complex-Systems/wikipedia-parsing",
+        "derived_from": ["wikimedia/ngrams"],  # this dataset is derived from the ngrams pipeline
+    },
+    "ownership": {"owner_group": "vcsi", "contact": "compstorylab@uvm.edu"},
+})`;
+
+	// Hash bucket directory layout
+	const step5layout = `sparklines/                          ← data_location
+  country=United%20States/
+    ngram_bucket=0/data.parquet        ← terms hashed to bucket 0
+    ngram_bucket=1/data.parquet
+    ...
+    ngram_bucket=15/data.parquet       ← 16 buckets for the US`;
+
+	// Hash bucket assignment in the transform step
+	const step5hash = `from storywrangler.hashing import assign_bucket
+
+# In your transform step — assign each row to a bucket
+bucket = assign_bucket(term="hello world", num_buckets=16)
+# → row goes into ngram_bucket={bucket}/data.parquet`;
+
+	// DuckDB translation — the API only reads the one bucket file containing the queried term.
+	const step5duckdb = `FROM read_parquet('sparklines/country=United%20States/ngram_bucket=7/data.parquet')
+WHERE ngram = 'hello world'
+ORDER BY date`;
 </script>
 
 <h1>Registering a dataset</h1>
-
-<div class="not-prose my-8">
-	<enhanced:img src={diagram} alt="Storywrangler platform diagram: a POST request with endpoint_schema, data_location, and data_format enters the Storywrangler Platform (a decision diamond), which validates schema and data availability, reads from File Storage below, and returns an allotax JSON response." class="w-full dark:invert" />
-</div>
 
 
 <p>
@@ -162,13 +213,39 @@ WHERE country     = 'United States'    -- entity_mapping.local_id_column
 	the <a href="/tools/allotaxonometer">allotaxonometer</a>, which can then be served anywhere
 	on the web. In this case, your submitted dataset must fulfil the instrument requirements you want
 	to access (e.g. the allotaxonometer requires a <code>types-counts</code> endpoint schema — see
-	the instrument page). It should also be part of an accepted domain. By default, endpoints can go
+	the instrument page). It should also be part of an {#if data.domains.length}<Tooltip.Provider>
+			<Tooltip.Root openDelay={150}>
+				<Tooltip.Trigger class="underline decoration-dotted underline-offset-2 cursor-help">accepted domain</Tooltip.Trigger>
+				<Tooltip.Portal>
+					<Tooltip.Content
+						class="z-50 rounded-xl border border-zinc-200 bg-zinc-50 p-3 shadow-md dark:border-zinc-800 dark:bg-zinc-900"
+						sideOffset={6}
+					>
+						<p class="text-foreground text-xs font-semibold mb-2">Accepted domains</p>
+						<ul class="text-muted-foreground text-xs space-y-1">
+							{#each data.domains as domain}
+								<li class="flex items-center gap-1.5">
+									<Check class="h-3 w-3 shrink-0 text-foreground" />
+									<span class="font-mono">{domain}</span>
+								</li>
+							{/each}
+						</ul>
+					</Tooltip.Content>
+				</Tooltip.Portal>
+			</Tooltip.Root>
+		</Tooltip.Provider>{:else}accepted domain{/if}. By default, endpoints can go
 	in the <code>guest</code> domain, but specifying a domain helps cluster related datasets and
 	improves discovery.
 </p>
 
 <p>
-	The minimal working registration. <code>types-counts</code> is the endpoint type for any
+	Registration starts minimal and progressively adds capabilities along three axes:
+</p>
+
+<RegistrationFlowchart />
+
+<p>
+	The rest of this page walks through each path. The minimal working registration. <code>types-counts</code> is the endpoint type for any
 	rank-frequency distribution: a column of token values and a column of counts. At least one
 	comparison axis is required — without one the API rejects the registration, since the
 	allotaxonometer has no way to distinguish system 1 from system 2.
@@ -257,7 +334,7 @@ without touching the data:</p>
 <Code.Root code={step3curl} lang="bash" hideLines={true}>
 </Code.Root>
 
-<h2>hive-partitioned storage</h2>
+<h2>Hive-partitioned storage</h2>
 
 <p>
 	The final form introduces <a href="https://duckdb.org/docs/current/data/partitioning/hive_partitioning">hive_partitioning</a> by setting <code>data_format</code> to <code>parquet_hive</code>. All hive partition levels are auto-discovered from the directory structure — you only need to declare <code>time_dimension</code>. <code>data_location</code> points to the root of the hive tree:
@@ -269,29 +346,55 @@ without touching the data:</p>
       country=United%20States/
         date=2024-01-01/data.parquet</code></pre>
 
-<p>
-	The subsequent directories below the data root should be of the form <code>col=val/</code> . This is geared towards performance, as duckdb will only read the relevant files when querying the data. This is particularly valuable in web apps where users could benefit from exploring arbitrary date ranges.
-</p>
-
 <Code.Root code={step4} lang="python">
 	<Code.CopyButton />
 </Code.Root>
 
 <p>
-	Each registration field maps directly to a clause in the DuckDB query the API runs per
-	system — it really is that simple:
+	At query time, known values (entity, partition defaults) are pinned directly
+	in the path, while the time level gets a wildcard and is filtered via <code>WHERE</code>.
+	DuckDB only opens the matching files — no directory scanning:
 </p>
 
 <Code.Root code={step4duckdb} lang="sql" hideLines={true}>
 </Code.Root>
 
-<p>
-	That result set is handed to the instrument as-is. Auto-discovered partition levels become
-	regular query params — the platform validates them against the introspected <code>filter_values</code>
-	and injects defaults for any omitted ones:
-</p>
+<p>Auto-discovered partition levels become regular query params with server-injected defaults:</p>
 
 <Code.Root code={step4curl} lang="bash" hideLines={true}>
+</Code.Root>
+
+<h2>Hash-bucketed partitions</h2>
+
+<p>
+	The previous example is <em>date-first</em>: fast for loading all terms in a time window.
+	For <em>term-first</em> lookups (e.g. a sparkline for a single word across all dates),
+	<code>transform.hash_bucket</code> adds a content-sharded partition level — each term is
+	hashed to a bucket, so the query layer reads exactly one file:
+</p>
+
+<Code.Root code={step5layout} hideLines={true}>
+</Code.Root>
+
+<p>
+	You only declare the column name — the server auto-derives bucket counts per entity:
+</p>
+
+<Code.Root code={step5} lang="python">
+	<Code.CopyButton />
+</Code.Root>
+
+<p>
+	In your transform step, use <code>assign_bucket()</code> from the SDK (same hash function as the query layer):
+</p>
+
+<Code.Root code={step5hash} lang="python">
+	<Code.CopyButton />
+</Code.Root>
+
+<p>At query time, the API hashes the term and reads only the matching bucket file:</p>
+
+<Code.Root code={step5duckdb} lang="sql" hideLines={true}>
 </Code.Root>
 
 <h2>Case studies</h2>

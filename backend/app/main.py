@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import time
 from contextlib import asynccontextmanager
@@ -15,7 +16,8 @@ from app.core.database import async_session_factory, init_db
 from app.core.exceptions import DataNotAvailableError, QueryError
 from app.core.timing import get_timings, init_timings
 from app.models.auth import User
-from app.routers import auth, babynames, open_academic_analytics, registry, scisciDB, storywrangler, wikimedia, zoning_bylaws
+from app.core.health_check import health_check_loop
+from app.routers import auth, babynames, health, open_academic_analytics, reddit, registry, scisciDB, storywrangler, wikimedia, zoning_bylaws
 
 log = logging.getLogger(__name__)
 
@@ -44,7 +46,13 @@ async def seed_admin() -> None:
 async def lifespan(_app: FastAPI):
     await init_db()
     await seed_admin()
+    health_task = asyncio.create_task(health_check_loop())
     yield
+    health_task.cancel()
+    try:
+        await health_task
+    except asyncio.CancelledError:
+        pass
 
 
 app = FastAPI(
@@ -125,10 +133,12 @@ app.include_router(registry.router, prefix="/registry", tags=["registry"])
 app.include_router(registry.admin_router, prefix="/admin/registry", tags=["admin"])
 app.include_router(babynames.router, prefix="/babynames", tags=["babynames"])
 app.include_router(storywrangler.router, prefix="/storywrangler", tags=["storywrangler"])
+app.include_router(reddit.router, prefix="/reddit", tags=["reddit"])
 app.include_router(wikimedia.router, prefix="/wikimedia", tags=["wikimedia"])
 app.include_router(open_academic_analytics.router, prefix="/open-academic-analytics", tags=["open-academic-analytics"])
 app.include_router(scisciDB.router, prefix="/scisciDB", tags=["scisciDB"])
 app.include_router(zoning_bylaws.router, prefix="/vt-zoning-atlas", tags=["vt-zoning-atlas"])
+app.include_router(health.router, prefix="/health", tags=["health"])
 
 
 @app.get("/")

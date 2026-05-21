@@ -1,4 +1,4 @@
-# Storywrangler Entity Standards v1.0
+# Storywrangler Entity Standards v0.0.3
 
 ## Table of Contents
 
@@ -743,6 +743,8 @@ Declares the query slice axes — how callers can filter the dataset at request 
 | `time_dimension` | OPTIONAL | Column name for time-range filtering (e.g. `year`, `date`). For `parquet_hive`, this is the hive partition column holding the time value |
 | `filter_dimensions` | OPTIONAL | Non-hive categorical columns inside parquet files where omitting the filter aggregates over all values (e.g. `["sex"]`). NOT needed for hive partition levels — those are auto-discovered |
 | `hash_bucket` | OPTIONAL | Hive partition column holding content-shard bucket IDs (e.g. `ngram_bucket`). Bucket counts per entity are auto-derived from the directory structure at registration. See §3.7.5.1 |
+| `hash_algorithm` | OPTIONAL | Hash algorithm for bucket routing. Currently only `murmur3_32` is supported. Defaults to `murmur3_32` |
+| `hash_seed` | OPTIONAL | Seed for the hash function. Defaults to `0` (matches DuckDB's `murmur3_32()` default) |
 
 **For `parquet_hive` datasets:** Hive partition levels do NOT need to be declared. They are auto-discovered from the directory structure and stored in `level_order` (§3.7.6). The minimal `transform` submission for a hive dataset is:
 
@@ -773,6 +775,9 @@ bucket = (murmur3_32(term, seed=0) & 0x7FFFFFFF) % count
 - `& 0x7FFFFFFF` clears the sign bit (murmur3 returns signed int32; bucket IDs MUST be ≥ 0)
 - Seed 0 matches DuckDB's `murmur3_32()` default
 - `count` is resolved per entity from the derived config
+- `hash_algorithm` and `hash_seed` are stored in the schema for machine-readable contract declaration
+
+**SDK function:** The SDK provides `storywrangler.hashing.assign_bucket(term, num_buckets)` — the canonical implementation of this algorithm. Pipelines MUST use this function (or an exact reimplementation) when partitioning files into bucket directories. This ensures consistency between data production and query-time routing.
 
 ---
 
@@ -1048,7 +1053,7 @@ The Technical Steering Committee reviews proposals quarterly.
 
 **Upon approval:**
 1. Specification added to next minor version
-2. Implementation in storywrangler SDK required
+2. Implementation in storywrangler-sdk required
 3. Migration guide published
 4. Announcement to community
 

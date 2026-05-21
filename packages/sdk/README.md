@@ -142,6 +142,48 @@ resolution.
 }
 ```
 
+## Instruments
+
+The SDK wraps the platform's analytical endpoints so you can call them from Python without building HTTP requests.
+
+### Allotaxonometer
+
+Compare two type-frequency systems using rank-turbulence divergence:
+
+```python
+result = client.instrument.allotax(
+    domain="wikimedia", dataset="ngrams",
+    entity="wikidata:Q30", entity2="wikidata:Q145",
+    dates="2024-10-01,2024-10-31",
+    alpha=1.0,
+)
+# result keys: normalization, delta_sum, diamond_counts, wordshift, balance, meta
+```
+
+Filter dimensions are passed as keyword arguments:
+
+```python
+result = client.instrument.allotax(
+    domain="babynames", dataset="ngrams",
+    dates="1925", dates2="2025",
+    sex="M", sex2="F",
+)
+```
+
+### RTD (lightweight)
+
+Fast date-vs-date wordshift (no diamond plot):
+
+```python
+result = client.instrument.rtd(
+    entity="wikidata:Q30",
+    dates="2026-02-17", dates2="2026-02-10",
+)
+# result keys: wordshift, alpha, meta
+```
+
+For the underlying computation without the platform, use the [`allotax`](https://pypi.org/project/allotax/) package directly.
+
 ## Hash Bucket Assignment
 
 For datasets with content-sharded partitions (`transform.hash_bucket`), use `assign_bucket()` to partition files consistently with the query layer:

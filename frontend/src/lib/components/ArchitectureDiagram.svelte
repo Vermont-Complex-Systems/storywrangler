@@ -87,7 +87,7 @@
 	<!-- Row 3: Web Applications (full width) -->
 	<div class="border-border rounded-xl border p-3">
 		<div class="flex items-center gap-2 mb-3">
-			<div class="bg-orange-100 dark:bg-orange-950 text-orange-600 dark:text-orange-400 flex h-7 w-7 items-center justify-center rounded-lg shrink-0">
+			<div class="bg-grey-100 dark:bg-grey-950 text-grey-600 dark:text-grey-400 flex h-7 w-7 items-center justify-center rounded-lg shrink-0">
 				<Monitor class="h-4 w-4" />
 			</div>
 			<p class="text-foreground text-xs font-semibold">Web Applications</p>
@@ -183,7 +183,7 @@
 		<foreignObject x="500" y="10" width="190" height="280">
 			<div xmlns="http://www.w3.org/1999/xhtml" class="p-3 h-full">
 				<div class="flex items-center gap-2 mb-3">
-					<div class="bg-orange-100 dark:bg-orange-950 text-orange-600 dark:text-orange-400 flex h-7 w-7 items-center justify-center rounded-lg shrink-0">
+					<div class="bg-grey-100 dark:bg-grey-950 text-grey-600 dark:text-grey-400 flex h-7 w-7 items-center justify-center rounded-lg shrink-0">
 						<Monitor class="h-4 w-4" />
 					</div>
 					<p class="text-foreground text-[10px] font-semibold">Web Applications</p>

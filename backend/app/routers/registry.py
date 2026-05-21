@@ -14,7 +14,7 @@ from sqlmodel import select
 from storywrangler_schemas.registry import DatasetCreate, EntityRow
 
 from ..core.database import get_session
-from ..core.duckdb_client import get_duckdb_client
+from ..core.duckdb_client import get_admin_duckdb_client
 from ..core.parquet_introspect import (
     _derive_bucket_config,
     _discover_levels,
@@ -23,7 +23,7 @@ from ..core.parquet_introspect import (
 )
 from ..core.registry_utils import get_latest_entry
 from ..models.auth import User
-from ..models.registry import RegistryEntry, EntityMapping, EntityGraph
+from ..models.registry import RegistryEntry, EntityMapping
 from .auth import get_admin_user, get_current_user
 
 log = logging.getLogger(__name__)
@@ -50,6 +50,7 @@ def _ex(body: dict, status: str = "200") -> dict:
 # Domains that have actual registered routers. Update when adding a new router to main.py.
 VALID_DOMAINS = {
     "wikimedia",
+    "reddit",
     "storywrangler",
     "babynames",
     "open-academic-analytics",
@@ -90,16 +91,59 @@ async def _upsert_entities(
     "/register",
     status_code=201,
     openapi_extra=_ex({
-        "message": "RegistryEntry 'ngrams' registered successfully",
-        "dataset": {
+            "catalog": "vcsi",
+            "domain": "wikimedia",
             "dataset_id": "ngrams",
+            "version": "latest",
+            "schema_version": "0.3.0",
             "data_location": "/data/wikigrams",
             "data_format": "parquet_hive",
             "description": "Wikipedia n-grams by frequency, date, and location.",
-            "manifest": {},
-        },
-        "derived": ["data_schema", "filter_values", "availability"],
-        "entities_upserted": 12,
+            "manifest": {
+                "availability": {
+                    "United States": {
+                        "daily": {"min": "2024-01-01", "max": "2026-04-20"},
+                    },
+                },
+            },
+            "data_schema": {
+                "ngram": "VARCHAR",
+                "pv_count": "BIGINT",
+                "date": "DATE",
+            },
+            "entity_mapping": {
+                "local_id_column": "location",
+                "namespace": "wikidata",
+            },
+            "endpoint_schema": {
+                "type": "types-counts",
+                "type_column": "ngram",
+                "count_column": "pv_count",
+            },
+            "transform": {
+                "time_dimension": "date",
+                "hash_bucket": {
+                    "column": "ngram_bucket",
+                    "default_count": 1,
+                    "overrides": {"United States": {"1": 16, "2": 32}},
+                },
+            },
+            "ownership": {
+                "owner_group": "Vermont Complex Systems Center",
+                "contact": "admin@example.org",
+            },
+            "lineage": {
+                "repo": "https://github.com/Vermont-Complex-Systems/wikigrams",
+            },
+            "level_order": [
+                {"column": "ngram_size", "type": "partition", "default_value": 1},
+                {"column": "granularity", "type": "partition", "default_value": "daily"},
+                {"column": "location", "type": "entity", "default_value": "Afghanistan"},
+                {"column": "ngram_bucket", "type": "hash_bucket", "default_value": 0},
+                {"column": "date", "type": "time", "default_value": "2020-01-01"},
+            ],
+            "created_at": "2024-01-15T10:00:00Z",
+            "updated_at": "2024-01-15T10:00:00Z",
     }, status="201"),
 )
 async def register_dataset(
@@ -139,7 +183,7 @@ async def register_dataset(
     #    When the submitter provides data_schema, glob-based schema introspection
     #    is skipped (allows registration during schema transitions).
     try:
-        conn = get_duckdb_client().connect()
+        conn = get_admin_duckdb_client().connect()
         derived.update(
             introspect(conn, dataset, provided_schema=dataset.data_schema,
                        level_order=derived.get("level_order"))
@@ -344,7 +388,7 @@ async def register_dataset(
         await db.commit()
         await db.refresh(existing)
         response.status_code = 200
-        msg: Dict[str, Any] = {"message": f"RegistryEntry '{dataset.dataset_id}' updated successfully"}
+        action = "updated"
     else:
         db_entry = RegistryEntry(
             dataset_id=dataset.dataset_id,
@@ -366,16 +410,7 @@ async def register_dataset(
         db.add(db_entry)
         await db.commit()
         await db.refresh(db_entry)
-        msg = {
-            "message": f"RegistryEntry '{dataset.dataset_id}' registered successfully",
-            "dataset": {
-                "dataset_id": db_entry.dataset_id,
-                "data_location": db_entry.data_location,
-                "data_format": db_entry.data_format,
-                "description": db_entry.description,
-                "manifest": db_entry.manifest,
-            },
-        }
+        action = "registered"
 
     # Upsert entities after the parent RegistryEntry is committed (FK requirement)
     entities_count = 0
@@ -398,8 +433,36 @@ async def register_dataset(
         if "level_order" in derived:
             entry.level_order = derived["level_order"]
         await db.commit()
-        msg["derived"] = list(derived.keys())
 
+    # Refresh to avoid MissingGreenlet on lazy-loaded attributes after commit.
+    await db.refresh(entry)
+
+    # Build full response after all fields (including derived) are persisted.
+    msg: Dict[str, Any] = {
+        "message": f"RegistryEntry '{dataset.dataset_id}' {action} successfully",
+        "dataset": {
+            "catalog": entry.catalog,
+            "domain": entry.domain,
+            "dataset_id": entry.dataset_id,
+            "version": entry.version,
+            "schema_version": entry.schema_version,
+            "data_location": entry.data_location,
+            "data_format": entry.data_format,
+            "description": entry.description,
+            "manifest": entry.manifest or {},
+            "data_schema": entry.data_schema,
+            "entity_mapping": entry.entity_mapping,
+            "endpoint_schema": entry.endpoint_schema,
+            "transform": entry.transform,
+            "ownership": entry.ownership,
+            "lineage": entry.lineage,
+            "level_order": entry.level_order,
+            "created_at": entry.created_at,
+            "updated_at": entry.updated_at,
+        },
+    }
+    if derived:
+        msg["derived"] = list(derived.keys())
     if entities_count:
         msg["entities_upserted"] = entities_count
     return msg
@@ -424,6 +487,15 @@ async def upsert_dataset_entities(
 
 # ── Public endpoints ───────────────────────────────────────────────────────────
 
+@router.get(
+    "/domains",
+    openapi_extra=_ex({"domains": sorted(VALID_DOMAINS)}),
+)
+async def list_valid_domains():
+    """List accepted domain names for dataset registration."""
+    return {"domains": sorted(VALID_DOMAINS)}
+
+
 @router.get("/", openapi_extra=_ex({"datasets": [_EXAMPLE_DATASET], "total": 1}))
 async def list_registered_datasets(db: AsyncSession = Depends(get_session)):
     """List all registered datasets (latest version per dataset)."""
@@ -445,6 +517,9 @@ async def list_registered_datasets(db: AsyncSession = Depends(get_session)):
                 "data_location": ds.data_location,
                 "data_format": ds.data_format,
                 "description": ds.description,
+                "endpoint_schema": ds.endpoint_schema,
+                "level_order": ds.level_order,
+                "filter_values": ds.filter_values,
                 "created_at": ds.created_at,
                 "updated_at": ds.updated_at,
             }
@@ -465,9 +540,10 @@ _SUMMARY_COLUMNS = [
     RegistryEntry.transform,        # query slice axes — small, needed by consumers
     RegistryEntry.ownership,        # governance metadata — small
     RegistryEntry.level_order,      # hive nesting order — small, shows full structure at a glance
+    RegistryEntry.filter_values,   # introspected distinct values per filter dim — small dict
     RegistryEntry.schema_version,
     RegistryEntry.created_at, RegistryEntry.updated_at,
-    # excluded: filter_values (medium), partition_index (can be large)
+    # excluded: partition_index (can be large)
 ]
 
 
@@ -559,6 +635,7 @@ async def get_dataset_info(
         "transform": ds.transform,
         "ownership": ds.ownership,
         "lineage": ds.lineage,
+        "filter_values": ds.filter_values,
         "level_order": ds.level_order,
         "created_at": ds.created_at,
         "updated_at": ds.updated_at,

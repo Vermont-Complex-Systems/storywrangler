@@ -10,8 +10,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..core.database import get_session
 from ..core.duckdb_client import get_duckdb_client
 from ..core.query_utils import (
-    assign_bucket, build_hive_path, get_bucket_config, get_partition_defaults,
-    get_queryable_dims, handle_query_error, load_system,
+    assign_bucket, build_hive_path, entity_base_path, get_bucket_config,
+    get_queryable_dims, handle_query_error, latest_from_manifest, load_system,
     parse_dates, resolve_bucket_count, resolve_entity,
 )
 from ..core.registry_utils import get_latest_entry
@@ -327,72 +327,6 @@ async def get_revision_deltas(
 
 # ── term-series ───────────────────────────────────────────────────────────────
 
-def _entity_base_path(dataset_obj, local_id, filter_vals):
-    """Build the Hive path up to the entity level (no date).
-
-    Used for DuckDB glob patterns in the slow-path daily partition fallback.
-    Uses build_hive_path with no time_value, so the time level becomes a
-    wildcard.
-    """
-    path = build_hive_path(
-        dataset_obj,
-        entity_value=local_id,
-        filter_vals=filter_vals,
-        glob_suffix="",
-    )
-    if path is None:
-        raise ValueError(
-            f"parquet_hive dataset '{dataset_obj.dataset_id}' has no level_order. "
-            "Re-register the dataset to populate level_order."
-        )
-    return path
-
-
-def _latest_from_manifest(dataset_obj, local_id, granularity=None):
-    """Read the latest available date from manifest.availability.
-
-    Availability is keyed by local_id (entity column value) with nested
-    partition dims and min/max bounds — populated at registration time by
-    parquet_introspect.
-
-    Handles any nesting depth:
-      - {"min": ..., "max": ...}                          (flat)
-      - {"daily": {"min": ..., "max": ...}}               (single partition)
-      - {"1": {"daily": {"min": ..., "max": ...}}}        (multi partition)
-      - {"US": {"1": {"daily": {"min":..,"max":..}}}}     (entity + multi partition)
-
-    Searches recursively for the granularity key, or falls back to traversing
-    the first path at each level until reaching a leaf with "max".
-    """
-    availability = (dataset_obj.manifest or {}).get("availability", {})
-    if not availability:
-        return None
-    if local_id is not None and local_id in availability:
-        entry = availability[local_id]
-    elif local_id is None:
-        entry = availability
-    else:
-        return None
-
-    def _find_max(d, target):
-        """Recursively find bounds, preferring *target* key at any depth."""
-        if not isinstance(d, dict):
-            return None
-        if "min" in d and "max" in d:
-            return d["max"]
-        if target and target in d:
-            return _find_max(d[target], None)
-        # Follow first available path
-        for v in d.values():
-            if isinstance(v, dict):
-                result = _find_max(v, target)
-                if result is not None:
-                    return result
-        return None
-
-    return _find_max(entry, granularity)
-
-
 @router.get(
     "/term-series",
     openapi_extra={
@@ -529,10 +463,10 @@ async def term_series(
     ngrams_filter_vals: dict = {
         dim: _dim_values[dim] for dim in ngrams_dims if dim in _dim_values
     }
-    entity_path = _entity_base_path(ngrams_obj, local_id, ngrams_filter_vals)
+    entity_path = entity_base_path(ngrams_obj, local_id, ngrams_filter_vals)
 
     with timed("discover", "Latest date from manifest"):
-        latest_date = _latest_from_manifest(ngrams_obj, local_id, granularity)
+        latest_date = latest_from_manifest(ngrams_obj, local_id, granularity)
 
     if not date:
         if not latest_date:
@@ -612,11 +546,11 @@ async def term_series(
                 except Exception:
                     pass  # articles files may not exist yet
 
-    # ── Slow path: scan daily partitions (fallback for terms not in sparkline) ──
+    # ── Slow path: partition scan (fallback for terms not in sparkline) ──
     if not sparkline_rows:
-        with timed("slow_query", "DuckDB daily partition scan"):
+        with timed("slow_query", "DuckDB partition scan"):
             conn = get_duckdb_client().connect()
-            glob_pattern = f"{entity_path}/date=*/data_0.parquet"
+            glob_pattern = f"{entity_path}/data_0.parquet"
 
             slow_rows = conn.execute(
                 f"""
@@ -814,8 +748,8 @@ async def term_series_batch(
     ngrams_filter_vals: dict = {
         dim: _dim_values[dim] for dim in ngrams_dims if dim in _dim_values
     }
-    entity_path = _entity_base_path(ngrams_obj, local_id, ngrams_filter_vals)
-    latest_date = _latest_from_manifest(ngrams_obj, local_id, granularity)
+    entity_path = entity_base_path(ngrams_obj, local_id, ngrams_filter_vals)
+    latest_date = latest_from_manifest(ngrams_obj, local_id, granularity)
 
     if not date:
         if not latest_date:
@@ -930,25 +864,28 @@ async def term_series_batch(
                 sparkline_rows = []
                 found_terms = set()
 
-    # ── Slow path: daily partition fallback for missing terms ──
+    # ── Slow path: partition fallback for missing terms ──
     missing_terms = [t for t in type_list if t not in found_terms]
     slow_results: dict = {}
     if missing_terms:
-        with timed("slow_query", "DuckDB daily partition scan"):
+        with timed("slow_query", "DuckDB partition scan"):
             conn = get_duckdb_client().connect()
-            glob_pattern = f"{entity_path}/date=*/data_0.parquet"
+            glob_pattern = f"{entity_path}/data_0.parquet"
             slow_placeholders = ", ".join(["?"] * len(missing_terms))
 
-            slow_rows = conn.execute(
-                f"""
-                SELECT ngram, date, pv_count, pv_rank, pv_freq
-                FROM read_parquet('{glob_pattern}', hive_partitioning=true)
-                WHERE ngram IN ({slow_placeholders})
-                  {date_filter}
-                ORDER BY ngram, date
-                """,
-                [*missing_terms, *date_params],
-            ).fetchall()
+            try:
+                slow_rows = conn.execute(
+                    f"""
+                    SELECT ngram, date, pv_count, pv_rank, pv_freq
+                    FROM read_parquet('{glob_pattern}', hive_partitioning=true)
+                    WHERE ngram IN ({slow_placeholders})
+                      {date_filter}
+                    ORDER BY ngram, date
+                    """,
+                    [*missing_terms, *date_params],
+                ).fetchall()
+            except Exception:
+                slow_rows = []
 
             # Articles live in the separate top_articles_ngrams dataset.
             slow_articles: dict = {}  # (ngram, date_str) -> [[url, score], ...]

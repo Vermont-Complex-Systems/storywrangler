@@ -520,3 +520,73 @@ def load_time_series(
 
     col_names = group_cols + ["count"]
     return [dict(zip(col_names, row)) for row in rows]
+
+
+# ── Term-series helpers ──────────────────────────────────────────────────────
+# Shared between wikimedia.py, reddit.py, and any future domain router that
+# provides sparkline / partition-scan term lookups.
+
+
+def entity_base_path(dataset_obj, local_id, filter_vals):
+    """Build the Hive path up to the entity level (no date).
+
+    Used for DuckDB glob patterns in the slow-path daily partition fallback.
+    Uses build_hive_path with no time_value, so the time level becomes a
+    wildcard.
+    """
+    path = build_hive_path(
+        dataset_obj,
+        entity_value=local_id,
+        filter_vals=filter_vals,
+        glob_suffix="",
+    )
+    if path is None:
+        raise ValueError(
+            f"parquet_hive dataset '{dataset_obj.dataset_id}' has no level_order. "
+            "Re-register the dataset to populate level_order."
+        )
+    return path
+
+
+def latest_from_manifest(dataset_obj, local_id, granularity=None):
+    """Read the latest available date from manifest.availability.
+
+    Availability is keyed by local_id (entity column value) with nested
+    partition dims and min/max bounds — populated at registration time by
+    parquet_introspect.
+
+    Handles any nesting depth:
+      - {"min": ..., "max": ...}                          (flat)
+      - {"daily": {"min": ..., "max": ...}}               (single partition)
+      - {"1": {"daily": {"min": ..., "max": ...}}}        (multi partition)
+      - {"US": {"1": {"daily": {"min":..,  "max":..}}}}   (entity + multi partition)
+
+    Searches recursively for the granularity key, or falls back to traversing
+    the first path at each level until reaching a leaf with "max".
+    """
+    availability = (dataset_obj.manifest or {}).get("availability", {})
+    if not availability:
+        return None
+    if local_id is not None and local_id in availability:
+        entry = availability[local_id]
+    elif local_id is None:
+        entry = availability
+    else:
+        return None
+
+    def _find_max(d, target):
+        """Recursively find bounds, preferring *target* key at any depth."""
+        if not isinstance(d, dict):
+            return None
+        if "min" in d and "max" in d:
+            return d["max"]
+        if target and target in d:
+            return _find_max(d[target], None)
+        for v in d.values():
+            if isinstance(v, dict):
+                result = _find_max(v, target)
+                if result is not None:
+                    return result
+        return None
+
+    return _find_max(entry, granularity)

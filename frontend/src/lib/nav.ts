@@ -26,5 +26,9 @@ export const nav = [
 			{ label: 'Wikimedia pipeline', href: '/case-studies/wikimedia' },
 			{ label: 'scisciDB pipeline', href: '/case-studies/scisciDB' }
 		]
+	},
+	{
+		title: 'Platform',
+		items: [{ label: 'Dataset health', href: '/status' }]
 	}
 ];

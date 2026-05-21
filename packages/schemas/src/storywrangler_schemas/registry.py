@@ -129,14 +129,18 @@ class ManifestConfig(BaseModel):
     availability: Optional[Dict] = Field(
         None,
         description=(
-            "Time coverage summary for display in the registry UI and for computing "
-            "valid date ranges (e.g. the /rtd endpoint requires explicit dates). "
-            "Auto-populated by `parquet_introspect` at registration time when "
-            "`transform.time_dimension` is set. Never read at query time.\n\n"
-            "Entity-first format, keyed by local_id with per-granularity min/max:\n\n"
+            "Coverage summary for the registry UI. Never read at query time. "
+            "Can be submitter-provided (arbitrary shape) or auto-derived — both are merged.\n\n"
+            "**Submitter-provided** — any summary stats relevant to your dataset:\n\n"
+            '```json\n{"stats": {"articles": 4059, "total_revisions": 776598, '
+            '"earliest": "2019-12-08T23:12:10Z", "latest": "2026-03-07T00:01:09Z"}}\n```\n\n'
+            "**Auto-derived** — when `transform.time_dimension` is set, `parquet_introspect` "
+            "computes min/max of the time column per entity and partition dimension at "
+            "registration time. Entity-first format:\n\n"
             '```json\n{"United States": {"daily": {"min": "2024-01-01", "max": "2026-04-20"}}}\n```\n\n'
-            "For datasets without entity_mapping (global):\n\n"
-            '```json\n{"daily": {"min": "2024-01-01", "max": "2026-04-20"}}\n```'
+            "For datasets without entity_mapping:\n\n"
+            '```json\n{"daily": {"min": "2024-01-01", "max": "2026-04-20"}}\n```\n\n'
+            "If both are present, auto-derived keys are merged into the submitter-provided dict."
         ),
     )
     partition_index: Optional[List[Dict]] = Field(
@@ -366,7 +370,7 @@ class DatasetCreate(BaseModel):
     )
     domain: str = Field(
         ...,
-        description="Owning service or router. Examples: `wikimedia`, `storywrangler`, `babynames`. See [valid domains](/docs/api-reference/registry).",
+        description="Owning service or router. Examples: `wikimedia`, `storywrangler`, `babynames`. Query `GET /registry/domains` for the current list.",
     )
     dataset_id: str = Field(
         ...,

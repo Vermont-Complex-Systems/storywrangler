@@ -11,6 +11,21 @@
 
 	type Operation = Record<string, unknown>;
 
+	interface LevelOrderEntry {
+		column: string;
+		type: string;
+		default_value: unknown;
+	}
+
+	interface Dataset {
+		domain: string;
+		dataset_id: string;
+		description?: string;
+		endpoint_schema?: { type?: string };
+		level_order?: LevelOrderEntry[];
+		filter_values?: Record<string, unknown[]>;
+	}
+
 	const HTTP_METHODS = ['get', 'post', 'put', 'patch', 'delete'];
 
 	const METHOD_BADGE: Record<string, string> = {
@@ -197,6 +212,40 @@
 		null
 	);
 
+	// ── Dataset filter helpers (instrument endpoints only) ────
+	const INSTRUMENT_TAGS = new Set(['storywrangler']);
+
+	const isInstrumentEndpoint = $derived(
+		endpoint
+			? ((endpoint.op.tags as string[]) ?? []).some((t) => INSTRUMENT_TAGS.has(t))
+			: false
+	);
+
+	const typesCountsDatasets = $derived(
+		(data.datasets as Dataset[]).filter(
+			(d) => d.endpoint_schema?.type === 'types-counts'
+		)
+	);
+
+	function getFilterDims(ds: Dataset): LevelOrderEntry[] {
+		return (ds.level_order ?? []).filter(
+			(l) => l.type === 'partition' || l.type === 'filter'
+		);
+	}
+
+	function formatValues(ds: Dataset, column: string): string {
+		const vals = ds.filter_values?.[column];
+		if (!vals || vals.length === 0) return '\u2014';
+		if (vals.length <= 10) return vals.map(String).join(', ');
+		const shown = vals.slice(0, 5).map(String).join(', ');
+		return `${shown} \u2026and ${vals.length - 5} more`;
+	}
+
+	function formatDefault(val: unknown): string {
+		if (val === undefined || val === null) return '\u2014';
+		return String(val);
+	}
+
 	// Reset selected status when navigating between endpoints
 	$effect(() => {
 		if (!endpoint) return;
@@ -300,6 +349,45 @@
 							</div>
 							{#if p.description}
 								<div class="mt-1 text-sm text-muted-foreground [&_p]:m-0 [&_ul]:my-1.5 [&_ul]:list-disc [&_ul]:pl-5 [&_ol]:my-1.5 [&_ol]:list-decimal [&_ol]:pl-5 [&_li]:my-0.5 [&_pre]:my-2 [&_pre]:rounded [&_pre]:bg-muted [&_pre]:p-2 [&_pre]:text-xs [&_code]:rounded [&_code]:bg-muted [&_code]:px-1 [&_code]:py-0.5 [&_code]:text-xs [&_strong]:text-foreground [&_a]:underline [&_a]:text-foreground"><Markdown md={p.description as string} plugins={mdPlugins} /></div>
+							{/if}
+						</div>
+					{/each}
+				</div>
+			{/if}
+
+			<!-- Available Datasets (instrument endpoints only) -->
+			{#if isInstrumentEndpoint && typesCountsDatasets.length > 0}
+				<h4 class="mt-8 mb-0 text-xs font-semibold uppercase tracking-wider text-muted-foreground">Available Datasets</h4>
+				<p class="mt-1 mb-3 text-xs text-muted-foreground">
+					Pass these as additional query parameters using the actual column names from each dataset.
+				</p>
+				<div class="flex flex-col gap-3">
+					{#each typesCountsDatasets as ds (ds.domain + '/' + ds.dataset_id)}
+						{@const filterDims = getFilterDims(ds)}
+						<div class="border border-border rounded-lg p-4">
+							<h5 class="text-foreground text-sm font-semibold mb-0.5">
+								{ds.domain}/{ds.dataset_id}
+							</h5>
+							{#if ds.description}
+								<p class="text-muted-foreground text-xs mb-3">{ds.description}</p>
+							{/if}
+
+							{#if filterDims.length > 0}
+								<div class="divide-y divide-border/30">
+									{#each filterDims as dim (dim.column)}
+										<div class="py-2 flex flex-wrap items-baseline gap-x-1.5 gap-y-1">
+											<code class="bg-muted rounded px-1.5 py-0.5 text-xs font-mono font-semibold text-foreground">{dim.column}</code>
+											<span class="text-xs text-muted-foreground">
+												default: <code class="font-mono">{formatDefault(dim.default_value)}</code>
+											</span>
+											<span class="text-xs text-muted-foreground">
+												&middot; {formatValues(ds, dim.column)}
+											</span>
+										</div>
+									{/each}
+								</div>
+							{:else}
+								<p class="text-muted-foreground text-xs italic">No filter dimensions.</p>
 							{/if}
 						</div>
 					{/each}

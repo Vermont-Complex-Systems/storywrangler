@@ -5,7 +5,9 @@
 	import { Callout } from '$lib/components/ui/callout';
 	import HomeFaq from '$lib/components/HomeFaq.svelte';
 
-	const installCode = `uv add storywrangler`;
+	const installCode = `uv init --python 3.12 # create environment
+uv sync # creates the ~/.venv
+uv add storywrangler`;
 
 	const usageCode = `# Import the SDK and the client module
 from storywrangler import Storywrangler, DatasetCreate
@@ -25,24 +27,45 @@ dataset = DatasetCreate(
     data_format="parquet",
     description="Babynames frequencies by year and sex in the US.",
 	  endpoint_schema={"type": "types-counts"},
-	  transform={"filter_dimensions": ["year", "sex"]},
+	  transform={"time_dimension": "year", "filter_dimensions": ["sex"]},
 	  ownership={"owner_group": "vcsi", "contact": "vcsi@uvm.edu"},
-    lineage={"repo": "https://github.com/Vermont-Complex-Systems/wikigrams"}
+    lineage={"repo": "https://github.com/Vermont-Complex-Systems/babynames"}
 )
 
 # Register
 client.registry.register(dataset)`;
 
-	const usageAllotax = `client.instrument.allotaxonomter(
-	domain="babynames",
-	dataset_id="ngrams",
-	year="1925"
-	year2="2025"
-	sex="M"
-	alpha=0.333,
-	ngram_limit=1,
-	wordshift_limit=1
-)`
+	const usageAllotax = `result = client.instrument.rtd(
+    domain="babynames",
+    dataset="ngrams",
+    entity="wikidata:Q30",
+    dates="1925",
+    dates2="2025",
+    sex="M",
+)
+print(result['wordshift'][:5]`;
+
+   const resAllotax = `[{'type': 'Jackson',
+  'rank1': 676.0,
+  'rank2': 74.0,
+  'divergence': 0.00013999022173321902},
+ {'type': 'Duvall',
+  'rank1': 10309.5,
+  'rank2': 428.0,
+  'divergence': 0.0001209265034150297},
+ {'type': 'Bunny',
+  'rank1': 564.0,
+  'rank2': 5765.0,
+  'divergence': -9.604679669786964e-05},
+ {'type': 'Weaver',
+  'rank1': 8522.5,
+  'rank2': 736.0,
+  'divergence': 9.389480911305102e-05},
+ {'type': 'Bowl',
+  'rank1': 254.0,
+  'rank2': 1169.0,
+  'divergence': -8.660948752039387e-05}]
+ `;
 
 	const dataframeCode = `types,counts,year,sex
 John,4394,1925,M
@@ -59,18 +82,18 @@ Peter,1464,1925,M
 		Storywrangler is a decentralized data catalog for <span style="background: linear-gradient(transparent 75%, rgba(192, 132, 252, 0.35) 45%)">complex system instruments</span> and <span style="background: linear-gradient(transparent 75%, rgba(251, 146, 60, 0.35) 45%)">data governance</span>
 	</h1>
 	<p class="text-muted-foreground text-sm md:text-lg max-w-2xl mx-auto">
-		Register your datasets once and unlock analytical tools out of the box. Built at the <a href="https://vermontcomplexsystems.org/" class="text-foreground underline underline-offset-4">Vermont Complex Systems Institute</a> to study collective attention as ecological timeseries, while improving data discoverability, ownership, and lineage tracking.
+		By register your datasets to the Storywrangler platform, you first gain access to cool instruments out of the box. Built at the <a href="https://vermontcomplexsystems.org/" class="text-foreground underline underline-offset-4">Vermont Complex Systems Institute</a> to study collective attention as ecological timeseries, while improving data discoverability, ownership, and lineage tracking.
 	</p>
 </div>
 
-<h2 class="font-baskerville font-regular text-xl md:text-4xl leading-snug tracking-tight mb-2 md:mb-5">Text as ecological signal</h2>
+	<h2 class="font-baskerville font-regular text-xl md:text-4xl leading-snug tracking-tight mb-2 md:mb-5">Text as ecological signal</h2>
 
 <p>
 	Storywrangler is hosting a set of tools to facilitate the study of large-scale text corpora. Text produced on social media (Bluesky, Reddit, Twitter), news outlets, Wikipedia, and higher education are treated as ecological time series — living records of how collective attention shifts across populations and over time.
 </p>
 
 <div class="not-prose mt-6 mb-2">
-	<img src="/storywrangler.png" alt="Text sources flow into the Storywrangler platform and produce analytical instruments like time series and allotaxonometer visualizations" class="w-full rounded-lg" />
+	<img src="/storywrangler.png" alt="Text sources flow into the Storywrangler platform and produce analytical instruments like time series and allotaxonometer visualizations" class="w-full rounded-lg dark:[filter:invert(.88)]" />
 </div>
 
 <h2 class="font-baskerville font-regular text-xl md:text-4xl leading-snug tracking-tight mb-2 md:mb-5">Storywrangler's architecture</h2>
@@ -122,6 +145,10 @@ Peter,1464,1925,M
 <Code.Root code={usageAllotax} lang="python">
 	<Code.CopyButton />
 </Code.Root>
+
+<p>Running this command you'll see:</p>
+
+<Code.Root code={resAllotax} hideLines={true} />
 
 <p>Under the hood, we are <a href="/versioning">versioning</a> the interaction of the allotaxonometer tool and the submitted babynames pipeline for reproducibility.</p>
 
