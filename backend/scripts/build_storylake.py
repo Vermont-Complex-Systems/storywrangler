@@ -69,13 +69,14 @@ def _resolve_views(
     base_name: str,
     data_format: str,
     data_location: str,
-    ep: dict,
+    level_order: list | None,
 ) -> list[tuple[str, str]]:
     """Return a list of (view_name, FROM_expression) pairs for a dataset.
 
-    Most datasets yield a single pair.  parquet_hive datasets with
-    granularities yield one pair per granularity so that differing
-    hive-partition keys don't conflict (e.g. date= vs month=).
+    For parquet_hive with level_order (derived at registration), builds a
+    fixed-depth wildcard glob — one ``/*`` per hive level — matching the
+    query layer's ``_path_expr()``. This avoids DuckDB recursively walking
+    the whole tree over NFS every time a view is queried.
     """
 
     if data_format == "parquet":
@@ -85,17 +86,13 @@ def _resolve_views(
         return [(base_name, f"read_parquet('{data_location}')")]
 
     if data_format == "parquet_hive":
-        granularities = (ep or {}).get("granularities") or {}
-        if granularities:
-            return [
-                (
-                    f"{base_name}__{gran}",
-                    f"read_parquet('{data_location}/{gran}/**/*.parquet', hive_partitioning=true)",
-                )
-                for gran in granularities
-            ]
-        # No granularity split — single flat glob
-        return [(base_name, f"read_parquet('{data_location}/**/*.parquet', hive_partitioning=true)")]
+        if level_order:
+            wildcards = "/*" * len(level_order)
+            glob = f"{data_location}{wildcards}/*.parquet"
+        else:
+            # Pre-level_order dataset — recursive fallback (re-register to fix)
+            glob = f"{data_location}/**/*.parquet"
+        return [(base_name, f"read_parquet('{glob}', hive_partitioning=true)")]
 
     return []
 
@@ -117,18 +114,22 @@ def build() -> None:
             f"AS reg (TYPE POSTGRES, READ_ONLY);"
         )
 
+        # Latest version per (domain, dataset_id) — the registry keeps one
+        # row per version, and only the newest should back the view.
         rows = conn.execute(
-            "SELECT domain, dataset_id, data_format, data_location, manifest, endpoint_schema "
-            "FROM reg.public.registry ORDER BY domain, dataset_id"
+            "SELECT DISTINCT ON (domain, dataset_id) "
+            "       domain, dataset_id, data_format, data_location, level_order "
+            "FROM reg.public.registry "
+            "ORDER BY domain, dataset_id, created_at DESC"
         ).fetchall()
 
         print(f"Building {STORYLAKE_PATH}  ({len(rows)} registered datasets)\n")
 
-        for domain, dataset_id, data_format, data_location_raw, _fc_raw, ep_raw in rows:
-            ep   = json.loads(ep_raw) if ep_raw else {}
+        for domain, dataset_id, data_format, data_location_raw, level_order_raw in rows:
+            level_order = json.loads(level_order_raw) if level_order_raw else None
             base = _view_name(domain, dataset_id, rows)
             data_location = _parse_location(data_location_raw)
-            pairs = _resolve_views(base, data_format, data_location, ep)
+            pairs = _resolve_views(base, data_format, data_location, level_order)
 
             if not pairs:
                 print(f"  SKIP  {base:30s}  (format '{data_format}' not yet supported)")
