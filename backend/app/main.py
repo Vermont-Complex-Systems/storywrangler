@@ -165,13 +165,22 @@ app.include_router(auth.router, prefix="/auth", tags=["auth"])
 app.include_router(auth.admin_router, prefix="/admin/auth", tags=["admin"])
 app.include_router(registry.router, prefix="/registry", tags=["registry"])
 app.include_router(registry.admin_router, prefix="/admin/registry", tags=["admin"])
-app.include_router(babynames.router, prefix="/babynames", tags=["babynames"])
-app.include_router(storywrangler.router, prefix="/storywrangler", tags=["storywrangler"])
-app.include_router(reddit.router, prefix="/reddit", tags=["reddit"])
-app.include_router(wikimedia.router, prefix="/wikimedia", tags=["wikimedia"])
-app.include_router(open_academic_analytics.router, prefix="/open-academic-analytics", tags=["open-academic-analytics"])
-app.include_router(scisciDB.router, prefix="/scisciDB", tags=["scisciDB"])
-app.include_router(zoning_bylaws.router, prefix="/vt-zoning-atlas", tags=["vt-zoning-atlas"])
+
+# Dataset-domain routers. Single source of truth: the keys double as the
+# accepted `domain` values for dataset registration (registry.VALID_DOMAINS).
+DOMAIN_ROUTERS = {
+    "babynames": babynames.router,
+    "storywrangler": storywrangler.router,
+    "reddit": reddit.router,
+    "wikimedia": wikimedia.router,
+    "open-academic-analytics": open_academic_analytics.router,
+    "scisciDB": scisciDB.router,
+    "vt-zoning-atlas": zoning_bylaws.router,
+}
+for _domain, _router in DOMAIN_ROUTERS.items():
+    app.include_router(_router, prefix=f"/{_domain}", tags=[_domain])
+registry.VALID_DOMAINS = set(DOMAIN_ROUTERS)
+
 app.include_router(health.router, prefix="/health", tags=["health"])
 
 

@@ -3,6 +3,7 @@ Registry endpoints — discover and inspect registered file-based datasets.
 """
 
 import logging
+import re
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -47,16 +48,11 @@ def _ex(body: dict, status: str = "200") -> dict:
     """Wrap an example body in the openapi_extra responses structure."""
     return {"responses": {status: {"content": {"application/json": {"example": body}}}}}
 
-# Domains that have actual registered routers. Update when adding a new router to main.py.
-VALID_DOMAINS = {
-    "wikimedia",
-    "reddit",
-    "storywrangler",
-    "babynames",
-    "open-academic-analytics",
-    "scisciDB",
-    "vt-zoning-atlas",
-}
+# Domains that have actual registered routers. Populated by main.py from its
+# DOMAIN_ROUTERS map at import time — one source of truth for both routing
+# and registration validation. Empty only when this module is used without
+# the app (in which case rejecting every domain is the loud, correct failure).
+VALID_DOMAINS: set = set()
 
 async def _upsert_entities(
     db: AsyncSession,
@@ -64,10 +60,19 @@ async def _upsert_entities(
     dataset_id: str,
     entities: List[EntityRow],
 ) -> int:
-    """Upsert entity mapping rows. Returns count upserted."""
-    for entity in entities:
-        row_id = f"{domain}:{dataset_id}:{entity.local_id}"
-        existing = await db.get(EntityMapping, row_id)
+    """Upsert entity mapping rows. Returns count upserted.
+
+    Fetches all existing rows in one SELECT (instead of one db.get per
+    entity) so large rosters don't pay an N+1 round-trip cost.
+    """
+    row_ids = [f"{domain}:{dataset_id}:{e.local_id}" for e in entities]
+    result = await db.execute(
+        select(EntityMapping).where(EntityMapping.id.in_(row_ids))
+    )
+    existing_rows = {row.id: row for row in result.scalars()}
+
+    for entity, row_id in zip(entities, row_ids):
+        existing = existing_rows.get(row_id)
         if existing:
             existing.entity_id = entity.entity_id
             existing.entity_name = entity.entity_name
@@ -83,6 +88,185 @@ async def _upsert_entities(
                 entity_ids=entity.entity_ids,
             ))
     return len(entities)
+
+
+# ── Registration validation helpers ────────────────────────────────────────────
+
+# Declared column names are interpolated (unparameterized) into DuckDB SQL by
+# the query layer, so they must be plain identifiers. This is the trust
+# boundary that keeps a submitter-provided data_schema from becoming SQL
+# injection.
+_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _validate_column_identifiers(dataset: DatasetCreate) -> None:
+    """Reject declared column names that are not plain SQL identifiers."""
+    declared: Dict[str, Any] = {}
+    if dataset.endpoint_schema:
+        declared["endpoint_schema.type_column"] = dataset.endpoint_schema.type_column
+        declared["endpoint_schema.count_column"] = dataset.endpoint_schema.count_column
+    if dataset.transform:
+        declared["transform.time_dimension"] = dataset.transform.time_dimension
+        for fd in dataset.transform.filter_dimensions or []:
+            declared[f"transform.filter_dimensions[{fd!r}]"] = fd
+        for tp in getattr(dataset.transform, "time_partitions", None) or []:
+            declared[f"transform.time_partitions[{tp!r}]"] = tp
+        hb = dataset.transform.hash_bucket
+        if isinstance(hb, str):
+            declared["transform.hash_bucket"] = hb
+    if dataset.entity_mapping:
+        declared["entity_mapping.local_id_column"] = dataset.entity_mapping.local_id_column
+    for col in (dataset.data_schema or {}):
+        declared[f"data_schema[{col!r}]"] = col
+
+    bad = sorted(
+        f"{where} = {name!r}"
+        for where, name in declared.items()
+        if name is not None and not _IDENT_RE.match(str(name))
+    )
+    if bad:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Column names must be plain identifiers "
+                "(letters, digits, underscore; not starting with a digit). "
+                f"Invalid: {bad}"
+            ),
+        )
+
+
+def _validate_types_counts(dataset: DatasetCreate, derived: Dict[str, Any]) -> None:
+    """Pre-registration checks for endpoint_schema.type == 'types-counts'."""
+    ep = dataset.endpoint_schema
+
+    # 1. Require at least one comparison axis so the allotaxonometer can distinguish
+    # system 1 from system 2.  Any of the four axes is sufficient:
+    #   entity_mapping        → ?entity=X  vs ?entity2=Y
+    #   time_dimension        → ?dates=D1  vs ?dates2=D2
+    #   filter_dimensions     → ?sex=M     vs ?sex2=F
+    #   hive_levels           → ?gran=daily vs ?gran2=weekly (auto-discovered)
+    has_entity      = bool(dataset.entity_mapping)
+    has_time        = bool(dataset.transform and dataset.transform.time_dimension)
+    has_filter      = bool(dataset.transform and dataset.transform.filter_dimensions)
+    has_hive_levels = bool(derived.get("level_order"))
+    if not any([has_entity, has_time, has_filter, has_hive_levels]):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "types-counts datasets require at least one comparison axis so the "
+                "allotaxonometer can distinguish system 1 from system 2. Declare one of: "
+                "entity_mapping, transform.time_dimension, transform.filter_dimensions, "
+                "or use parquet_hive format (hive levels are auto-discovered). "
+                "See https://github.com/vermont-complex-systems/Storywrangler-Specification for the spec."
+            ),
+        )
+
+    # 2. If we could read the schema, verify the declared columns exist.
+    data_schema = derived.get("data_schema") or {}
+    if data_schema:
+        type_col  = ep.type_column  or "types"
+        count_col = ep.count_column or "counts"
+        expected = [type_col, count_col]
+        if dataset.transform and dataset.transform.time_dimension:
+            expected.append(dataset.transform.time_dimension)
+        missing = [c for c in expected if c not in data_schema]
+        if missing:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"Column(s) {missing} not found in dataset schema {sorted(data_schema)}. "
+                    "Verify endpoint_schema.type_column, endpoint_schema.count_column, "
+                    "and transform.time_dimension match the actual column names. "
+                    "See https://github.com/vermont-complex-systems/Storywrangler-Specification for the spec."
+                ),
+            )
+
+
+def _validate_time_series(dataset: DatasetCreate, derived: Dict[str, Any]) -> None:
+    """Pre-registration checks for endpoint_schema.type == 'time-series'."""
+    ep = dataset.endpoint_schema
+
+    # 1. Require transform.time_dimension — a time series without a time column is invalid.
+    if not (dataset.transform and dataset.transform.time_dimension):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "time-series datasets require transform.time_dimension to declare the temporal column "
+                "(e.g. 'year' or 'date'). "
+                "See https://github.com/vermont-complex-systems/Storywrangler-Specification for the spec."
+            ),
+        )
+
+    # 2. Require at least one groupable dimension.
+    has_filter      = bool(dataset.transform.filter_dimensions)
+    has_hive_levels = bool(derived.get("level_order"))
+    if not has_filter and not has_hive_levels:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "time-series datasets require at least one groupable dimension: "
+                "declare transform.filter_dimensions or use parquet_hive format "
+                "(hive levels are auto-discovered). "
+                "See https://github.com/vermont-complex-systems/Storywrangler-Specification for the spec."
+            ),
+        )
+
+    # 3. If we could read the schema, verify all declared columns exist.
+    data_schema = derived.get("data_schema") or {}
+    if data_schema:
+        time_col    = dataset.transform.time_dimension
+        count_col   = ep.count_column or "count"
+        filter_cols = list(dataset.transform.filter_dimensions or [])
+        expected    = [time_col, count_col] + filter_cols
+        missing     = [c for c in expected if c not in data_schema]
+        if missing:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"Column(s) {missing} not found in dataset schema {sorted(data_schema)}. "
+                    "Verify transform.time_dimension, endpoint_schema.count_column (defaults to 'count'), "
+                    "and transform.filter_dimensions match the actual column names. "
+                    "See https://github.com/vermont-complex-systems/Storywrangler-Specification for the spec."
+                ),
+            )
+
+
+_INT_TYPES = {"BIGINT", "INTEGER", "SMALLINT", "TINYINT", "INT", "INT4", "INT8", "INT2"}
+_FLOAT_TYPES = {"DOUBLE", "FLOAT", "REAL", "DECIMAL", "NUMERIC"}
+
+
+def _coerce(val, col_type: str):
+    """Coerce a string value to the appropriate Python type based on schema."""
+    upper = col_type.upper()
+    try:
+        if upper in _INT_TYPES:
+            return int(val)
+        if upper in _FLOAT_TYPES:
+            return float(val)
+    except (ValueError, TypeError):
+        pass
+    return val
+
+
+def _coerce_derived(derived: Dict[str, Any]) -> None:
+    """Type-coerce filter_values and level_order defaults using data_schema.
+
+    os.listdir()-based filter_values are always strings ("1", "0.17") but
+    query-time validation expects typed values (int 1, float 0.17). Mutates
+    *derived* in place.
+    """
+    schema = derived.get("data_schema") or {}
+
+    fv = derived.get("filter_values") or {}
+    for col, values in fv.items():
+        col_type = schema.get(col, "")
+        if col_type and values and isinstance(values[0], str):
+            fv[col] = [_coerce(v, col_type) for v in values]
+
+    for lv in derived.get("level_order") or []:
+        col_type = schema.get(lv["column"], "")
+        if col_type and lv.get("default_value") is not None:
+            lv["default_value"] = _coerce(lv["default_value"], col_type)
 
 
 # ── Public write endpoints ─────────────────────────────────────────────────────
@@ -161,6 +345,30 @@ async def register_dataset(
 
     # ── Pre-registration validation ─────────────────────────────────────────────
 
+    # 0a. Column names end up interpolated into SQL — reject non-identifiers
+    #     before anything else.
+    _validate_column_identifiers(dataset)
+
+    # 0b. Immutable snapshot guard — check before the (expensive) filesystem
+    #     walk and parquet introspection, not after.
+    result = await db.execute(
+        select(RegistryEntry).where(
+            RegistryEntry.domain == dataset.domain,
+            RegistryEntry.dataset_id == dataset.dataset_id,
+            RegistryEntry.version == dataset.version,
+        )
+    )
+    existing = result.scalar_one_or_none()
+    if existing and dataset.version != "latest":
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Version '{dataset.version}' of '{dataset.domain}/{dataset.dataset_id}' "
+                "already exists and is immutable. Bump the version string or use "
+                "version='latest' for the mutable development slot."
+            ),
+        )
+
     # 1. Discover hive levels first (cheap filesystem walk) — needed by introspect()
     #    to know which columns to scan for filter_values.
     derived: Dict[str, Any] = {}
@@ -183,11 +391,11 @@ async def register_dataset(
     #    When the submitter provides data_schema, glob-based schema introspection
     #    is skipped (allows registration during schema transitions).
     try:
-        conn = get_admin_duckdb_client().connect()
-        derived.update(
-            introspect(conn, dataset, provided_schema=dataset.data_schema,
-                       level_order=derived.get("level_order"))
-        )
+        with get_admin_duckdb_client().timed_connect() as conn:
+            derived.update(
+                introspect(conn, dataset, provided_schema=dataset.data_schema,
+                           level_order=derived.get("level_order"))
+            )
     except Exception as e:
         log.warning("Parquet introspection failed for %s/%s: %s", dataset.domain, dataset.dataset_id, e)
         derived["introspect_error"] = str(e)
@@ -207,151 +415,16 @@ async def register_dataset(
         )
 
     # 3. Type-coerce filter_values and level_order default_values using data_schema.
-    #    os.listdir()-based filter_values are always strings ("1", "0.17") but
-    #    query-time validation expects typed values (int 1, float 0.17).
-    #    Use the introspected data_schema to determine the correct type.
-    schema = derived.get("data_schema") or {}
-    _INT_TYPES = {"BIGINT", "INTEGER", "SMALLINT", "TINYINT", "INT", "INT4", "INT8", "INT2"}
-    _FLOAT_TYPES = {"DOUBLE", "FLOAT", "REAL", "DECIMAL", "NUMERIC"}
+    _coerce_derived(derived)
 
-    def _coerce(val, col_type: str):
-        """Coerce a string value to the appropriate Python type based on schema."""
-        upper = col_type.upper()
-        try:
-            if upper in _INT_TYPES:
-                return int(val)
-            if upper in _FLOAT_TYPES:
-                return float(val)
-        except (ValueError, TypeError):
-            pass
-        return val
-
-    # Coerce filter_values
-    fv = derived.get("filter_values") or {}
-    for col, values in fv.items():
-        col_type = schema.get(col, "")
-        if col_type and values and isinstance(values[0], str):
-            fv[col] = [_coerce(v, col_type) for v in values]
-
-    # Coerce level_order default_values
-    for lv in derived.get("level_order") or []:
-        col = lv["column"]
-        col_type = schema.get(col, "")
-        if col_type and lv.get("default_value") is not None:
-            lv["default_value"] = _coerce(lv["default_value"], col_type)
-
+    # 4. Endpoint-type validation suites.
     if dataset.endpoint_schema and dataset.endpoint_schema.type == "types-counts":
-        ep = dataset.endpoint_schema
-
-        # 1. Require at least one comparison axis so the allotaxonometer can distinguish
-        # system 1 from system 2.  Any of the four axes is sufficient:
-        #   entity_mapping        → ?entity=X  vs ?entity2=Y
-        #   time_dimension        → ?dates=D1  vs ?dates2=D2
-        #   filter_dimensions     → ?sex=M     vs ?sex2=F
-        #   hive_levels           → ?gran=daily vs ?gran2=weekly (auto-discovered)
-        has_entity      = bool(dataset.entity_mapping)
-        has_time        = bool(dataset.transform and dataset.transform.time_dimension)
-        has_filter      = bool(dataset.transform and dataset.transform.filter_dimensions)
-        has_hive_levels = bool(derived.get("level_order"))
-        if not any([has_entity, has_time, has_filter, has_hive_levels]):
-            raise HTTPException(
-                status_code=422,
-                detail=(
-                    "types-counts datasets require at least one comparison axis so the "
-                    "allotaxonometer can distinguish system 1 from system 2. Declare one of: "
-                    "entity_mapping, transform.time_dimension, transform.filter_dimensions, "
-                    "or use parquet_hive format (hive levels are auto-discovered). "
-                    "See https://github.com/vermont-complex-systems/Storywrangler-Specification for the spec."
-                ),
-            )
-
-        # 2. If we could read the schema, verify the declared columns exist.
-        data_schema = derived.get("data_schema") or {}
-        if data_schema:
-            type_col  = ep.type_column  or "types"
-            count_col = ep.count_column or "counts"
-            expected = [type_col, count_col]
-            if dataset.transform and dataset.transform.time_dimension:
-                expected.append(dataset.transform.time_dimension)
-            missing = [c for c in expected if c not in data_schema]
-            if missing:
-                raise HTTPException(
-                    status_code=422,
-                    detail=(
-                        f"Column(s) {missing} not found in dataset schema {sorted(data_schema)}. "
-                        "Verify endpoint_schema.type_column, endpoint_schema.count_column, "
-                        "and transform.time_dimension match the actual column names. "
-                        "See https://github.com/vermont-complex-systems/Storywrangler-Specification for the spec."
-                    ),
-                )
-
+        _validate_types_counts(dataset, derived)
     if dataset.endpoint_schema and dataset.endpoint_schema.type == "time-series":
-        ep = dataset.endpoint_schema
-
-        # 1. Require transform.time_dimension — a time series without a time column is invalid.
-        if not (dataset.transform and dataset.transform.time_dimension):
-            raise HTTPException(
-                status_code=422,
-                detail=(
-                    "time-series datasets require transform.time_dimension to declare the temporal column "
-                    "(e.g. 'year' or 'date'). "
-                    "See https://github.com/vermont-complex-systems/Storywrangler-Specification for the spec."
-                ),
-            )
-
-        # 2. Require at least one groupable dimension.
-        has_filter      = bool(dataset.transform.filter_dimensions)
-        has_hive_levels = bool(derived.get("level_order"))
-        if not has_filter and not has_hive_levels:
-            raise HTTPException(
-                status_code=422,
-                detail=(
-                    "time-series datasets require at least one groupable dimension: "
-                    "declare transform.filter_dimensions or use parquet_hive format "
-                    "(hive levels are auto-discovered). "
-                    "See https://github.com/vermont-complex-systems/Storywrangler-Specification for the spec."
-                ),
-            )
-
-        # 3. If we could read the schema, verify all declared columns exist.
-        data_schema = derived.get("data_schema") or {}
-        if data_schema:
-            time_col    = dataset.transform.time_dimension
-            count_col   = ep.count_column or "count"
-            filter_cols = list(dataset.transform.filter_dimensions or [])
-            expected    = [time_col, count_col] + filter_cols
-            missing     = [c for c in expected if c not in data_schema]
-            if missing:
-                raise HTTPException(
-                    status_code=422,
-                    detail=(
-                        f"Column(s) {missing} not found in dataset schema {sorted(data_schema)}. "
-                        "Verify transform.time_dimension, endpoint_schema.count_column (defaults to 'count'), "
-                        "and transform.filter_dimensions match the actual column names. "
-                        "See https://github.com/vermont-complex-systems/Storywrangler-Specification for the spec."
-                    ),
-                )
+        _validate_time_series(dataset, derived)
 
     # ── Upsert ──────────────────────────────────────────────────────────────────
-    result = await db.execute(
-        select(RegistryEntry).where(
-            RegistryEntry.domain == dataset.domain,
-            RegistryEntry.dataset_id == dataset.dataset_id,
-            RegistryEntry.version == dataset.version,
-        )
-    )
-    existing = result.scalar_one_or_none()
-
-    # Immutable snapshot guard: reject re-registration of any version except 'latest'
-    if existing and dataset.version != "latest":
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                f"Version '{dataset.version}' of '{dataset.domain}/{dataset.dataset_id}' "
-                "already exists and is immutable. Bump the version string or use "
-                "version='latest' for the mutable development slot."
-            ),
-        )
+    # `existing` was fetched (and the immutability guard applied) before introspection.
 
     # Serialize nested Pydantic models to plain dicts for JSON columns
     def _dump(obj) -> dict | None:
@@ -440,26 +513,7 @@ async def register_dataset(
     # Build full response after all fields (including derived) are persisted.
     msg: Dict[str, Any] = {
         "message": f"RegistryEntry '{dataset.dataset_id}' {action} successfully",
-        "dataset": {
-            "catalog": entry.catalog,
-            "domain": entry.domain,
-            "dataset_id": entry.dataset_id,
-            "version": entry.version,
-            "schema_version": entry.schema_version,
-            "data_location": entry.data_location,
-            "data_format": entry.data_format,
-            "description": entry.description,
-            "manifest": entry.manifest or {},
-            "data_schema": entry.data_schema,
-            "entity_mapping": entry.entity_mapping,
-            "endpoint_schema": entry.endpoint_schema,
-            "transform": entry.transform,
-            "ownership": entry.ownership,
-            "lineage": entry.lineage,
-            "level_order": entry.level_order,
-            "created_at": entry.created_at,
-            "updated_at": entry.updated_at,
-        },
+        "dataset": _entry_response(entry),
     }
     if derived:
         msg["derived"] = list(derived.keys())
@@ -529,6 +583,35 @@ async def list_registered_datasets(db: AsyncSession = Depends(get_session)):
     }
 
 
+def _entry_response(ds, *, manifest: Optional[dict] = None) -> Dict[str, Any]:
+    """Serialize a RegistryEntry for API responses.
+
+    *manifest* overrides ds.manifest (used by ?full=true to re-inject
+    partition_index).
+    """
+    return {
+        "catalog": ds.catalog,
+        "domain": ds.domain,
+        "dataset_id": ds.dataset_id,
+        "version": ds.version,
+        "schema_version": ds.schema_version,
+        "data_location": ds.data_location,
+        "data_format": ds.data_format,
+        "description": ds.description,
+        "manifest": manifest if manifest is not None else (ds.manifest or {}),
+        "data_schema": ds.data_schema,
+        "entity_mapping": ds.entity_mapping,
+        "endpoint_schema": ds.endpoint_schema,
+        "transform": ds.transform,
+        "ownership": ds.ownership,
+        "lineage": ds.lineage,
+        "filter_values": ds.filter_values,
+        "level_order": ds.level_order,
+        "created_at": ds.created_at,
+        "updated_at": ds.updated_at,
+    }
+
+
 _SUMMARY_COLUMNS = [
     RegistryEntry.domain, RegistryEntry.dataset_id, RegistryEntry.version,
     RegistryEntry.data_location, RegistryEntry.data_format,
@@ -584,26 +667,7 @@ async def get_dataset_info(
         manifest_full = dict(ds.manifest or {})
         if ds.partition_index is not None:
             manifest_full["partition_index"] = ds.partition_index
-        return {
-            "domain": ds.domain,
-            "dataset_id": ds.dataset_id,
-            "version": ds.version,
-            "schema_version": ds.schema_version,
-            "data_location": ds.data_location,
-            "data_format": ds.data_format,
-            "description": ds.description,
-            "manifest": manifest_full,
-            "data_schema": ds.data_schema,
-            "entity_mapping": ds.entity_mapping,
-            "endpoint_schema": ds.endpoint_schema,
-            "transform": ds.transform,
-            "ownership": ds.ownership,
-            "lineage": ds.lineage,
-            "filter_values": ds.filter_values,
-            "level_order": ds.level_order,
-            "created_at": ds.created_at,
-            "updated_at": ds.updated_at,
-        }
+        return _entry_response(ds, manifest=manifest_full)
 
     # Non-full: lightweight query — skips filter_values and partition_index.
     where = [RegistryEntry.domain == domain, RegistryEntry.dataset_id == dataset_id]
@@ -620,26 +684,7 @@ async def get_dataset_info(
     if not ds:
         raise HTTPException(status_code=404, detail=f"RegistryEntry '{domain}/{dataset_id}' not found")
 
-    return {
-        "domain": ds.domain,
-        "dataset_id": ds.dataset_id,
-        "version": ds.version,
-        "schema_version": ds.schema_version,
-        "data_location": ds.data_location,
-        "data_format": ds.data_format,
-        "description": ds.description,
-        "manifest": ds.manifest or {},
-        "data_schema": ds.data_schema,
-        "entity_mapping": ds.entity_mapping,
-        "endpoint_schema": ds.endpoint_schema,
-        "transform": ds.transform,
-        "ownership": ds.ownership,
-        "lineage": ds.lineage,
-        "filter_values": ds.filter_values,
-        "level_order": ds.level_order,
-        "created_at": ds.created_at,
-        "updated_at": ds.updated_at,
-    }
+    return _entry_response(ds)
 
 
 @router.get(
@@ -704,12 +749,14 @@ async def validate_dataset_sources(
     validation_results: Dict[str, Any] = {}
     headers = {"User-Agent": "Mozilla/5.0"}
 
-    for dimension, locations in sources.items():
-        validation_results[dimension] = {}
-        for location, urls in locations.items():
-            url_list = [urls] if isinstance(urls, str) else urls
-            location_results = []
-            async with httpx.AsyncClient(timeout=10.0, follow_redirects=True, headers=headers) as client:
+    # One client for the whole validation pass — per-location clients waste
+    # connections and TLS handshakes.
+    async with httpx.AsyncClient(timeout=10.0, follow_redirects=True, headers=headers) as client:
+        for dimension, locations in sources.items():
+            validation_results[dimension] = {}
+            for location, urls in locations.items():
+                url_list = [urls] if isinstance(urls, str) else urls
+                location_results = []
                 for url in url_list:
                     method_used = "HEAD"
                     try:
@@ -727,7 +774,7 @@ async def validate_dataset_sources(
                         location_results.append({"url": url, "status": "timeout", "error": "Request timed out"})
                     except httpx.RequestError as e:
                         location_results.append({"url": url, "status": "error", "error": str(e)})
-            validation_results[dimension][location] = location_results
+                validation_results[dimension][location] = location_results
 
     total_urls = sum(len(locs) for dim in validation_results.values() for locs in dim.values())
     accessible = sum(
@@ -791,126 +838,3 @@ async def list_dataset_versions(
         ],
         "total": len(rows),
     }
-
-
-# ── Entity graph endpoints ─────────────────────────────────────────────────────
-
-# _KNOWN_PREDICATES = {"affiliated_with", "same_as", "country", "broader"}
-
-
-# @router.get(
-#     "/entity-graph/path",
-#     openapi_extra=_ex({
-#         "from_id": "openalex:A5002034958",
-#         "to_namespace": "wikidata",
-#         "path": [
-#             {"subject": "openalex:A5002034958", "predicate": "affiliated_with", "object": "openalex:I26873012"},
-#             {"subject": "openalex:I26873012",   "predicate": "same_as",         "object": "wikidata:Q1068"},
-#             {"subject": "wikidata:Q1068",        "predicate": "country",         "object": "wikidata:Q30"},
-#         ],
-#         "hops": 3,
-#     }),
-# )
-# async def find_entity_path(
-#     from_id: str,
-#     to_namespace: str,
-#     max_hops: int = 6,
-#     db: AsyncSession = Depends(get_session),
-# ):
-#     """BFS traversal of the entity graph from `from_id` until reaching `to_namespace`.
-
-#     Example: from_id=openalex:A5002034958 & to_namespace=wikidata
-#     returns the chain openalex:A → openalex:I → wikidata:Q (institution country)
-#     which is the join path into any dataset keyed on Wikidata entities (e.g. babynames).
-#     """
-#     visited = {from_id}
-#     # queue entries: (current_id, path_so_far)
-#     queue: list[tuple[str, list[dict]]] = [(from_id, [])]
-
-#     while queue:
-#         current_id, path = queue.pop(0)
-
-#         # Reached the target namespace (and moved at least one hop)
-#         if path and current_id.startswith(f"{to_namespace}:"):
-#             return {"from_id": from_id, "to_namespace": to_namespace, "path": path, "hops": len(path)}
-
-#         if len(path) >= max_hops:
-#             continue
-
-#         result = await db.execute(
-#             select(EntityGraph).where(EntityGraph.subject_id == current_id)
-#         )
-#         for edge in result.scalars().all():
-#             if edge.object_id not in visited:
-#                 visited.add(edge.object_id)
-#                 queue.append((
-#                     edge.object_id,
-#                     path + [{"subject": current_id, "predicate": edge.predicate, "object": edge.object_id}],
-#                 ))
-
-#     raise HTTPException(
-#         status_code=404,
-#         detail=f"No path found from '{from_id}' to namespace '{to_namespace}' within {max_hops} hops.",
-#     )
-
-
-# @router.get("/entity-graph/neighbors")
-# async def get_entity_neighbors(
-#     entity_id: str,
-#     db: AsyncSession = Depends(get_session),
-# ):
-#     """Return all direct edges from entity_id in the graph."""
-#     result = await db.execute(
-#         select(EntityGraph).where(EntityGraph.subject_id == entity_id)
-#     )
-#     edges = result.scalars().all()
-#     return {
-#         "entity_id": entity_id,
-#         "edges": [
-#             {"predicate": e.predicate, "object": e.object_id, "source": e.source}
-#             for e in edges
-#         ],
-#     }
-
-
-# @admin_router.post("/entity-graph")
-# async def upsert_entity_graph_edges(
-#     edges: List[Dict[str, str]],
-#     _: None = Depends(get_admin_user),
-#     db: AsyncSession = Depends(get_session),
-# ):
-#     """Upsert edges into the entity graph. Each edge: {subject_id, predicate, object_id, source}.
-
-#     Predicates: affiliated_with | same_as | country | broader
-#     """
-#     upserted = 0
-#     for edge in edges:
-#         subject_id = edge.get("subject_id", "")
-#         predicate   = edge.get("predicate", "")
-#         object_id   = edge.get("object_id", "")
-#         source      = edge.get("source", "manual")
-
-#         if not (subject_id and predicate and object_id):
-#             raise HTTPException(status_code=422, detail=f"Missing fields in edge: {edge}")
-#         if predicate not in _KNOWN_PREDICATES:
-#             raise HTTPException(
-#                 status_code=422,
-#                 detail=f"Unknown predicate '{predicate}'. Supported: {sorted(_KNOWN_PREDICATES)}",
-#             )
-
-#         result = await db.execute(
-#             select(EntityGraph).where(
-#                 EntityGraph.subject_id == subject_id,
-#                 EntityGraph.predicate  == predicate,
-#                 EntityGraph.object_id  == object_id,
-#             )
-#         )
-#         existing = result.scalar_one_or_none()
-#         if existing:
-#             existing.source = source
-#         else:
-#             db.add(EntityGraph(subject_id=subject_id, predicate=predicate, object_id=object_id, source=source))
-#         upserted += 1
-
-#     await db.commit()
-#     return {"edges_upserted": upserted}
