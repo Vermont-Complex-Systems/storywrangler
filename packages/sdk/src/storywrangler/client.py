@@ -34,9 +34,25 @@ from typing import Any, Dict, List, Optional
 import requests
 from dotenv import load_dotenv
 
+from storywrangler_schemas.coercion import coerce_scalar
+
 from .registry.models import DatasetCreate
 
 load_dotenv()
+
+
+def _instrument_params(
+    domain: str, dataset: str, alpha, ngram_limit: int, wordshift_limit: int,
+    **optional,
+) -> Dict[str, Any]:
+    """Build query params for instrument endpoints, dropping None optionals."""
+    params: Dict[str, Any] = {
+        "domain": domain, "dataset": dataset,
+        "alpha": str(alpha),
+        "ngram_limit": ngram_limit, "wordshift_limit": wordshift_limit,
+    }
+    params.update({k: v for k, v in optional.items() if v is not None})
+    return params
 
 
 class _SubClient:
@@ -53,6 +69,11 @@ class _SubClient:
     def _get(self, path: str, **kwargs) -> requests.Response:
         kwargs.setdefault("timeout", self._timeout)
         return self._session.get(self._url(path), **kwargs)
+
+    def _get_json(self, path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        resp = self._get(path, params=params)
+        resp.raise_for_status()
+        return resp.json()
 
     def _post(self, path: str, **kwargs) -> requests.Response:
         kwargs.setdefault("timeout", self._timeout)
@@ -135,25 +156,12 @@ class InstrumentClient(_SubClient):
         Returns:
             Dict with normalization, delta_sum, diamond_counts, wordshift, meta, etc.
         """
-        params: Dict[str, Any] = {
-            "domain": domain, "dataset": dataset,
-            "alpha": str(alpha),
-            "ngram_limit": ngram_limit, "wordshift_limit": wordshift_limit,
-        }
-        if entity is not None:
-            params["entity"] = entity
-        if entity2 is not None:
-            params["entity2"] = entity2
-        if dates is not None:
-            params["dates"] = dates
-        if dates2 is not None:
-            params["dates2"] = dates2
-        if alphas is not None:
-            params["alphas"] = alphas
+        params = _instrument_params(
+            domain, dataset, alpha, ngram_limit, wordshift_limit,
+            entity=entity, entity2=entity2, dates=dates, dates2=dates2, alphas=alphas,
+        )
         params.update(filter_dims)
-        resp = self._get("/storywrangler/allotax", params=params)
-        resp.raise_for_status()
-        return resp.json()
+        return self._get_json("/storywrangler/allotax", params)
 
     def rtd(
         self,
@@ -166,7 +174,7 @@ class InstrumentClient(_SubClient):
         alpha: str | float = "0.25",
         alphas: str | None = None,
         ngram_limit: int = 10000,
-        limit: int = 10000,
+        wordshift_limit: int = 10000,
         **filters: str,
     ) -> Dict[str, Any]:
         """Lightweight rank-turbulence divergence between two dates.
@@ -182,27 +190,16 @@ class InstrumentClient(_SubClient):
             alpha: RTD alpha parameter.
             alphas: Comma-separated alphas for multi-alpha mode.
             ngram_limit: Max types to load per system.
-            limit: Max wordshift entries to return.
+            wordshift_limit: Max wordshift entries to return.
             **filters: Dataset-specific filter dimensions passed as query
                 params. Use actual column names from the dataset's level_order.
         """
-        params: Dict[str, Any] = {
-            "domain": domain, "dataset": dataset,
-            "alpha": str(alpha),
-            "ngram_limit": ngram_limit, "limit": limit,
-        }
-        if entity is not None:
-            params["entity"] = entity
-        if dates is not None:
-            params["dates"] = dates
-        if dates2 is not None:
-            params["dates2"] = dates2
-        if alphas is not None:
-            params["alphas"] = alphas
+        params = _instrument_params(
+            domain, dataset, alpha, ngram_limit, wordshift_limit,
+            entity=entity, dates=dates, dates2=dates2, alphas=alphas,
+        )
         params.update(filters)
-        resp = self._get("/storywrangler/rtd", params=params)
-        resp.raise_for_status()
-        return resp.json()
+        return self._get_json("/storywrangler/rtd", params)
 
 
 class UsersClient(_SubClient):
@@ -210,9 +207,7 @@ class UsersClient(_SubClient):
 
     def whoami(self) -> Dict[str, Any]:
         """Return the current user's profile."""
-        resp = self._get("/auth/me")
-        resp.raise_for_status()
-        return resp.json()
+        return self._get_json("/auth/me")
 
 
 class DatasetClient(_SubClient):
@@ -242,12 +237,11 @@ class DatasetClient(_SubClient):
         self.domain = domain
         self.dataset_id = dataset_id
         self._meta: Optional[Dict[str, Any]] = None
+        self._instrument = InstrumentClient(session, base_url, timeout)
 
     def _ensure_meta(self) -> Dict[str, Any]:
         if self._meta is None:
-            resp = self._get(f"/registry/{self.domain}/{self.dataset_id}")
-            resp.raise_for_status()
-            self._meta = resp.json()
+            self._meta = self._get_json(f"/registry/{self.domain}/{self.dataset_id}")
         return self._meta
 
     def refresh(self) -> "DatasetClient":
@@ -315,15 +309,7 @@ class DatasetClient(_SubClient):
             valid = known[base_key].get("valid", [])
             if valid:
                 # Try type coercion (query params are often strings)
-                coerced = val
-                if isinstance(val, str):
-                    try:
-                        coerced = int(val)
-                    except (ValueError, TypeError):
-                        try:
-                            coerced = float(val)
-                        except (ValueError, TypeError):
-                            pass
+                coerced = coerce_scalar(val)
                 if val not in valid and coerced not in valid:
                     valid_str = ", ".join(str(v) for v in sorted(valid, key=str))
                     raise ValueError(
@@ -365,25 +351,13 @@ class DatasetClient(_SubClient):
                 Use ``.filters`` to discover available dimensions.
         """
         self._validate_filters(filter_dims)
-        params: Dict[str, Any] = {
-            "domain": self.domain, "dataset": self.dataset_id,
-            "alpha": str(alpha),
-            "ngram_limit": ngram_limit, "wordshift_limit": wordshift_limit,
-        }
-        if entity is not None:
-            params["entity"] = entity
-        if entity2 is not None:
-            params["entity2"] = entity2
-        if dates is not None:
-            params["dates"] = dates
-        if dates2 is not None:
-            params["dates2"] = dates2
-        if alphas is not None:
-            params["alphas"] = alphas
-        params.update(filter_dims)
-        resp = self._get("/storywrangler/allotax", params=params)
-        resp.raise_for_status()
-        return resp.json()
+        return self._instrument.allotax(
+            self.domain, self.dataset_id,
+            entity=entity, entity2=entity2, dates=dates, dates2=dates2,
+            alpha=alpha, alphas=alphas,
+            ngram_limit=ngram_limit, wordshift_limit=wordshift_limit,
+            **filter_dims,
+        )
 
     def rtd(
         self,
@@ -394,7 +368,7 @@ class DatasetClient(_SubClient):
         alpha: str | float = "0.25",
         alphas: str | None = None,
         ngram_limit: int = 10000,
-        limit: int = 10000,
+        wordshift_limit: int = 10000,
         **filters: str,
     ) -> Dict[str, Any]:
         """Lightweight rank-turbulence divergence on this dataset.
@@ -407,23 +381,13 @@ class DatasetClient(_SubClient):
                 Use ``.filters`` to discover available dimensions.
         """
         self._validate_filters(filters)
-        params: Dict[str, Any] = {
-            "domain": self.domain, "dataset": self.dataset_id,
-            "alpha": str(alpha),
-            "ngram_limit": ngram_limit, "limit": limit,
-        }
-        if entity is not None:
-            params["entity"] = entity
-        if dates is not None:
-            params["dates"] = dates
-        if dates2 is not None:
-            params["dates2"] = dates2
-        if alphas is not None:
-            params["alphas"] = alphas
-        params.update(filters)
-        resp = self._get("/storywrangler/rtd", params=params)
-        resp.raise_for_status()
-        return resp.json()
+        return self._instrument.rtd(
+            self.domain, self.dataset_id,
+            entity=entity, dates=dates, dates2=dates2,
+            alpha=alpha, alphas=alphas,
+            ngram_limit=ngram_limit, wordshift_limit=wordshift_limit,
+            **filters,
+        )
 
     def __repr__(self) -> str:
         return f"DatasetClient('{self.domain}/{self.dataset_id}')"
