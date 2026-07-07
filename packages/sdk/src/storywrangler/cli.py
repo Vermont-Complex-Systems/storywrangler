@@ -6,7 +6,7 @@ Usage:
     uvx storywrangler new <project-name> --format parquet_hive
 
 The generated project follows the simple-make pattern:
-  extract/ → transform/ → adapter/ (prepare + submit) → tests/
+  extract/ → transform/ → adapter/ (submit) → tests/
 """
 
 import argparse
@@ -309,6 +309,7 @@ def main():
         "transform": {{
             "time_dimension": "date",               # hive partition column for time
             # "filter_dimensions": ["sex"],          # optional: non-hive columns inside parquet files
+            # "time_partitions": ["year", "month"],  # optional: if time is split across hive levels
             # "hash_bucket": "ngram_bucket",         # optional: content-sharded partition column
         }},
         "ownership": {{"owner_group": "vcsi", "contact": "your@email.edu", "storage_risk": "institutional"}},
@@ -444,7 +445,7 @@ def scaffold(name: str, fmt: str, orch: str):
     print(f"  cd {name}")
     print(f"  cp .env.example .env   # fill in DATASET_ID, DOMAIN, DATA_PATH, API_KEY")
     print(f"  uv sync")
-    print(f"  # Edit config/entities.yaml, adapter/prepare.py, adapter/submit.py")
+    print(f"  # Edit config/entities.yaml, adapter/submit.py")
     print(f"  {run_cmd}")
 
 

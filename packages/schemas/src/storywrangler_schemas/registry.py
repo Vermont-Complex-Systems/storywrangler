@@ -290,6 +290,16 @@ class TransformConfig(BaseModel):
             "all names. Not needed for hive partition levels — those are auto-discovered."
         ),
     )
+    time_partitions: Optional[List[str]] = Field(
+        None,
+        description=(
+            "Hive partition columns that subdivide the time_dimension into "
+            "hierarchical components (e.g. ['year', 'month'] when time_dimension='date'). "
+            "At query time, values are auto-derived from the requested dates — callers "
+            "never need to pass year/month explicitly. Column names must match standard "
+            "temporal components: year, month, day."
+        ),
+    )
     hash_bucket: Optional[str] = Field(
         None,
         description=(

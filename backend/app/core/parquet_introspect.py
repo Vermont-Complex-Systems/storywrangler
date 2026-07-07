@@ -21,6 +21,8 @@ import os
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote, unquote
 
+import duckdb
+
 log = logging.getLogger(__name__)
 
 
@@ -50,46 +52,124 @@ def _discover_levels(root: str) -> List[Dict[str, str]]:
     return levels
 
 
+def _hive_entry_sort_key(entry: str):
+    """Sort key for hive directory entries that orders numeric values numerically.
+
+    Lexicographic sort puts month=10 before month=2; this key parses the value
+    part so unpadded numeric partitions order correctly (month=2 < month=10).
+    Non-numeric values sort lexicographically after numeric ones.
+    """
+    _, val = entry.split("=", 1)
+    try:
+        return (0, float(val), "")
+    except ValueError:
+        return (1, 0.0, val)
+
+
+# Safety cap on tree fan-out for every walk — pathological NFS trees must not
+# blow up registration memory or run unbounded.
+_MAX_WORK = 5000
+
+
+def _walk_levels(root: str, levels: List[Dict[str, Any]], classify) -> List[tuple]:
+    """Generic hive-tree walk shared by all introspection passes.
+
+    Walks the directory tree from *root* through each level in *levels*
+    (a prefix of level_order), descending according to
+    ``classify(level) -> action``:
+
+      - ``"expand"``    — follow every entry, recording {column: value} in
+                          the context (the value becomes a grouping key)
+      - ``"pin"``       — follow only the first entry (value not recorded);
+                          used for levels where any branch is representative
+                          (e.g. hash buckets share the same date range)
+      - ``"endpoints"`` — follow only the first and last entries, tracking
+                          which bound ("min"/"max") each descendant serves;
+                          used for time_partition levels where only the
+                          extremes matter
+
+    Entries are sorted numeric-aware (month=2 < month=10) so "pin" and
+    "endpoints" pick correct representatives for unpadded numeric partitions.
+
+    Only reads directory metadata (os.listdir) — instant on NFS, no parquet
+    files opened. Fan-out is capped at _MAX_WORK with a warning.
+
+    Returns a list of ``(path, ctx, bound)`` work items, where *ctx* maps
+    expanded columns to their (unquoted) values and *bound* is None unless an
+    "endpoints" level was traversed.
+    """
+    work: List[tuple] = [(root, {}, None)]
+    for lv in levels:
+        col = lv["column"]
+        action = classify(lv)
+        next_work: List[tuple] = []
+        for path, ctx, bound in work:
+            try:
+                entries = os.listdir(path)
+            except OSError:
+                continue
+            hive_entries = sorted(
+                (e for e in entries if "=" in e), key=_hive_entry_sort_key)
+            if not hive_entries:
+                continue
+
+            if action == "expand":
+                for entry in hive_entries:
+                    _, val = entry.split("=", 1)
+                    next_work.append(
+                        (os.path.join(path, entry), {**ctx, col: unquote(val)}, bound))
+            elif action == "endpoints":
+                if bound is None:
+                    # First endpoints level: split into the two directions.
+                    next_work.append(
+                        (os.path.join(path, hive_entries[0]), ctx, "min"))
+                    next_work.append(
+                        (os.path.join(path, hive_entries[-1]), ctx, "max"))
+                elif bound == "min":
+                    next_work.append(
+                        (os.path.join(path, hive_entries[0]), ctx, "min"))
+                else:  # "max"
+                    next_work.append(
+                        (os.path.join(path, hive_entries[-1]), ctx, "max"))
+            else:  # "pin"
+                next_work.append(
+                    (os.path.join(path, hive_entries[0]), ctx, bound))
+        work = next_work
+        if len(work) > _MAX_WORK:
+            log.warning(
+                "Hive walk too wide (%d entries) at level '%s'; truncating to %d",
+                len(work), col, _MAX_WORK,
+            )
+            work = work[:_MAX_WORK]
+    return work
+
+
 def _hive_distinct_values(root: str, level_order: List[Dict[str, Any]], column: str) -> List[Any]:
     """Read distinct values for a hive partition column using os.listdir().
 
-    Walks the directory tree from *root* through each level in *level_order*
-    until reaching the target *column*, then lists all directory entries at
-    that level, extracts the values from `col=val` names, and returns them
-    sorted.
-
-    For levels above the target, uses the first sorted entry (same as
-    _discover_levels) to pick a single deterministic path.
-
-    This is instant on NFS because it only reads directory metadata — no
-    parquet files are opened.
+    Expands all entries at every level above the target *column*, then
+    collects the union of values at the target level. This ensures
+    completeness: e.g. ``month`` values are collected across all ``year``
+    directories, not just the first one.
     """
-    current = root
-    for lv in level_order:
-        col = lv["column"]
-        if col == column:
-            # This is the target level — list all entries
-            try:
-                entries = sorted(os.listdir(current))
-            except OSError:
-                return []
-            values = []
-            for e in entries:
-                if "=" in e:
-                    _, val = e.split("=", 1)
-                    values.append(unquote(val))
-            return sorted(values)
-        else:
-            # Intermediate level — follow the first entry to go deeper
-            try:
-                entries = sorted(os.listdir(current))
-            except OSError:
-                return []
-            hive_entry = next((e for e in entries if "=" in e), None)
-            if hive_entry is None:
-                return []
-            current = os.path.join(current, hive_entry)
-    return []
+    idx = next(
+        (i for i, lv in enumerate(level_order) if lv["column"] == column), None)
+    if idx is None:
+        return []
+
+    paths = _walk_levels(root, level_order[:idx], lambda lv: "expand")
+
+    values = set()
+    for path, _ctx, _bound in paths:
+        try:
+            entries = os.listdir(path)
+        except OSError:
+            continue
+        for e in entries:
+            if e.startswith(f"{column}="):
+                _, val = e.split("=", 1)
+                values.add(unquote(val))
+    return sorted(values)
 
 
 def _hive_availability(
@@ -116,44 +196,19 @@ def _hive_availability(
             time_idx = i
         elif lv["type"] == "entity":
             entity_idx = i
-        elif lv["type"] == "partition":
+        elif lv["type"] in ("partition", "time_partition"):
             partition_indices.append(i)
 
     if time_idx is None:
         return {}
 
-    # Build paths to all time-level directories by walking the tree.
-    # At each level above time, expand the appropriate values:
-    #   partition → all values (they become grouping keys)
-    #   entity   → all values (they become top-level keys)
-    #   other    → skip (hash_bucket, filter — not relevant for availability)
-    #
-    # Each work item is (current_path, context_dict)
-    work = [(root, {})]
-    for i, lv in enumerate(level_order):
-        if i == time_idx:
-            break  # reached the time level — enumerate below
-        col = lv["column"]
-        next_work = []
-        for path, ctx in work:
-            try:
-                entries = sorted(os.listdir(path))
-            except OSError:
-                continue
-            hive_entries = [e for e in entries if "=" in e]
-            if lv["type"] in ("partition", "entity"):
-                # Expand: include all values as grouping/entity keys
-                for entry in hive_entries:
-                    _, val = entry.split("=", 1)
-                    new_ctx = dict(ctx)
-                    new_ctx[col] = unquote(val)
-                    next_work.append((os.path.join(path, entry), new_ctx))
-            else:
-                # Non-grouping level (hash_bucket, filter) — follow first entry
-                if hive_entries:
-                    next_work.append((os.path.join(path, hive_entries[0]), ctx))
-        work = next_work
-
+    # Build paths to all time-level directories: expand grouping levels
+    # (partition/entity/time_partition values become keys), pin the rest
+    # (hash_bucket, filter — not relevant for availability).
+    work = _walk_levels(
+        root, level_order[:time_idx],
+        lambda lv: "expand" if lv["type"] in ("partition", "entity", "time_partition") else "pin",
+    )
     if not work:
         return {}
 
@@ -163,7 +218,7 @@ def _hive_availability(
     group_cols = [level_order[i]["column"] for i in partition_indices]
 
     availability: Dict[str, Any] = {}
-    for path, ctx in work:
+    for path, ctx, _bound in work:
         try:
             entries = sorted(os.listdir(path))
         except OSError:
@@ -228,36 +283,17 @@ def _derive_bucket_config(
     )
     partition_cols = [
         lv["column"] for lv in level_order[:bucket_idx]
-        if lv["type"] == "partition"
+        if lv["type"] in ("partition", "time_partition")
     ]
 
-    work = [(root, {})]
-    for i, lv in enumerate(level_order):
-        if i == bucket_idx:
-            break
-        col = lv["column"]
-        next_work = []
-        for path, ctx in work:
-            try:
-                entries = sorted(os.listdir(path))
-            except OSError:
-                continue
-            hive_entries = [e for e in entries if "=" in e]
-            if lv["type"] in ("partition", "entity"):
-                for entry in hive_entries:
-                    _, val = entry.split("=", 1)
-                    new_ctx = dict(ctx)
-                    new_ctx[col] = unquote(val)
-                    next_work.append((os.path.join(path, entry), new_ctx))
-            else:
-                # Non-grouping level — follow first entry
-                if hive_entries:
-                    next_work.append((os.path.join(path, hive_entries[0]), ctx))
-        work = next_work
+    work = _walk_levels(
+        root, level_order[:bucket_idx],
+        lambda lv: "expand" if lv["type"] in ("partition", "entity", "time_partition") else "pin",
+    )
 
     # Count bucket directories at each path
     counts: Dict[tuple, int] = {}
-    for path, ctx in work:
+    for path, ctx, _bound in work:
         try:
             entries = os.listdir(path)
         except OSError:
@@ -293,103 +329,146 @@ def _derive_bucket_config(
     return config
 
 
+def _find_first_parquet(path: str) -> Optional[str]:
+    """Find the first parquet file in *path* or one directory level below."""
+    try:
+        files = [f for f in os.listdir(path) if f.endswith(".parquet")]
+    except OSError:
+        return None
+    if files:
+        return os.path.join(path, sorted(files)[0])
+    # Try one level deeper (e.g. hash_bucket directories below the leaf)
+    try:
+        for sd in sorted(os.listdir(path)):
+            sd_path = os.path.join(path, sd)
+            if os.path.isdir(sd_path):
+                files = [f for f in os.listdir(sd_path) if f.endswith(".parquet")]
+                if files:
+                    return os.path.join(sd_path, sorted(files)[0])
+    except OSError:
+        pass
+    return None
+
+
 def _targeted_availability(
     conn, root: str, level_order: List[Dict[str, Any]], time_col: str, dataset,
 ) -> Dict[str, Any]:
-    """Compute availability by reading ONE file per entity × partition combo.
+    """Compute availability by reading a minimal number of parquet files.
 
     When time is inside the parquet files (not a hive level), we need DuckDB
-    to read MIN/MAX.  But we don't need to scan every file — all hash buckets
-    within the same entity share the same date range.  This function walks the
-    directory tree, pins hash_bucket (and other non-grouping levels) to their
-    first value, and queries a single parquet file per entity × partition
-    combination.
+    to read MIN/MAX.  This function walks the directory tree to find the
+    date range for each user-facing dimension combination:
 
-    For sparklines (2 ngram_sizes × 11 countries × 16 buckets = 352 files),
-    this reads 22 files instead of 352 — ~0.5s vs ~90s over NFS.
+    * **entity, partition, filter** levels are *expanded* — each distinct
+      value becomes a grouping key in the output.  (Filter expansion is
+      enabled only when time_partition levels exist; otherwise filters are
+      pinned to their first value to match pre-time_partition behaviour.)
+    * **time_partition** levels are handled smartly: only the *first* and
+      *last* sorted entries are followed (for min/max date bounds).
+      This reads 2 files per filter combo instead of scanning every
+      year×month directory.
+    * **hash_bucket** levels are pinned to their first value (all buckets
+      share the same date range).
+
+    For reddit (~100 langs × 3 n-values = 300 combos × 2 reads), this
+    reads ~600 files — manageable on NFS.
     """
     entity_col = (
         dataset.entity_mapping.local_id_column
         if dataset.entity_mapping else None
     )
 
-    # Classify levels
-    partition_cols = []
-    for lv in level_order:
-        if lv["type"] == "partition":
-            partition_cols.append(lv["column"])
+    has_tp = any(lv["type"] == "time_partition" for lv in level_order)
 
-    # Walk the tree, expanding entity + partition levels,
-    # pinning hash_bucket/filter/time to their first value.
-    work = [(root, {})]
+    # Grouping columns for the availability tree — these appear as keys in
+    # the nested output dict.  time_partition columns are collapsed into
+    # min/max bounds so they do NOT appear as grouping keys.
+    grouping_cols = []
     for lv in level_order:
-        col = lv["column"]
+        if lv["type"] in ("partition",):
+            grouping_cols.append(lv["column"])
+        elif lv["type"] == "filter" and has_tp:
+            grouping_cols.append(lv["column"])
+
+    # Walk the hive tree up to the time level (time is inside files):
+    # expand grouping levels, follow only min/max endpoints through
+    # time_partition levels, pin hash_bucket (and filter when no
+    # time_partitions — matches pre-time_partition behaviour).
+    walk_levels = []
+    for lv in level_order:
         if lv["type"] == "time":
-            break  # time is inside files, stop here
-        next_work = []
-        for path, ctx in work:
-            try:
-                entries = sorted(os.listdir(path))
-            except OSError:
-                continue
-            hive_entries = [e for e in entries if "=" in e]
-            if lv["type"] in ("partition", "entity"):
-                # Expand: include all values as grouping/entity keys
-                for entry in hive_entries:
-                    _, val = entry.split("=", 1)
-                    new_ctx = dict(ctx)
-                    new_ctx[col] = unquote(val)
-                    next_work.append((os.path.join(path, entry), new_ctx))
-            else:
-                # Non-grouping level (hash_bucket, filter) — follow first entry only
-                if hive_entries:
-                    next_work.append((os.path.join(path, hive_entries[0]), ctx))
-        work = next_work
+            break
+        walk_levels.append(lv)
 
+    def _classify(lv):
+        if lv["type"] in ("entity", "partition") or (lv["type"] == "filter" and has_tp):
+            return "expand"
+        if lv["type"] == "time_partition":
+            return "endpoints"
+        return "pin"  # hash_bucket / filter (when no time_partitions)
+
+    work = _walk_levels(root, walk_levels, _classify)
     if not work:
         return {}
 
-    # Query MIN/MAX from one file per entity × partition combo
+    # Group leaf paths by context to merge min/max from the two endpoints.
+    from collections import defaultdict
+    ctx_paths: Dict[tuple, Dict[str, list]] = defaultdict(
+        lambda: {"min": [], "max": []})
+    for path, ctx, bound in work:
+        key = tuple(sorted(ctx.items()))
+        if bound in ("min", None):
+            ctx_paths[key]["min"].append(path)
+        if bound in ("max", None):
+            ctx_paths[key]["max"].append(path)
+
+    # Read MIN/MAX from one file at each endpoint.  A path can serve min,
+    # max, or both (bound=None when the dataset has no time_partition
+    # levels) — read each file exactly once with a combined MIN/MAX query.
     availability: Dict[str, Any] = {}
-    for path, ctx in work:
-        # Find the first parquet file at this path
-        try:
-            files = [f for f in os.listdir(path) if f.endswith(".parquet")]
-        except OSError:
-            continue
-        if not files:
-            # Try one level deeper (e.g. hash_bucket directories we stopped before)
-            try:
-                subdirs = sorted(os.listdir(path))
-                for sd in subdirs:
-                    sd_path = os.path.join(path, sd)
-                    if os.path.isdir(sd_path):
-                        files = [f for f in os.listdir(sd_path) if f.endswith(".parquet")]
-                        if files:
-                            path = sd_path
-                            break
-            except OSError:
+    for ctx_key, endpoints in ctx_paths.items():
+        ctx = dict(ctx_key)
+        overall_min: Optional[str] = None
+        overall_max: Optional[str] = None
+
+        need: Dict[str, set] = {}
+        for path in endpoints["min"]:
+            need.setdefault(path, set()).add("min")
+        for path in endpoints["max"]:
+            need.setdefault(path, set()).add("max")
+
+        for path, bounds_needed in need.items():
+            pq_file = _find_first_parquet(path)
+            if not pq_file:
                 continue
-        if not files:
+            try:
+                row = conn.execute(
+                    f"SELECT MIN({time_col})::TEXT, MAX({time_col})::TEXT "
+                    f"FROM read_parquet('{pq_file}')"
+                ).fetchone()
+            except duckdb.InterruptException:
+                # Timeout fired — propagate so the caller records the failure
+                # instead of registering silently truncated availability.
+                raise
+            except Exception:
+                continue
+            if row is None:
+                continue
+            if "min" in bounds_needed and row[0] is not None:
+                if overall_min is None or row[0] < overall_min:
+                    overall_min = row[0]
+            if "max" in bounds_needed and row[1] is not None:
+                if overall_max is None or row[1] > overall_max:
+                    overall_max = row[1]
+
+        if overall_min is None or overall_max is None:
             continue
 
-        pq_file = os.path.join(path, sorted(files)[0])
-        try:
-            rows = conn.execute(
-                f"SELECT MIN({time_col})::TEXT, MAX({time_col})::TEXT "
-                f"FROM read_parquet('{pq_file}')"
-            ).fetchall()
-        except Exception:
-            continue
-        if not rows or rows[0][0] is None:
-            continue
-
-        min_val, max_val = rows[0][0], rows[0][1]
-        bounds = {"min": min_val, "max": max_val}
+        bounds = {"min": overall_min, "max": overall_max}
         ent = ctx.get(entity_col) if entity_col else None
 
-        # Build nested dict keyed by entity then partition dims
-        part_keys = [ctx.get(col, "") for col in partition_cols]
+        # Build nested dict keyed by entity → grouping dims → {min, max}
+        part_keys = [ctx.get(col, "") for col in grouping_cols]
         if ent and part_keys:
             target = availability.setdefault(ent, {})
             for key in part_keys[:-1]:
@@ -438,12 +517,16 @@ def validate_and_build_level_order(
       - entity_mapping.local_id_column      → type "entity"
       - transform.hash_bucket               → type "hash_bucket"
       - transform.time_dimension            → type "time"
+      - transform.time_partitions item       → type "time_partition"
       - transform.filter_dimensions item    → type "filter"
       - everything else                     → type "partition"
 
     The first on-disk value is stored as ``default_value`` for each level.
     At query time, partition/filter levels use this as the injected default
-    when the caller omits the parameter.
+    when the caller omits the parameter.  The same value is also stored as
+    ``raw_value``, which (unlike default_value) is never type-coerced —
+    query-time path pinning reads it to match the on-disk naming convention
+    (zero-padded vs unpadded numeric directories).
 
     hash_bucket MUST appear in the discovered levels when declared.
 
@@ -476,6 +559,11 @@ def validate_and_build_level_order(
             )
         declared[time_col] = "time"
 
+    time_partitions = (tr.time_partitions if tr else None) or []
+    for tp in time_partitions:
+        if tp not in declared:
+            declared[tp] = "time_partition"
+
     filter_dims = (tr.filter_dimensions if tr else None) or []
     for fd in filter_dims:
         if fd not in declared:
@@ -491,6 +579,10 @@ def validate_and_build_level_order(
             "column": col_name,
             "type": col_type,
             "default_value": lv["value"],
+            # Raw on-disk string, never type-coerced (unlike default_value).
+            # Query-time path pinning uses it to match the directory naming
+            # convention (e.g. zero-padded month=03 vs unpadded month=3).
+            "raw_value": lv["value"],
         }
         result.append(entry)
 
@@ -501,6 +593,15 @@ def validate_and_build_level_order(
             f"levels {discovered_names}. The hash bucket column must be "
             f"an actual hive directory level."
         )
+
+    # Validate that time_partition columns appear in discovered levels
+    for tp in time_partitions:
+        if tp not in set(discovered_names):
+            raise ValueError(
+                f"time_partition '{tp}' not found in on-disk hive "
+                f"levels {discovered_names}. Each time_partition must be "
+                f"an actual hive directory level."
+            )
 
     return result
 
@@ -600,7 +701,7 @@ def introspect(
 
     if level_order:
         all_dims = [lv["column"] for lv in level_order
-                    if lv["type"] in ("partition", "filter")]
+                    if lv["type"] in ("partition", "filter", "time_partition")]
     else:
         all_dims = list((tr.filter_dimensions or []) if tr else [])
 
@@ -659,6 +760,17 @@ def introspect(
                 availability = _targeted_availability(conn, loc, level_order, time_col, dataset)
                 if availability:
                     result["availability"] = availability
+            except duckdb.InterruptException:
+                # Admin timeout fired mid-walk. Record the failure rather
+                # than registering a silently truncated availability index.
+                log.warning(
+                    "Availability introspection timed out for %s; "
+                    "manifest.availability not derived", loc,
+                )
+                result["introspect_error"] = (
+                    "availability introspection timed out; "
+                    "manifest.availability not derived — re-register to retry"
+                )
             except Exception as e:
                 log.debug("Targeted availability introspection failed: %s", e)
         else:

@@ -14,20 +14,25 @@ Both support parquet and parquet_hive; all filtering is done via WHERE clauses.
 For parquet_hive, hive_partitioning=true handles partition pruning automatically.
 """
 
+import logging
+import os
 import re
 from contextlib import contextmanager
 from types import SimpleNamespace
 from typing import Any, List, Optional
 from urllib.parse import quote
 
+import duckdb
 from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from storywrangler_schemas.hashing import assign_bucket
 from storywrangler_schemas.standards import Standards
-from ..core.exceptions import DataNotAvailableError, QueryError
+from ..core.exceptions import DataNotAvailableError, QueryError, QueryTimeoutError
 from ..models.registry import EntityMapping, RegistryEntry
+
+log = logging.getLogger(__name__)
 
 
 # ── Hash-bucket routing ─────────────────────────────────────────────────────────
@@ -99,6 +104,91 @@ def get_queryable_dims(dataset_obj) -> list:
     ]
 
 
+# ── Time-partition derivation ──────────────────────────────────────────────
+# Derives year/month/day values from requested dates for time_partition levels.
+
+# Date-component extractors. Values iterate as datetime.date, so only
+# day-granularity components are supported; unknown components (including
+# hour/minute) are left as wildcards with no pruning condition.
+_TEMPORAL_EXTRACTORS = {
+    "year":   lambda d: d.year,
+    "month":  lambda d: d.month,
+    "day":    lambda d: d.day,
+}
+
+# Fallback zero-pad width for temporal hive directories, used only for
+# datasets registered before level_order stored raw_value. Matches the
+# PySpark/pandas convention: month=03, day=15.
+_TEMPORAL_PAD_WIDTH = {
+    "month": 2,
+    "day":   2,
+}
+
+
+def _format_tp_value(val, level: dict):
+    """Format a time-partition value to match its on-disk directory naming.
+
+    Uses the level's raw on-disk sample (``raw_value``, captured at
+    registration) to decide zero-padding: a ``month=03`` directory yields
+    '03', a ``month=3`` directory yields '3'. Falls back to the conventional
+    zero-padded form for datasets registered before raw_value was stored.
+    """
+    raw = level.get("raw_value")
+    if isinstance(raw, str) and raw.isdigit():
+        return str(val).zfill(len(raw)) if raw.startswith("0") else str(val)
+    pad = _TEMPORAL_PAD_WIDTH.get(level["column"].lower())
+    return str(val).zfill(pad) if pad else val
+
+
+def _derive_time_partitions(
+    dates: List[str],
+    level_order: list,
+) -> tuple:
+    """Derive time_partition path values and WHERE conditions from dates.
+
+    Returns (path_vals, conditions, params):
+      - path_vals: {col: value} for single-value cases (pinned in hive path)
+      - conditions: SQL WHERE fragments for multi-value cases
+      - params: corresponding bind parameters
+    """
+    from datetime import date as dt_date, timedelta
+
+    tp_levels = [lv for lv in level_order if lv["type"] == "time_partition"]
+    if not tp_levels or not dates:
+        return {}, [], []
+
+    start = dt_date.fromisoformat(str(dates[0])[:10])
+    end = dt_date.fromisoformat(str(dates[1])[:10])
+
+    path_vals: dict = {}
+    conditions: list = []
+    params: list = []
+
+    for lv in tp_levels:
+        col = lv["column"]
+        extractor = _TEMPORAL_EXTRACTORS.get(col.lower())
+        if extractor is None:
+            continue  # unknown component — leave as wildcard
+
+        # Collect all distinct values across the date range
+        values = set()
+        cur = start
+        while cur <= end:
+            values.add(extractor(cur))
+            cur += timedelta(days=1)
+
+        if len(values) == 1:
+            # Format to match on-disk directory names (e.g. month=03 vs month=3).
+            path_vals[col] = _format_tp_value(values.pop(), lv)
+        else:
+            sorted_vals = sorted(values)
+            placeholders = ",".join("?" * len(sorted_vals))
+            conditions.append(f"{col} IN ({placeholders})")
+            params.extend(sorted_vals)
+
+    return path_vals, conditions, params
+
+
 # ── Hive path construction ───────────────────────────────────────────────────
 # Generic path builder using the stored level_order from registration.
 
@@ -108,16 +198,18 @@ def build_hive_path(
     entity_value: Optional[str] = None,
     filter_vals: Optional[dict] = None,
     time_value: Optional[str] = None,
+    time_partition_vals: Optional[dict] = None,
     bucket_value: Optional[int] = None,
     glob_suffix: str = "/*.parquet",
 ) -> Optional[str]:
     """Build an exact hive partition path from the stored level_order.
 
     Walks the level_order list in sequence. For each level:
-      - "partition" / "filter" → look up value in filter_vals[column]
-      - "entity"               → use entity_value
-      - "hash_bucket"          → use bucket_value
-      - "time"                 → use time_value
+      - "partition" / "filter"  → look up value in filter_vals[column]
+      - "entity"                → use entity_value
+      - "hash_bucket"           → use bucket_value
+      - "time"                  → use time_value
+      - "time_partition"        → look up value in time_partition_vals[column]
 
     If a level's value is None (not provided), appends ``/*`` (glob wildcard).
     This allows partial path construction — e.g. omitting time to get
@@ -133,6 +225,7 @@ def build_hive_path(
         return None
 
     filter_vals = filter_vals or {}
+    time_partition_vals = time_partition_vals or {}
     path = dataset_obj.data_location
 
     for level in level_order:
@@ -145,6 +238,8 @@ def build_hive_path(
             val = bucket_value
         elif ltype == "time":
             val = time_value
+        elif ltype == "time_partition":
+            val = time_partition_vals.get(col)
         elif ltype in ("partition", "filter"):
             val = filter_vals.get(col)
         else:
@@ -158,6 +253,49 @@ def build_hive_path(
     return path + glob_suffix
 
 
+def _diagnose_pinned_miss(
+    dataset_obj,
+    *,
+    entity_value=None,
+    filter_vals: Optional[dict] = None,
+    time_value=None,
+    time_partition_vals: Optional[dict] = None,
+) -> Optional[tuple]:
+    """After a pinned-path query matched no files, find the first missing segment.
+
+    Walks the pinned hive path level by level with ``os.path.isdir`` (a handful
+    of cheap stat calls) and returns ``(level_type, segment)`` for the first
+    pinned directory that does not exist on disk — e.g. ``("entity",
+    "country=Foo")`` for a DB/disk entity mismatch, or ``("time_partition",
+    "month=03")`` for a naming-convention mismatch. Returns None when every
+    pinned segment exists (the miss is at or below the first wildcard level).
+    """
+    filter_vals = filter_vals or {}
+    time_partition_vals = time_partition_vals or {}
+    path = dataset_obj.data_location
+
+    for level in dataset_obj.level_order:
+        col, ltype = level["column"], level["type"]
+        if ltype == "entity":
+            val = entity_value
+        elif ltype == "time":
+            val = time_value
+        elif ltype == "time_partition":
+            val = time_partition_vals.get(col)
+        elif ltype in ("partition", "filter"):
+            val = filter_vals.get(col)
+        else:
+            val = None  # hash_bucket — never pinned by load_system
+
+        if val is None:
+            return None  # wildcard — cannot attribute the miss further down
+        segment = f"{col}={quote(str(val), safe='')}"
+        path = f"{path}/{segment}"
+        if not os.path.isdir(path):
+            return ltype, segment
+    return None
+
+
 # ── DuckDB error classification ──────────────────────────────────────────────
 
 _DATA_MISSING_PATTERNS = [
@@ -167,9 +305,14 @@ _DATA_MISSING_PATTERNS = [
 ]
 
 
-def _is_data_missing(exc: Exception) -> bool:
+def is_data_missing(exc: Exception) -> bool:
+    """True when *exc* is DuckDB's way of saying the target files don't exist."""
     msg = str(exc)
     return any(p.search(msg) for p in _DATA_MISSING_PATTERNS)
+
+
+# Internal alias — module-private call sites predate the public name.
+_is_data_missing = is_data_missing
 
 
 @contextmanager
@@ -184,14 +327,17 @@ def handle_query_error(dataset_label: str):
     Catches raw DuckDB exceptions and raises custom exceptions that are
     converted to JSON responses by the global handlers in main.py.
 
+    - Timeout (InterruptException) → QueryTimeoutError (→ 504)
     - File-not-found → DataNotAvailableError (→ 404)
     - Other errors   → QueryError (→ 500, no internal paths leaked)
     - HTTPExceptions pass through unchanged
     """
     try:
         yield
-    except (HTTPException, DataNotAvailableError, QueryError):
+    except (HTTPException, DataNotAvailableError, QueryError, QueryTimeoutError):
         raise
+    except duckdb.InterruptException:
+        raise QueryTimeoutError(dataset_label)
     except Exception as exc:
         if _is_data_missing(exc):
             raise DataNotAvailableError(dataset_label)
@@ -348,6 +494,11 @@ def load_system(
     is done via WHERE clauses. For parquet_hive, hive_partitioning=true means
     DuckDB prunes partition directories automatically.
 
+    For parquet_hive with level_order, builds a *pinned* path that bakes
+    concrete entity and filter values into the directory path rather than
+    relying on post-enumeration WHERE pruning.  Only the time level remains
+    a wildcard (``/*``), dramatically reducing NFS directory enumeration.
+
     Column names come from endpoint_schema (type_column / count_column),
     defaulting to 'types' / 'counts'. The time column comes from
     transform.time_dimension.
@@ -364,39 +515,130 @@ def load_system(
     count_col = ep.get("count_column") or "counts"
     time_col  = tr.get("time_dimension")
 
-    from_clause = _path_expr(dataset_obj)
-
     schema = dataset_obj.data_schema or {}
-    conditions, params = [], []
-    if entity_col and local_id is not None:
-        conditions.append(f"{entity_col} = ?")
-        params.append(local_id)
-    if time_col and dates:
-        col_type = schema.get(time_col, "")
-        cast = _cast_dates([str(d) for d in dates], col_type)
-        conditions.append(f"{time_col} BETWEEN ? AND ?")
-        params.extend(cast)
-    for col, val in filter_vals.items():
-        conditions.append(f"{col} = ?")
-        params.append(val)
+
+    # For parquet_hive, build a pinned path: concrete values for entity,
+    # filter, time_partition, and (when single-date) time — so DuckDB skips
+    # NFS directory enumeration entirely.
+    if dataset_obj.data_format == "parquet_hive" and getattr(dataset_obj, "level_order", None):
+        # Pin time for single-date queries (avoids date-directory enumeration).
+        # Only works when a time-type level exists in level_order — otherwise
+        # time_dimension is an internal parquet column and needs a WHERE clause.
+        has_time_level = any(lv["type"] == "time" for lv in dataset_obj.level_order)
+        time_value = None
+        if has_time_level and time_col and dates and str(dates[0]) == str(dates[1]):
+            time_value = str(dates[0])
+
+        # Derive time_partition values (year/month/day) from dates.
+        # Single-value → pinned in path; multi-value → wildcard + WHERE IN.
+        tp_path_vals, tp_conditions, tp_params = _derive_time_partitions(
+            dates or [], dataset_obj.level_order,
+        )
+
+        pinned_path = build_hive_path(
+            dataset_obj,
+            entity_value=local_id,
+            filter_vals=filter_vals,
+            time_value=time_value,
+            time_partition_vals=tp_path_vals,
+        )
+        from_clause = f"read_parquet('{pinned_path}', hive_partitioning=true)"
+
+        # WHERE: time_partition pruning + date BETWEEN for the actual time column.
+        conditions = tp_conditions
+        params = tp_params
+        if time_col and dates and time_value is None:
+            col_type = schema.get(time_col, "")
+            cast = _cast_dates([str(d) for d in dates], col_type)
+            conditions.append(f"{time_col} BETWEEN ? AND ?")
+            params.extend(cast)
+
+        # Columns that are not hive levels live inside the parquet files —
+        # the pinned path can't encode them, so they still need WHERE clauses
+        # (e.g. an in-file filter_dimension like 'sex', or an in-file entity).
+        level_cols = {lv["column"] for lv in dataset_obj.level_order}
+        if entity_col and local_id is not None and entity_col not in level_cols:
+            conditions.append(f"{entity_col} = ?")
+            params.append(local_id)
+        for col, val in filter_vals.items():
+            if col not in level_cols:
+                conditions.append(f"{col} = ?")
+                params.append(val)
+
+        pinned = True
+    else:
+        from_clause = _path_expr(dataset_obj)
+
+        conditions, params = [], []
+        if entity_col and local_id is not None:
+            conditions.append(f"{entity_col} = ?")
+            params.append(local_id)
+        if time_col and dates:
+            col_type = schema.get(time_col, "")
+            cast = _cast_dates([str(d) for d in dates], col_type)
+            conditions.append(f"{time_col} BETWEEN ? AND ?")
+            params.extend(cast)
+        for col, val in filter_vals.items():
+            conditions.append(f"{col} = ?")
+            params.append(val)
+
+        pinned = False
+
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    # limit=0 means "no limit" (documented contract of the rtd/allotax endpoints).
+    limit_clause = "LIMIT ?" if limit else ""
+    limit_params = [limit] if limit else []
 
-    rows = conn.execute(
-        f"""
-        SELECT {type_col}, SUM({count_col}) AS counts
-        FROM {from_clause}
-        {where}
-        GROUP BY {type_col}
-        ORDER BY counts DESC
-        LIMIT ?
-        """,
-        [*params, limit],
-    ).fetchall()
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT {type_col}, SUM({count_col}) AS counts
+            FROM {from_clause}
+            {where}
+            GROUP BY {type_col}
+            ORDER BY counts DESC
+            {limit_clause}
+            """,
+            [*params, *limit_params],
+        ).fetchall()
+    except Exception as exc:
+        if pinned and _is_data_missing(exc):
+            # Pinned path targets a specific partition that doesn't exist.
+            # Cheap filesystem walk to attribute the miss: an entity-level
+            # mismatch is a misconfiguration worth a diagnostic 404; anything
+            # else (e.g. a date partition that genuinely doesn't exist)
+            # returns empty and the caller decides whether that is an error.
+            missing = _diagnose_pinned_miss(
+                dataset_obj,
+                entity_value=local_id,
+                filter_vals=filter_vals,
+                time_value=time_value,
+                time_partition_vals=tp_path_vals,
+            )
+            if missing and missing[0] == "entity":
+                raise HTTPException(
+                    status_code=404,
+                    detail=(
+                        f"Entity '{local_id}' not found: hive directory "
+                        f"'{missing[1]}' does not exist on disk. If this dataset "
+                        "uses entity_namespace (Pattern 2), verify the column "
+                        "stores full URL values (e.g. https://openalex.org/ID, not just A...)."
+                    ),
+                )
+            if missing:
+                log.warning(
+                    "Pinned hive path miss for %s/%s: segment '%s' (%s level) "
+                    "not on disk — check the on-disk naming convention",
+                    getattr(dataset_obj, "domain", "?"),
+                    getattr(dataset_obj, "dataset_id", "?"),
+                    missing[1], missing[0],
+                )
+            rows = []
+        else:
+            raise
 
-    if not rows and entity_col and local_id is not None:
+    if not rows and entity_col and local_id is not None and not pinned:
         # Distinguish "entity not found" from "entity exists but no data in range".
-        # For parquet_hive, hive partition pruning makes this cheap: DuckDB only
-        # opens files in the matching entity= directory (or returns 0 if absent).
         exists = conn.execute(
             f"SELECT COUNT(*) FROM {from_clause} WHERE {entity_col} = ? LIMIT 1",
             [local_id],
