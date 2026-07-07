@@ -13,13 +13,15 @@ from importlib.metadata import PackageNotFoundError, version as pkg_version
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
+from storywrangler_schemas.coercion import coerce_scalar
 from ..core.database import get_session
-from ..core.duckdb_client import get_duckdb_client
+from ..core.duckdb_client import get_duckdb_client, run_blocking
 from ..core.query_utils import (
-    _is_data_missing, build_hive_path, get_partition_defaults, get_queryable_dims,
-    handle_query_error, load_system, parse_dates, resolve_entity,
+    get_partition_defaults, get_queryable_dims,
+    handle_query_error, latest_from_manifest, load_system, parse_dates, resolve_entity,
 )
 from ..core.registry_utils import get_latest_entry
+from . import openapi_docs as docs
 from ..core.timing import timed
 
 router = APIRouter()
@@ -48,15 +50,7 @@ def _validate_and_coerce_filters(filter_dicts: list, filter_values: dict) -> Non
             if not valid:
                 continue
             if val not in valid:
-                coerced = val
-                if isinstance(val, str):
-                    try:
-                        coerced = int(val)
-                    except (ValueError, TypeError):
-                        try:
-                            coerced = float(val)
-                        except (ValueError, TypeError):
-                            pass
+                coerced = coerce_scalar(val)
                 if coerced not in valid:
                     raise HTTPException(
                         status_code=400,
@@ -93,84 +87,7 @@ def _allotax_version() -> str:
 
 @router.get(
     "/allotax",
-    openapi_extra={
-        "x-powered-by": "rust",
-        "responses": {
-            "200": {
-                "description": "Successful response",
-                "content": {
-                    "application/json": {
-                        "schema": {
-                            "type": "object",
-                            "properties": {
-                                "normalization": {"type": "number", "description": "Normalization constant for the rank-turbulence divergence"},
-                                "delta_sum": {"type": "number", "description": "Sum of normalized divergence elements — the actual D_alpha^R value"},
-                                "diamond_counts": {"type": "array", "description": "2D rank-space histogram used to render the diamond plot"},
-                                "max_delta_loss": {"type": "number", "description": "Maximum delta-loss value (used for color-scale normalization)"},
-                                "ncells": {"type": "integer", "description": "Number of cells along one side of the diamond grid; use to size the band scale"},
-                                "maxlog10": {"type": "number", "description": "Largest log10(rank) across both systems, rounded up to at least 1; use to label diamond axes"},
-                                "alpha": {"type": "number", "description": "Alpha parameter used in the computation"},
-                                "balance": {"type": "number", "description": "Balance measure between the two systems (0.5 = equal, >0.5 = system 2 dominates)"},
-                                "wordshift": {
-                                    "type": "array",
-                                    "description": "Top contributing types, sorted by absolute divergence contribution.",
-                                    "items": {
-                                        "type": "object",
-                                        "properties": {
-                                            "type": {"type": "string", "description": "The n-gram / token"},
-                                            "rank1": {"type": "integer", "description": "Rank in system 1 (0 = absent)"},
-                                            "rank2": {"type": "integer", "description": "Rank in system 2 (0 = absent)"},
-                                            "score": {"type": "number", "description": "Signed divergence contribution (positive = system 2 favours this type)"},
-                                        },
-                                    },
-                                },
-                                "meta": {
-                                    "type": "object",
-                                    "description": "Request metadata echoed back",
-                                    "properties": {
-                                        "system1": {"type": "object", "description": "System 1 parameters: entity, dates, filters, type count"},
-                                        "system2": {"type": "object", "description": "System 2 parameters: entity, dates, filters, type count"},
-                                        "domain": {"type": "string", "description": "Dataset domain"},
-                                        "dataset": {"type": "string", "description": "Dataset ID"},
-                                        "granularity": {"type": "string", "description": "Granularity used"},
-                                    },
-                                },
-                            },
-                        },
-                        "example": {
-                            "normalization": 0.9871,
-                            "diamond_counts": [[0, 1, 0], [2, 5, 3], [1, 4, 2]],
-                            "max_delta_loss": 0.0421,
-                            "alpha": 1.0,
-                            "balance": 0.523,
-                            "wordshift": [
-                                {"type": "COVID", "rank1": 850, "rank2": 45, "score": 0.0189},
-                                {"type": "election", "rank1": 1200, "rank2": 78, "score": 0.0142},
-                                {"type": "the", "rank1": 1, "rank2": 2, "score": -0.0021},
-                            ],
-                            "meta": {
-                                "system1": {
-                                    "entity": "wikidata:Q30",
-                                    "dates": "2024-10-01,2024-10-31",
-                                    "filters": {},
-                                    "types": 50000,
-                                },
-                                "system2": {
-                                    "entity": "wikidata:Q145",
-                                    "dates": "2024-11-01,2024-11-30",
-                                    "filters": {},
-                                    "types": 48000,
-                                },
-                                "domain": "wikimedia",
-                                "dataset": "ngrams",
-                                "granularity": "daily",
-                            },
-                        },
-                    }
-                },
-            }
-        }
-    },
+    openapi_extra=docs.STORYWRANGLER_ALLOTAXONOMETER,
 )
 async def allotaxonometer(
     request: Request,
@@ -259,118 +176,39 @@ async def allotaxonometer(
             detail="allotax module not available. Install via: pip install allotax",
         )
 
-    with handle_query_error(f"{domain}/{dataset}"):
-        conn = get_duckdb_client().connect()
-        use_hive = dataset_obj.data_format == "parquet_hive"
-        if use_hive and dr1 and dr1[0] == dr1[1]:
-            sys1 = _load_hive_direct(conn, dataset_obj, local_id1, dr1[0], filter_vals1, ngram_limit)
-        else:
-            sys1 = load_system(conn, dataset_obj, local_id1, dr1, filter_vals1, ngram_limit)
-        if use_hive and dr2 and dr2[0] == dr2[1]:
-            sys2 = _load_hive_direct(conn, dataset_obj, local_id2, dr2[0], filter_vals2, ngram_limit)
-        else:
-            sys2 = load_system(conn, dataset_obj, local_id2, dr2, filter_vals2, ngram_limit)
+    def _sync():
+        with handle_query_error(f"{domain}/{dataset}"):
+            with get_duckdb_client().timed_connect() as conn:
+                sys1 = load_system(conn, dataset_obj, local_id1, dr1, filter_vals1, ngram_limit)
+                sys2 = load_system(conn, dataset_obj, local_id2, dr2, filter_vals2, ngram_limit)
 
-    try:
-        if alphas:
-            alpha_list = [float(a) for a in alphas.split(",")]
-            result_data = allotax.compute_allotax_multi_alpha(sys1, sys2, alpha_list, wordshift_limit)
-            # serde_json serializes f64::INFINITY as null → Python None.
-            # Restore from the original input; use string since JSON has no Infinity.
-            for ar, a in zip(result_data.get("alpha_results", []), alpha_list):
-                if ar.get("alpha") is None and math.isinf(a):
-                    ar["alpha"] = "Infinity"
-        else:
-            result_data = allotax.compute_allotax(sys1, sys2, alpha_f, wordshift_limit)
-            if result_data.get("alpha") is None and math.isinf(alpha_f):
-                result_data["alpha"] = "Infinity"
+        try:
+            if alphas:
+                alpha_list = [float(a) for a in alphas.split(",")]
+                result_data = allotax.compute_allotax_multi_alpha(sys1, sys2, alpha_list, wordshift_limit)
+                for ar, a in zip(result_data.get("alpha_results", []), alpha_list):
+                    if ar.get("alpha") is None and math.isinf(a):
+                        ar["alpha"] = "Infinity"
+            else:
+                result_data = allotax.compute_allotax(sys1, sys2, alpha_f, wordshift_limit)
+                if result_data.get("alpha") is None and math.isinf(alpha_f):
+                    result_data["alpha"] = "Infinity"
 
-        return _sanitize_floats({
-            **result_data,
-            "meta": {
-                "system1": {"entity": entity, "dates": dates, "filters": filter_vals1, "types": len(sys1["types"])},
-                "system2": {"entity": entity2, "dates": dates2, "filters": filter_vals2, "types": len(sys2["types"])},
-                "domain": domain,
-                "dataset": dataset,
-                "dataset_version": dataset_obj.version,
-                "allotax_version": _allotax_version(),
-            },
-        })
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Allotax computation failed: {str(e)}")
+            return _sanitize_floats({
+                **result_data,
+                "meta": {
+                    "system1": {"entity": entity, "dates": dates, "filters": filter_vals1, "types": len(sys1["types"])},
+                    "system2": {"entity": entity2, "dates": dates2, "filters": filter_vals2, "types": len(sys2["types"])},
+                    "domain": domain,
+                    "dataset": dataset,
+                    "dataset_version": dataset_obj.version,
+                    "allotax_version": _allotax_version(),
+                },
+            })
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Allotax computation failed: {str(e)}")
 
-
-def _load_hive_direct(conn, dataset_obj, local_id, date_str, filter_vals, limit):
-    """Load types+counts via direct Hive partition path (no glob scan).
-
-    Constructs the exact partition directory path from filter values, entity,
-    and date — avoids the expensive /**/*.parquet glob that load_system uses.
-    """
-    ep = dataset_obj.endpoint_schema or {}
-    type_col = ep.get("type_column") or "types"
-    count_col = ep.get("count_column") or "counts"
-
-    path = build_hive_path(
-        dataset_obj,
-        entity_value=local_id,
-        filter_vals=filter_vals,
-        time_value=date_str,
-    )
-    if path is None:
-        raise ValueError(
-            f"parquet_hive dataset '{dataset_obj.dataset_id}' has no level_order. "
-            "Re-register the dataset to populate level_order."
-        )
-
-    try:
-        if limit:
-            order_and_limit = f" ORDER BY {count_col} DESC LIMIT {int(limit)}"
-        else:
-            order_and_limit = ""
-        rows = conn.execute(
-            f"SELECT {type_col}, {count_col} FROM read_parquet('{path}')"
-            f"{order_and_limit}",
-        ).fetchall()
-    except Exception as exc:
-        if _is_data_missing(exc):
-            return {"types": [], "counts": []}
-        raise
-
-    return {"types": [r[0] for r in rows], "counts": [float(r[1]) for r in rows]}
-
-
-def _latest_from_manifest(dataset_obj, local_id, granularity=None):
-    """Read the latest available date from manifest.availability.
-
-    Availability is keyed by local_id (entity column value) with nested
-    partition dims and min/max bounds.  Searches recursively for the
-    granularity key, falling back to the first path at each level.
-    """
-    availability = (dataset_obj.manifest or {}).get("availability", {})
-    if not availability:
-        return None
-    if local_id is not None and local_id in availability:
-        entry = availability[local_id]
-    elif local_id is None:
-        entry = availability
-    else:
-        return None
-
-    def _find_max(d, target):
-        if not isinstance(d, dict):
-            return None
-        if "min" in d and "max" in d:
-            return d["max"]
-        if target and target in d:
-            return _find_max(d[target], None)
-        for v in d.values():
-            if isinstance(v, dict):
-                result = _find_max(v, target)
-                if result is not None:
-                    return result
-        return None
-
-    return _find_max(entry, granularity)
+    return await run_blocking(_sync)
 
 
 @router.get("/rtd")
@@ -384,7 +222,7 @@ async def rank_turbulence_divergence(
     alpha: str = Query("0.25", description="RTD alpha parameter (number or 'inf')"),
     alphas: Optional[str] = Query(None, description="Comma-separated alphas for multi-alpha mode, e.g. '0.25,1.0,inf'"),
     ngram_limit: int = Query(10000, description="Max types to load per system (0 = no limit)"),
-    limit: int = Query(10000, description="Max wordshift entries to return (0 = no limit)"),
+    wordshift_limit: int = Query(10000, description="Max wordshift entries to return (0 = no limit)"),
     db: AsyncSession = Depends(get_session),
 ):
     """Lightweight rank-turbulence divergence between two dates for a single entity.
@@ -432,17 +270,17 @@ async def rank_turbulence_divergence(
 
     fv = dataset_obj.filter_values or {}
     qp = request.query_params
-    filter_vals1 = {dim: qp[dim] for dim in all_dims if dim in qp}
+    filter_vals = {dim: qp[dim] for dim in all_dims if dim in qp}
     filter_vals2 = {dim: qp[f"{dim}2"] for dim in all_dims if f"{dim}2" in qp}
 
-    _apply_defaults(filter_vals1, defaults)
+    _apply_defaults(filter_vals, defaults)
     _apply_defaults(filter_vals2, defaults)
 
-    _validate_and_coerce_filters([filter_vals1, filter_vals2], fv)
+    _validate_and_coerce_filters([filter_vals, filter_vals2], fv)
 
     # Same entity for both systems (date-vs-date comparison)
     if not filter_vals2:
-        filter_vals2 = dict(filter_vals1)
+        filter_vals2 = dict(filter_vals)
 
     dr1 = parse_dates(dates)
     dr2 = parse_dates(dates2)
@@ -463,72 +301,63 @@ async def rank_turbulence_divergence(
         )
 
     with timed("discover", "Latest date from manifest"):
-        latest_date = _latest_from_manifest(dataset_obj, local_id, filter_vals1.get("granularity"))
+        latest_date = latest_from_manifest(dataset_obj, local_id, filter_vals.get("granularity"))
 
-    with timed("query", "DuckDB data load"):
-        with handle_query_error(f"{domain}/{dataset}"):
-            conn = get_duckdb_client().connect()
-            if dataset_obj.data_format == "parquet_hive":
-                sys_target = _load_hive_direct(
-                    conn, dataset_obj, local_id, dates.split(",")[0],
-                    filter_vals1, ngram_limit)
-                sys_ref = _load_hive_direct(
-                    conn, dataset_obj, local_id, dates2.split(",")[0],
-                    filter_vals2, ngram_limit)
-            else:
-                sys_target = load_system(conn, dataset_obj, local_id, dr1, filter_vals1, ngram_limit)
-                sys_ref = load_system(conn, dataset_obj, local_id, dr2, filter_vals2, ngram_limit)
+    def _sync():
+        with timed("query", "DuckDB data load"):
+            with handle_query_error(f"{domain}/{dataset}"):
+                with get_duckdb_client().timed_connect() as conn:
+                    target = load_system(conn, dataset_obj, local_id, dr1, filter_vals, ngram_limit)
+                    ref = load_system(conn, dataset_obj, local_id, dr2, filter_vals2, ngram_limit)
 
-    if not sys_target["types"]:
-        raise HTTPException(status_code=404, detail=f"No data for target date {dates}")
-    if not sys_ref["types"]:
-        raise HTTPException(status_code=404, detail=f"No data for reference date {dates2}")
+        if not target["types"]:
+            raise HTTPException(status_code=404, detail=f"No data for target date {dates}")
+        if not ref["types"]:
+            raise HTTPException(status_code=404, detail=f"No data for reference date {dates2}")
 
-    try:
-        with timed("allotax", "RTD computation"):
-            # ref first → positive divergence = "more prominent on target date"
-            if alphas:
-                alpha_list = [float(a) for a in alphas.split(",")]
-                result = allotax.rank_turbulence_divergence_multi_alpha(
-                    sys_ref, sys_target, alpha_list, limit=limit)
-                # serde_json serializes f64::INFINITY as null → Python None.
-                # Restore from the original input; use string since JSON has no Infinity.
-                for ar, a in zip(result.get("alpha_results", []), alpha_list):
-                    if ar.get("alpha") is None and math.isinf(a):
-                        ar["alpha"] = "Infinity"
-                result_data = result
-            else:
-                result = allotax.rank_turbulence_divergence(
-                    sys_ref, sys_target, alpha_f, limit=limit)
-                if result.get("alpha") is not None:
-                    pass  # no fixup needed
-                result_data = {
-                    "wordshift": result["wordshift"],
-                    "normalization": result["normalization"],
-                    "delta_sum": result["delta_sum"],
-                }
+        try:
+            with timed("allotax", "RTD computation"):
+                # ref first → positive divergence = "more prominent on target date"
+                if alphas:
+                    alpha_list = [float(a) for a in alphas.split(",")]
+                    result = allotax.rank_turbulence_divergence_multi_alpha(
+                        ref, target, alpha_list, limit=wordshift_limit)
+                    for ar, a in zip(result.get("alpha_results", []), alpha_list):
+                        if ar.get("alpha") is None and math.isinf(a):
+                            ar["alpha"] = "Infinity"
+                    result_data = result
+                else:
+                    result = allotax.rank_turbulence_divergence(
+                        ref, target, alpha_f, limit=wordshift_limit)
+                    if result.get("alpha") is not None:
+                        pass  # no fixup needed
+                    result_data = {
+                        "wordshift": result["wordshift"],
+                        "normalization": result["normalization"],
+                        "delta_sum": result["delta_sum"],
+                    }
 
-        with timed("serialize", "Response serialization"):
-            response = _sanitize_floats({
-                **result_data,
-                "latest_available_date": latest_date,
-                "meta": {
-                    "entity": entity,
-                    "dates": dates,
-                    "dates2": dates2,
-                    "alpha": alpha_f if not alphas else alpha_list,
-                    "domain": domain,
-                    "dataset": dataset,
-                    "dataset_version": dataset_obj.version,
-                    "filters": filter_vals1,
-                    "ngram_limit": ngram_limit,
-                    "limit": limit,
-                    "types_target": len(sys_target["types"]),
-                    "types_ref": len(sys_ref["types"]),
-                    "allotax_version": _allotax_version(),
-                },
-            })
+            with timed("serialize", "Response serialization"):
+                return _sanitize_floats({
+                    **result_data,
+                    "latest_available_date": latest_date,
+                    "meta": {
+                        "entity": entity,
+                        "dates": dates,
+                        "dates2": dates2,
+                        "alpha": alpha_f if not alphas else alpha_list,
+                        "domain": domain,
+                        "dataset": dataset,
+                        "dataset_version": dataset_obj.version,
+                        "filters": filter_vals,
+                        "ngram_limit": ngram_limit,
+                        "wordshift_limit": wordshift_limit,
+                        "types_target": len(target["types"]),
+                        "types_ref": len(ref["types"]),
+                        "allotax_version": _allotax_version(),
+                    },
+                })
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"RTD computation failed: {str(e)}")
 
-        return response
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"RTD computation failed: {str(e)}")
+    return await run_blocking(_sync)

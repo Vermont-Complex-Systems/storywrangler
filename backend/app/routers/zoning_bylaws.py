@@ -5,57 +5,17 @@ Zoning bylaws API endpoints.
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from ..core.database import get_session
-from ..core.duckdb_client import get_duckdb_client
+from ..core.duckdb_client import get_duckdb_client, run_blocking
 from ..core.query_utils import handle_query_error, load_system, resolve_entity
 from ..core.registry_utils import get_latest_entry
+from . import openapi_docs as docs
 
 router = APIRouter()
 
 
 @router.get(
     "/ngrams",
-    openapi_extra={
-        "responses": {
-            "200": {
-                "description": "Successful response",
-                "content": {
-                    "application/json": {
-                        "schema": {
-                            "type": "object",
-                            "properties": {
-                                "data": {
-                                    "type": "array",
-                                    "description": "Top words in the town's zoning bylaw, sorted by frequency descending.",
-                                    "items": {
-                                        "type": "object",
-                                        "properties": {
-                                            "types": {"type": "string", "description": "Word token"},
-                                            "counts": {"type": "integer", "description": "Frequency count of the word"},
-                                        },
-                                    },
-                                },
-                                "metadata": {
-                                    "type": "object",
-                                    "description": "Request metadata echoed back",
-                                    "properties": {
-                                        "location": {"type": "string", "description": "Entity ID used"},
-                                    },
-                                },
-                            },
-                        },
-                        "example": {
-                            "data": [
-                                {"types": "the", "counts": 4394},
-                                {"types": "of", "counts": 2559},
-                                {"types": "and", "counts": 1956},
-                            ],
-                            "metadata": {"location": "Arlington"},
-                        },
-                    }
-                },
-            }
-        }
-    },
+    openapi_extra=docs.ZONING_BYLAWS_GET_ZONING_BYLAWS_NGRAMS,
 )
 async def get_zoning_bylaws_ngrams(
     locations: str = Query(default="Arlington", description="Town name (e.g. 'Arlington') or Wikidata entity ID (e.g. 'wikidata:Q675558')"),
@@ -69,11 +29,14 @@ async def get_zoning_bylaws_ngrams(
 
     em = await resolve_entity(db, "vt-zoning-atlas", "ngrams", locations)
 
-    with handle_query_error("vt-zoning-atlas/ngrams"):
-        conn = get_duckdb_client().connect()
-        sys1 = load_system(conn, dataset_obj, em.local_id, None, {}, limit)
-        formatted = [{"types": t, "counts": c} for t, c in zip(sys1["types"], sys1["counts"])]
-        return {
-            "data": formatted,
-            "metadata": {"location": locations},
-        }
+    def _query():
+        with handle_query_error("vt-zoning-atlas/ngrams"):
+            with get_duckdb_client().timed_connect() as conn:
+                sys1 = load_system(conn, dataset_obj, em.local_id, None, {}, limit)
+                formatted = [{"types": t, "counts": c} for t, c in zip(sys1["types"], sys1["counts"])]
+                return {
+                    "data": formatted,
+                    "metadata": {"location": locations},
+                }
+
+    return await run_blocking(_query)

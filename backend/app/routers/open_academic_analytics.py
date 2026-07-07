@@ -20,7 +20,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.database import get_session
-from ..core.duckdb_client import get_duckdb_client
+from ..core.duckdb_client import get_duckdb_client, run_blocking
 from ..core.query_utils import handle_query_error
 from ..core.registry_utils import get_latest_entry
 
@@ -36,6 +36,18 @@ async def _get_path(db: AsyncSession, dataset_id: str) -> str:
             detail=f"Dataset 'open-academic-analytics/{dataset_id}' not found. Register it first.",
         )
     return entry.data_location
+
+
+async def _fetch_dicts(label: str, sql: str, params: Optional[list] = None) -> List[Dict[str, Any]]:
+    """Execute *sql* off the event loop and return rows as dicts."""
+    def _query():
+        with handle_query_error(label):
+            with get_duckdb_client().timed_connect() as conn:
+                result = conn.execute(sql, params or [])
+                cols = [d[0] for d in result.description]
+                return [dict(zip(cols, row)) for row in result.fetchall()]
+
+    return await run_blocking(_query)
 
 # ── /academic-research-groups ──────────────────────────────────────────────────
 
@@ -65,13 +77,7 @@ async def get_academic_research_groups(
         ORDER BY payroll_name
     """
 
-    with handle_query_error("open-academic-analytics/academic-research-groups"):
-        conn = get_duckdb_client().connect()
-        result = conn.execute(sql, params)
-        cols = [d[0] for d in result.description]
-        rows = result.fetchall()
-
-    return [dict(zip(cols, row)) for row in rows]
+    return await _fetch_dicts("open-academic-analytics/academic-research-groups", sql, params)
 
 
 # ── /authors ───────────────────────────────────────────────────────────────────
@@ -83,13 +89,10 @@ async def get_all_authors(
     """Get all authors with current age, last publication year, and research group status."""
     path = await _get_path(db, "authors")
 
-    with handle_query_error("open-academic-analytics/authors"):
-        conn = get_duckdb_client().connect()
-        result = conn.execute(f"SELECT * FROM read_parquet('{path}') ORDER BY ego_display_name")
-        cols = [d[0] for d in result.description]
-        rows = result.fetchall()
-
-    return [dict(zip(cols, row)) for row in rows]
+    return await _fetch_dicts(
+        "open-academic-analytics/authors",
+        f"SELECT * FROM read_parquet('{path}') ORDER BY ego_display_name",
+    )
 
 
 # ── /coauthors/{author_name} ───────────────────────────────────────────────────
@@ -119,13 +122,7 @@ async def get_coauthors_for_author(
     if limit:
         params.append(limit)
 
-    with handle_query_error("open-academic-analytics/coauthors"):
-        conn = get_duckdb_client().connect()
-        result = conn.execute(sql, params)
-        cols = [d[0] for d in result.description]
-        rows = result.fetchall()
-
-    return [dict(zip(cols, row)) for row in rows]
+    return await _fetch_dicts("open-academic-analytics/coauthors", sql, params)
 
 
 # ── /embeddings ────────────────────────────────────────────────────────────────
@@ -138,15 +135,10 @@ async def get_embeddings_data(
     """Papers with UMAP embeddings and department metadata for visualization."""
     path = await _get_path(db, "papers")
 
-    with handle_query_error("open-academic-analytics/papers"):
-        conn = get_duckdb_client().connect()
-        result = conn.execute(
-            f"SELECT * FROM read_parquet('{path}') WHERE umap_1 IS NOT NULL ORDER BY random() LIMIT {limit}"
-        )
-        cols = [d[0] for d in result.description]
-        rows = result.fetchall()
-
-    return [dict(zip(cols, row)) for row in rows]
+    return await _fetch_dicts(
+        "open-academic-analytics/papers",
+        f"SELECT * FROM read_parquet('{path}') WHERE umap_1 IS NOT NULL ORDER BY random() LIMIT {limit}",
+    )
 
 # ── /papers/{author_name} ──────────────────────────────────────────────────────
 
@@ -175,13 +167,7 @@ async def get_papers_for_author(
     if limit:
         params.append(limit)
 
-    with handle_query_error("open-academic-analytics/papers"):
-        conn = get_duckdb_client().connect()
-        result = conn.execute(sql, params)
-        cols = [d[0] for d in result.description]
-        rows = result.fetchall()
-
-    return [dict(zip(cols, row)) for row in rows]
+    return await _fetch_dicts("open-academic-analytics/papers", sql, params)
 
 # ── /training/{author_name} ────────────────────────────────────────────────────
 
@@ -215,9 +201,12 @@ async def get_training_data(
         ORDER BY pub_year, age_category
     """
 
-    with handle_query_error("open-academic-analytics/training"):
-        conn = get_duckdb_client().connect()
-        rows = conn.execute(sql, [author_name, author_name, author_name]).fetchall()
+    def _query():
+        with handle_query_error("open-academic-analytics/training"):
+            with get_duckdb_client().timed_connect() as conn:
+                return conn.execute(sql, [author_name, author_name, author_name]).fetchall()
+
+    rows = await run_blocking(_query)
 
     if not rows:
         raise HTTPException(status_code=404, detail=f"No training data found for: {author_name}")

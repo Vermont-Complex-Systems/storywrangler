@@ -7,58 +7,17 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from ..core.database import get_session
-from ..core.duckdb_client import get_duckdb_client
-from ..core.query_utils import handle_query_error, load_system, parse_dates, resolve_entity
+from ..core.query_utils import resolve_entity
 from ..core.registry_utils import get_latest_entry
+from ..core.term_series import run_top_ngrams
+from . import openapi_docs as docs
 
 router = APIRouter()
 
 
 @router.get(
     "/ngrams",
-    openapi_extra={
-        "responses": {
-            "200": {
-                "description": "Successful response",
-                "content": {
-                    "application/json": {
-                        "schema": {
-                            "type": "object",
-                            "properties": {
-                                "data": {
-                                    "type": "array",
-                                    "description": "Baby name frequency entries sorted by count descending.",
-                                    "items": {
-                                        "type": "object",
-                                        "properties": {
-                                            "types": {"type": "string", "description": "The baby name"},
-                                            "counts": {"type": "integer", "description": "Number of babies given this name in the date range"},
-                                        },
-                                    },
-                                },
-                                "metadata": {
-                                    "type": "object",
-                                    "description": "Request metadata echoed back",
-                                    "properties": {
-                                        "location": {"type": "string", "description": "Entity ID used"},
-                                        "sex": {"type": "string", "description": "Sex filter applied (M, F, or null)"},
-                                    },
-                                },
-                            },
-                        },
-                        "example": {
-                            "data": [
-                                {"types": "James", "counts": 85234},
-                                {"types": "John", "counts": 79102},
-                                {"types": "Robert", "counts": 75680},
-                            ],
-                            "metadata": {"location": "wikidata:Q30", "sex": "M"},
-                        },
-                    }
-                },
-            }
-        }
-    },
+    openapi_extra=docs.BABYNAMES_GET_BABYNAMES_TOP_NGRAMS,
 )
 async def get_babynames_top_ngrams(
     dates: str = Query(default="1991,1993", description="Year range for system 1. Single value '1991' or range '1991,1993'"),
@@ -76,27 +35,9 @@ async def get_babynames_top_ngrams(
 
     em = await resolve_entity(db, "babynames", "ngrams", locations)
 
-    filter_vals = {"sex": sex} if sex else {}
-
-    with handle_query_error("babynames/ngrams"):
-        conn = get_duckdb_client().connect()
-        dr1 = parse_dates(dates)
-        sys1 = load_system(conn, dataset_obj, em.local_id, dr1, filter_vals, limit)
-        formatted1 = [{"types": t, "counts": c} for t, c in zip(sys1["types"], sys1["counts"])]
-
-        if dates2:
-            dr2 = parse_dates(dates2)
-            sys2 = load_system(conn, dataset_obj, em.local_id, dr2, filter_vals, limit)
-            formatted2 = [{"types": t, "counts": c} for t, c in zip(sys2["types"], sys2["counts"])]
-            key1 = dr1[0] if dr1[0] == dr1[1] else f"{dr1[0]}-{dr1[1]}"
-            key2 = dr2[0] if dr2[0] == dr2[1] else f"{dr2[0]}-{dr2[1]}"
-            return {
-                key1: formatted1,
-                key2: formatted2,
-                "metadata": {"location": locations, "sex": sex},
-            }
-
-        return {
-            "data": formatted1,
-            "metadata": {"location": locations, "sex": sex},
-        }
+    return await run_top_ngrams(
+        dataset_obj, "babynames/ngrams", em.local_id, dates, dates2,
+        {"sex": sex} if sex else {}, limit,
+        metadata={"location": locations, "sex": sex},
+        range_sep="-",
+    )

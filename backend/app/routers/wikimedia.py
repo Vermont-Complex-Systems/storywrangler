@@ -2,71 +2,88 @@
 Wikimedia endpoints — Wikipedia n-grams, revision histories, and term time series.
 """
 
-from datetime import datetime, timedelta
+import logging
 from typing import Optional
+from urllib.parse import quote
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from ..core.database import get_session
-from ..core.duckdb_client import get_duckdb_client
+from ..core.duckdb_client import get_duckdb_client, run_blocking
 from ..core.query_utils import (
-    assign_bucket, build_hive_path, entity_base_path, get_bucket_config,
-    get_queryable_dims, handle_query_error, latest_from_manifest, load_system,
-    parse_dates, resolve_bucket_count, resolve_entity,
+    build_hive_path, handle_query_error, is_data_missing, latest_from_manifest,
+    resolve_entity,
 )
 from ..core.registry_utils import get_latest_entry
+from ..core.term_series import (
+    bucket_files, build_date_filter, fetch_sparkline_rows, log_fast_path_miss,
+    ngrams_context, run_top_ngrams, series_entry, validated_dims,
+)
 from ..core.timing import timed
+from . import openapi_docs as docs
+
+log = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+def _fetch_top_articles(
+    conn, top_articles_obj, terms, local_id, n, date_condition, date_params,
+) -> dict:
+    """Fetch top contributing articles for *terms*.
+
+    Returns ``{(ngram, date_str): [[url, score], ...]}``, reading only the
+    hash-bucket files that can contain the requested terms.
+
+    Missing article files are expected (the dataset may not be materialised
+    yet) and yield an empty dict. Any other failure is logged: a silently
+    empty result usually means a stale hash_bucket config routing to the
+    wrong shard, which is indistinguishable from "no data" without a log line.
+    """
+    if not top_articles_obj or not terms:
+        return {}
+    terms = sorted(terms)
+    files = bucket_files(top_articles_obj, terms, local_id, n)
+    file_list = ", ".join(f"'{f}'" for f in files)
+    placeholders = ", ".join(["?"] * len(terms))
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT ngram, date, article_url, score
+            FROM read_parquet([{file_list}])
+            WHERE ngram IN ({placeholders})
+              AND {date_condition}
+            ORDER BY ngram, date, article_rank
+            """,
+            [*terms, *date_params],
+        ).fetchall()
+    except Exception as exc:
+        if is_data_missing(exc):
+            log.info(
+                "top_articles files missing for entity=%s n=%s; returning no articles",
+                local_id, n,
+            )
+        else:
+            log.warning(
+                "top_articles lookup failed for entity=%s n=%s "
+                "(check hash_bucket config vs on-disk shards): %s",
+                local_id, n, exc,
+            )
+        return {}
+
+    articles: dict = {}
+    for ngram, dt, url, score in rows:
+        articles.setdefault((ngram, str(dt)), []).append(
+            [url, float(score) if score else 0.0]
+        )
+    return articles
 
 
 # ── top-ngrams ─────────────────────────────────────────────────────────────────
 
 @router.get(
     "/top-ngrams",
-    openapi_extra={
-        "responses": {
-            "200": {
-                "description": "Successful response",
-                "content": {
-                    "application/json": {
-                        "schema": {
-                            "type": "object",
-                            "properties": {
-                                "data": {
-                                    "type": "array",
-                                    "description": "N-gram frequency entries sorted by count descending.",
-                                    "items": {
-                                        "type": "object",
-                                        "properties": {
-                                            "types": {"type": "string", "description": "The n-gram string"},
-                                            "counts": {"type": "integer", "description": "Total occurrence count over the date range"},
-                                        },
-                                    },
-                                },
-                                "metadata": {
-                                    "type": "object",
-                                    "description": "Request metadata echoed back",
-                                    "properties": {
-                                        "granularity": {"type": "string", "description": "Granularity used (daily/weekly/monthly)"},
-                                        "location": {"type": "string", "description": "Entity ID used"},
-                                    },
-                                },
-                            },
-                        },
-                        "example": {
-                            "data": [
-                                {"types": "the", "counts": 12345678},
-                                {"types": "of", "counts": 9876543},
-                                {"types": "a", "counts": 8234567},
-                            ],
-                            "metadata": {"granularity": "daily", "location": "wikidata:Q30"},
-                        },
-                    }
-                },
-            }
-        }
-    },
+    openapi_extra=docs.WIKIMEDIA_GET_TOP_NGRAMS,
 )
 async def get_top_ngrams(
     dates: str = Query(default="2024-11-01,2024-11-07"),
@@ -82,99 +99,20 @@ async def get_top_ngrams(
     if not dataset_obj:
         raise HTTPException(status_code=404, detail="'wikimedia/ngrams' dataset not found")
 
-    fv = dataset_obj.filter_values or {}
-    queryable = get_queryable_dims(dataset_obj)
-
-    # Validate granularity against pre-introspected distinct values (if declared)
-    if "granularity" in queryable:
-        valid = fv.get("granularity", [])
-        if valid and granularity not in valid:
-            raise HTTPException(
-                status_code=400,
-                detail=f"granularity must be one of {sorted(valid)}",
-            )
-
-    # Validate n against pre-introspected ngram_size values (if declared)
-    if "ngram_size" in queryable:
-        valid_n = fv.get("ngram_size", [])
-        if valid_n and n not in valid_n:
-            raise HTTPException(
-                status_code=400,
-                detail=f"n must be one of {sorted(valid_n)}",
-            )
-
+    extra = validated_dims(dataset_obj, {"granularity": granularity, "ngram_size": n})
     em = await resolve_entity(db, "wikimedia", "ngrams", locations)
 
-    # Build filter_vals: include granularity and ngram_size if declared as partition dims.
-    extra: dict = {}
-    if "granularity" in queryable:
-        extra["granularity"] = granularity
-    if "ngram_size" in queryable:
-        extra["ngram_size"] = n
-
-    with handle_query_error("wikimedia/ngrams"):
-        conn = get_duckdb_client().connect()
-        dr1 = parse_dates(dates)
-        sys1 = load_system(conn, dataset_obj, em.local_id, dr1, extra, limit)
-        formatted1 = [{"types": t, "counts": c} for t, c in zip(sys1["types"], sys1["counts"])]
-
-        if dates2:
-            dr2 = parse_dates(dates2)
-            sys2 = load_system(conn, dataset_obj, em.local_id, dr2, extra, limit)
-            formatted2 = [{"types": t, "counts": c} for t, c in zip(sys2["types"], sys2["counts"])]
-            key1 = dr1[0] if dr1[0] == dr1[1] else f"{dr1[0]}_{dr1[1]}"
-            key2 = dr2[0] if dr2[0] == dr2[1] else f"{dr2[0]}_{dr2[1]}"
-            return {
-                key1: formatted1,
-                key2: formatted2,
-                "metadata": {"granularity": granularity, "location": locations},
-            }
-
-        return {
-            "data": formatted1,
-            "metadata": {"granularity": granularity, "location": locations},
-        }
+    return await run_top_ngrams(
+        dataset_obj, "wikimedia/ngrams", em.local_id, dates, dates2, extra, limit,
+        metadata={"granularity": granularity, "location": locations},
+    )
 
 
 # ── revisions ──────────────────────────────────────────────────────────────────
 
 @router.get(
     "/revisions",
-    openapi_extra={
-        "responses": {
-            "200": {
-                "description": "Successful response",
-                "content": {
-                    "application/json": {
-                        "schema": {
-                            "type": "object",
-                            "properties": {
-                                "articles": {
-                                    "type": "array",
-                                    "description": "Articles with extracted revision histories",
-                                    "items": {
-                                        "type": "object",
-                                        "properties": {
-                                            "identifier": {"type": "string", "description": "Article identifier (slug)"},
-                                            "revision_count": {"type": "integer", "description": "Number of revisions extracted"},
-                                        },
-                                    },
-                                },
-                                "total": {"type": "integer", "description": "Total number of matching articles returned"},
-                            },
-                        },
-                        "example": {
-                            "articles": [
-                                {"identifier": "Cat", "revision_count": 142},
-                                {"identifier": "Dog", "revision_count": 98},
-                            ],
-                            "total": 2,
-                        },
-                    }
-                },
-            }
-        }
-    },
+    openapi_extra=docs.WIKIMEDIA_LIST_REVISION_ARTICLES,
 )
 async def list_revision_articles(
     min_revisions: int = Query(default=1, description="Minimum revision count filter"),
@@ -200,49 +138,7 @@ async def list_revision_articles(
 
 @router.get(
     "/revisions/{identifier}",
-    openapi_extra={
-        "responses": {
-            "200": {
-                "description": "Successful response",
-                "content": {
-                    "application/json": {
-                        "schema": {
-                            "type": "object",
-                            "properties": {
-                                "revisions": {
-                                    "type": "array",
-                                    "description": "Ordered revision history (oldest first). First entry is the full token map; subsequent entries contain only changed tokens.",
-                                    "items": {
-                                        "type": "object",
-                                        "properties": {
-                                            "revision_id": {"type": "string", "description": "Wikipedia revision ID"},
-                                            "name": {"type": "string", "description": "Article title"},
-                                            "date_modified": {"type": "string", "description": "ISO 8601 modification date"},
-                                            "revision_comment": {"type": "string", "description": "Edit summary"},
-                                            "categories": {"type": "array", "description": "List of article categories"},
-                                            "token_diff": {"type": "string", "description": "JSON-encoded delta map: token → new count (0 = removed)"},
-                                        },
-                                    },
-                                },
-                            },
-                        },
-                        "example": {
-                            "revisions": [
-                                {
-                                    "revision_id": "1234567890",
-                                    "name": "Cat",
-                                    "date_modified": "2024-01-15",
-                                    "revision_comment": "/* Breeds */ Added Persian section",
-                                    "categories": ["Cats", "Mammals", "Pets"],
-                                    "token_diff": '{"cat": 3, "breed": 5, "persian": 1}',
-                                }
-                            ]
-                        },
-                    }
-                },
-            }
-        }
-    },
+    openapi_extra=docs.WIKIMEDIA_GET_REVISION_DELTAS,
 )
 async def get_revision_deltas(
     identifier: str,
@@ -258,54 +154,61 @@ async def get_revision_deltas(
     if not rev_dataset:
         raise HTTPException(status_code=404, detail="'wikimedia/revisions' dataset not found")
 
-    with handle_query_error(f"wikimedia/revisions/{identifier}"):
-        conn = get_duckdb_client().connect()
-        rows = conn.execute(f"""
-            WITH ordered AS (
-                SELECT *,
-                    ROW_NUMBER() OVER (ORDER BY revision_id::BIGINT) - 1 AS rev_seq,
-                    json(ngram_counts)::MAP(VARCHAR, INTEGER) AS m
-                FROM read_parquet('{rev_dataset.data_location}/identifier={identifier}/*.parquet')
-            ),
-            curr AS (
-                SELECT rev_seq,
-                       unnest(map_keys(m)) AS token,
-                       unnest(map_values(m)) AS curr_count
-                FROM ordered
-            ),
-            prev AS (
-                SELECT rev_seq + 1 AS rev_seq,
-                       unnest(map_keys(m)) AS token,
-                       unnest(map_values(m)) AS prev_count
-                FROM ordered
-            ),
-            diffs AS (
-                SELECT COALESCE(c.rev_seq, p.rev_seq) AS rev_seq,
-                       COALESCE(c.token, p.token) AS token,
-                       COALESCE(c.curr_count, 0) AS new_count
-                FROM curr c
-                FULL OUTER JOIN prev p
-                    ON c.rev_seq = p.rev_seq AND c.token = p.token
-                WHERE prev_count IS NULL
-                   OR curr_count IS NULL
-                   OR curr_count != prev_count
-            ),
-            delta_agg AS (
-                SELECT rev_seq,
-                       json_group_object(token, new_count) AS delta
-                FROM diffs
-                GROUP BY rev_seq
-            )
-            SELECT o.revision_id,
-                   o.name,
-                   o.date_modified,
-                   o.revision_comment,
-                   o.categories,
-                   COALESCE(d.delta, '{{}}') AS token_diff
-            FROM ordered o
-            LEFT JOIN delta_agg d ON o.rev_seq = d.rev_seq
-            ORDER BY o.rev_seq
-        """).fetchall()
+    # Percent-encode the path-level value (same convention as build_hive_path):
+    # neutralises SQL-string breakout (') and path traversal (../) in one step.
+    safe_identifier = quote(identifier, safe="")
+
+    def _query():
+        with handle_query_error(f"wikimedia/revisions/{identifier}"):
+            with get_duckdb_client().timed_connect() as conn:
+                return conn.execute(f"""
+                WITH ordered AS (
+                    SELECT *,
+                        ROW_NUMBER() OVER (ORDER BY revision_id::BIGINT) - 1 AS rev_seq,
+                        json(ngram_counts)::MAP(VARCHAR, INTEGER) AS m
+                    FROM read_parquet('{rev_dataset.data_location}/identifier={safe_identifier}/*.parquet')
+                ),
+                curr AS (
+                    SELECT rev_seq,
+                           unnest(map_keys(m)) AS token,
+                           unnest(map_values(m)) AS curr_count
+                    FROM ordered
+                ),
+                prev AS (
+                    SELECT rev_seq + 1 AS rev_seq,
+                           unnest(map_keys(m)) AS token,
+                           unnest(map_values(m)) AS prev_count
+                    FROM ordered
+                ),
+                diffs AS (
+                    SELECT COALESCE(c.rev_seq, p.rev_seq) AS rev_seq,
+                           COALESCE(c.token, p.token) AS token,
+                           COALESCE(c.curr_count, 0) AS new_count
+                    FROM curr c
+                    FULL OUTER JOIN prev p
+                        ON c.rev_seq = p.rev_seq AND c.token = p.token
+                    WHERE prev_count IS NULL
+                       OR curr_count IS NULL
+                       OR curr_count != prev_count
+                ),
+                delta_agg AS (
+                    SELECT rev_seq,
+                           json_group_object(token, new_count) AS delta
+                    FROM diffs
+                    GROUP BY rev_seq
+                )
+                SELECT o.revision_id,
+                       o.name,
+                       o.date_modified,
+                       o.revision_comment,
+                       o.categories,
+                       COALESCE(d.delta, '{{}}') AS token_diff
+                FROM ordered o
+                LEFT JOIN delta_agg d ON o.rev_seq = d.rev_seq
+                ORDER BY o.rev_seq
+            """).fetchall()
+
+    rows = await run_blocking(_query)
 
     if not rows:
         raise HTTPException(status_code=404, detail=f"No revisions found for identifier {identifier}")
@@ -329,108 +232,7 @@ async def get_revision_deltas(
 
 @router.get(
     "/term-series",
-    openapi_extra={
-        "responses": {
-            "200": {
-                "description": "Successful response",
-                "content": {
-                    "application/json": {
-                        "schema": {
-                            "type": "object",
-                            "properties": {
-                                "type": {
-                                    "type": "string",
-                                    "description": "The n-gram term that was looked up (echoed back).",
-                                },
-                                "latest_available_date": {
-                                    "type": "string",
-                                    "format": "date",
-                                    "description": "Most recent date with data for this entity (YYYY-MM-DD). Use this to default the date picker in the UI.",
-                                },
-                                "series": {
-                                    "type": "array",
-                                    "description": "Time series entries, one per date, sorted chronologically.",
-                                    "items": {
-                                        "type": "object",
-                                        "properties": {
-                                            "date": {"type": "string", "format": "date", "description": "Date (YYYY-MM-DD)"},
-                                            "counts": {"type": "integer", "description": "Total weighted page-view count for this term on this date (sum across all Wikipedia articles containing the term)"},
-                                            "rank": {"type": "integer", "description": "Rank by page-view count on this date (1 = most viewed term). 0 means not ranked."},
-                                            "top_articles": {
-                                                "type": "array",
-                                                "description": "Top 10 Wikipedia articles contributing most page views to this term on this date. Only present when include_articles=true. Each entry is [url, score]. Empty array if no article data is available for this term on this date.",
-                                                "items": {
-                                                    "type": "array",
-                                                    "prefixItems": [
-                                                        {"type": "string", "description": "Full Wikipedia article URL"},
-                                                        {"type": "number", "description": "Contribution score (higher = more page views attributed to this article for the term)"},
-                                                    ],
-                                                },
-                                            },
-                                        },
-                                    },
-                                },
-                            },
-                        },
-                        "examples": {
-                            "with_articles": {
-                                "summary": "Term with top articles (include_articles=true, default)",
-                                "value": {
-                                    "type": "Trump",
-                                    "latest_available_date": "2026-04-20",
-                                    "series": [
-                                        {
-                                            "date": "2026-04-19",
-                                            "counts": 41964675,
-                                            "rank": 487,
-                                            "top_articles": [
-                                                ["https://en.wikipedia.org/wiki/Donald_Trump", 255.07],
-                                                ["https://en.wikipedia.org/wiki/Donald_Trump_Jr.", 127.83],
-                                                ["https://en.wikipedia.org/wiki/Lara_Trump", 123.68],
-                                            ],
-                                        },
-                                        {
-                                            "date": "2026-04-20",
-                                            "counts": 45655115,
-                                            "rank": 455,
-                                            "top_articles": [
-                                                ["https://en.wikipedia.org/wiki/Donald_Trump", 282.65],
-                                                ["https://en.wikipedia.org/wiki/Kash_Patel", 168.08],
-                                                ["https://en.wikipedia.org/wiki/Vanessa_Trump", 136.84],
-                                            ],
-                                        },
-                                    ],
-                                },
-                            },
-                            "without_articles": {
-                                "summary": "Sparkline only (include_articles=false)",
-                                "value": {
-                                    "type": "Trump",
-                                    "latest_available_date": "2026-04-20",
-                                    "series": [
-                                        {"date": "2026-04-19", "counts": 41964675, "rank": 487},
-                                        {"date": "2026-04-20", "counts": 45655115, "rank": 455},
-                                    ],
-                                },
-                            },
-                        },
-                    }
-                },
-            }
-        },
-        "x-performance": {
-            "fast_path": "~20-70ms for terms in the precomputed vocabulary (~65K terms including top 10K by rank + RTD-divergent terms)",
-            "slow_fallback": "~3-5s for arbitrary terms not in the vocabulary (scans daily partition files)",
-            "sparkline_only": "~20ms with include_articles=false (skips the articles file entirely)",
-        },
-        "x-frontend-notes": {
-            "term_case_sensitivity": "Terms are case-sensitive. 'COVID' and 'covid' are different lookups. The sparkline vocabulary stores original case from Wikipedia page views.",
-            "include_articles_usage": "Set include_articles=false when rendering sparkline charts without article tooltips (2x faster). Only request articles when the user hovers/clicks to see contributing Wikipedia pages.",
-            "top_articles_coverage": "top_articles is populated for all vocabulary terms (~65K) on all dates. Empty array means the source data had no articles for that term on that date.",
-            "window_0_means_full_history": "window=0 (default) returns the full available date range (~570 days). Use window=30 or window=90 for recent data.",
-            "empty_series": "If the term has no data at all, series will be an empty array.",
-        },
-    },
+    openapi_extra=docs.WIKIMEDIA_TERM_SERIES,
 )
 async def term_series(
     entity: str = Query(..., description="Global entity ID, e.g. 'wikidata:Q30'"),
@@ -440,6 +242,7 @@ async def term_series(
     granularity: str = Query("daily", description="Hive granularity: daily | weekly | monthly"),
     n: int = Query(1, description="N-gram size (1 = unigrams, 2 = bigrams)"),
     include_articles: bool = Query(True, description="Include top_articles in response (set false for sparkline-only, ~2x faster)"),
+    sparkline_dataset: str = Query("sparklines", description="Registry dataset_id for the sparkline precomputed data (default: 'sparklines')."),
     db: AsyncSession = Depends(get_session),
 ):
     """Per-date time series for a single n-gram term within one entity (country).
@@ -457,13 +260,8 @@ async def term_series(
             raise HTTPException(status_code=404, detail="'wikimedia/ngrams' dataset not found")
         local_id = (await resolve_entity(db, "wikimedia", "ngrams", entity)).local_id
 
-    # Build filter_vals for path construction
-    _dim_values = {"granularity": granularity, "ngram_size": n}
-    ngrams_dims = get_queryable_dims(ngrams_obj)
-    ngrams_filter_vals: dict = {
-        dim: _dim_values[dim] for dim in ngrams_dims if dim in _dim_values
-    }
-    entity_path = entity_base_path(ngrams_obj, local_id, ngrams_filter_vals)
+    _, entity_path = ngrams_context(
+        ngrams_obj, local_id, {"granularity": granularity, "ngram_size": n})
 
     with timed("discover", "Latest date from manifest"):
         latest_date = latest_from_manifest(ngrams_obj, local_id, granularity)
@@ -476,151 +274,66 @@ async def term_series(
             )
         date = latest_date
 
-    try:
-        end = datetime.strptime(date, "%Y-%m-%d")
-    except ValueError:
-        raise HTTPException(status_code=400, detail=f"Invalid date: {date}")
-
-    if window > 0:
-        start = end - timedelta(days=window)
-        start_str = start.strftime("%Y-%m-%d")
-    else:
-        start_str = None
-
-    date_filter = "date BETWEEN ? AND ?" if start_str else "date <= ?"
-    date_params = [start_str, date] if start_str else [date]
+    date_filter, date_params = build_date_filter(date, window)
 
     # ── Fast path: sequential point lookups on sorted Parquet files ──
-    sparkline_rows = []
+    series_rows = []
+    articles: dict = {}  # (ngram, date_str) -> [[url, score], ...]
     with timed("registry", "Sparkline registry lookup"):
-        sparkline_obj = await get_latest_entry(db, "wikimedia", "sparklines")
+        sparkline_obj = await get_latest_entry(db, "wikimedia", sparkline_dataset)
         top_articles_obj = await get_latest_entry(db, "wikimedia", "top_articles_ngrams")
 
     if sparkline_obj:
-        spark_hb = get_bucket_config(sparkline_obj)
-        bucket = assign_bucket(type, resolve_bucket_count(spark_hb, local_id, n))
-        sparkline_path = build_hive_path(
-            sparkline_obj,
-            filter_vals={"ngram_size": n},
-            entity_value=local_id,
-            bucket_value=bucket,
-            glob_suffix="/data_0.parquet",
-        )
-        with timed("fast_query", "DuckDB sparkline + articles read"):
-            conn = get_duckdb_client().connect()
-            sparkline_rows = conn.execute(
-                f"""
-                SELECT date, pv_count, pv_rank, pv_freq
-                FROM read_parquet('{sparkline_path}')
-                WHERE ngram = ? AND {date_filter}
-                ORDER BY date
-                """,
-                [type, *date_params],
-            ).fetchall()
-
-            articles_by_date: dict = {}
-            if sparkline_rows and include_articles and top_articles_obj:
-                try:
-                    art_hb = get_bucket_config(top_articles_obj)
-                    art_bucket = assign_bucket(type, resolve_bucket_count(art_hb, local_id, n))
-                    articles_path = build_hive_path(
-                        top_articles_obj,
-                        filter_vals={"ngram_size": n},
-                        entity_value=local_id,
-                        bucket_value=art_bucket,
-                        glob_suffix="/data_0.parquet",
+        def _fast():
+            with get_duckdb_client().timed_connect() as conn:
+                rows = fetch_sparkline_rows(
+                    conn, sparkline_obj, [type], local_id, n,
+                    date_filter, date_params, "wikimedia/term-series",
+                )
+                arts: dict = {}
+                if rows and include_articles:
+                    arts = _fetch_top_articles(
+                        conn, top_articles_obj, [type], local_id, n,
+                        date_filter, date_params,
                     )
-                    art_rows = conn.execute(
-                        f"""
-                        SELECT date, article_url, score
-                        FROM read_parquet('{articles_path}')
-                        WHERE ngram = ? AND {date_filter}
-                        ORDER BY date, article_rank
-                        """,
-                        [type, *date_params],
-                    ).fetchall()
-                    for row in art_rows:
-                        articles_by_date.setdefault(str(row[0]), []).append(
-                            [row[1], float(row[2]) if row[2] else 0.0]
-                        )
-                except Exception:
-                    pass  # articles files may not exist yet
+                return rows, arts
+
+        with timed("fast_query", "DuckDB sparkline + articles read"):
+            series_rows, articles = await run_blocking(_fast)
 
     # ── Slow path: partition scan (fallback for terms not in sparkline) ──
-    if not sparkline_rows:
-        with timed("slow_query", "DuckDB partition scan"):
-            conn = get_duckdb_client().connect()
-            glob_pattern = f"{entity_path}/data_0.parquet"
+    if not series_rows:
+        glob_pattern = f"{entity_path}/data_0.parquet"
 
-            slow_rows = conn.execute(
-                f"""
-                SELECT date, pv_count, pv_rank, pv_freq
-                FROM read_parquet('{glob_pattern}', hive_partitioning=true)
-                WHERE ngram = ? AND {date_filter}
-                ORDER BY date
-                """,
-                [type, *date_params],
-            ).fetchall()
-
-            # Articles live in the separate top_articles_ngrams dataset.
-            articles_by_date: dict = {}
-            if slow_rows and include_articles and top_articles_obj:
-                try:
-                    art_hb = get_bucket_config(top_articles_obj)
-                    bucket = assign_bucket(type, resolve_bucket_count(art_hb, local_id, n))
-                    articles_path = build_hive_path(
-                        top_articles_obj,
-                        filter_vals={"ngram_size": n},
-                        entity_value=local_id,
-                        bucket_value=bucket,
-                        glob_suffix="/data_0.parquet",
-                    )
-                    art_rows = conn.execute(
+        def _slow():
+            with handle_query_error("wikimedia/ngrams"):
+                with get_duckdb_client().timed_connect() as conn:
+                    rows = conn.execute(
                         f"""
-                        SELECT date, article_url, score
-                        FROM read_parquet('{articles_path}')
+                        SELECT ngram, date, pv_count, pv_rank, pv_freq
+                        FROM read_parquet('{glob_pattern}', hive_partitioning=true)
                         WHERE ngram = ? AND {date_filter}
-                        ORDER BY date, article_rank
+                        ORDER BY date
                         """,
                         [type, *date_params],
                     ).fetchall()
-                    for row in art_rows:
-                        articles_by_date.setdefault(str(row[0]), []).append(
-                            [row[1], float(row[2]) if row[2] else 0.0]
+                    arts: dict = {}
+                    if rows and include_articles:
+                        arts = _fetch_top_articles(
+                            conn, top_articles_obj, [type], local_id, n,
+                            date_filter, date_params,
                         )
-                except Exception:
-                    pass  # articles files may not exist yet
+                    return rows, arts
 
-            series = []
-            for row in slow_rows:
-                entry = {
-                    "date": str(row[0]),
-                    "counts": int(row[1]) if row[1] else 0,
-                    "rank": int(row[2]) if row[2] else 0,
-                    "freq": float(row[3]) if row[3] else 0.0,
-                }
-                if include_articles:
-                    entry["top_articles"] = articles_by_date.get(str(row[0]), [])
-                series.append(entry)
+        with timed("slow_query", "DuckDB partition scan"):
+            series_rows, articles = await run_blocking(_slow)
 
-            return {
-                "type": type,
-                "latest_available_date": latest_date,
-                "series": series,
-            }
-
-    # ── Assemble response from fast path results ──
     series = []
-    for row in sparkline_rows:
-        date_str = str(row[0])
-        entry = {
-            "date": date_str,
-            "counts": int(row[1]) if row[1] else 0,
-            "rank": int(row[2]) if row[2] else 0,
-            "freq": float(row[3]) if row[3] else 0.0,
-        }
+    for row in series_rows:
+        date_str = str(row[1])
+        entry = series_entry(date_str, row[2], row[3], row[4])
         if include_articles:
-            entry["top_articles"] = articles_by_date.get(date_str, [])
+            entry["top_articles"] = articles.get((row[0], date_str), [])
         series.append(entry)
 
     return {
@@ -632,89 +345,7 @@ async def term_series(
 
 @router.get(
     "/term-series/batch",
-    openapi_extra={
-        "responses": {
-            "200": {
-                "description": "Successful response",
-                "content": {
-                    "application/json": {
-                        "schema": {
-                            "type": "object",
-                            "properties": {
-                                "results": {
-                                    "type": "object",
-                                    "description": "Map of term → time series. Keys are the requested terms (in request order). Each value is an array of date entries identical to the /term-series series format.",
-                                    "additionalProperties": {
-                                        "type": "array",
-                                        "items": {
-                                            "type": "object",
-                                            "properties": {
-                                                "date": {"type": "string", "format": "date"},
-                                                "counts": {"type": "integer"},
-                                                "rank": {"type": "integer"},
-                                                "top_articles": {
-                                                    "type": "array",
-                                                    "description": "Only present when include_articles=true.",
-                                                    "items": {
-                                                        "type": "array",
-                                                        "prefixItems": [
-                                                            {"type": "string"},
-                                                            {"type": "number"},
-                                                        ],
-                                                    },
-                                                },
-                                            },
-                                        },
-                                    },
-                                },
-                                "latest_available_date": {
-                                    "type": "string",
-                                    "format": "date",
-                                    "description": "Most recent date with data for this entity.",
-                                },
-                            },
-                        },
-                        "examples": {
-                            "batch_with_articles": {
-                                "summary": "Batch lookup (include_articles=true)",
-                                "value": {
-                                    "results": {
-                                        "Trump": [
-                                            {"date": "2026-04-20", "counts": 45655115, "rank": 455, "top_articles": [["https://en.wikipedia.org/wiki/Donald_Trump", 282.65]]},
-                                        ],
-                                        "COVID": [
-                                            {"date": "2026-04-20", "counts": 775676, "rank": 19105, "top_articles": []},
-                                        ],
-                                    },
-                                    "latest_available_date": "2026-04-20",
-                                },
-                            },
-                            "batch_sparkline_only": {
-                                "summary": "Batch sparkline only (include_articles=false)",
-                                "value": {
-                                    "results": {
-                                        "Trump": [{"date": "2026-04-20", "counts": 45655115, "rank": 455}],
-                                        "COVID": [{"date": "2026-04-20", "counts": 775676, "rank": 19105}],
-                                    },
-                                    "latest_available_date": "2026-04-20",
-                                },
-                            },
-                        },
-                    }
-                },
-            }
-        },
-        "x-performance": {
-            "fast_path": "~20-200ms depending on number of terms (all in precomputed vocabulary)",
-            "mixed_path": "If some terms are in vocabulary and some aren't, fast terms return in ~50ms and slow terms add ~3-5s",
-            "sparkline_only": "~20-40ms with include_articles=false",
-        },
-        "x-frontend-notes": {
-            "typical_usage": "Used to fetch sparklines for multiple terms at once, e.g. all terms from an RTD wordshift comparison. Pass the wordshift types as comma-separated values.",
-            "missing_terms": "Terms not found in any data source return an empty array in results. All requested terms always appear as keys.",
-            "same_schema_as_single": "Each entry in results[term] has the same shape as entries in the /term-series series array.",
-        },
-    },
+    openapi_extra=docs.WIKIMEDIA_TERM_SERIES_BATCH,
 )
 async def term_series_batch(
     entity: str = Query(..., description="Global entity ID, e.g. 'wikidata:Q30'"),
@@ -725,6 +356,7 @@ async def term_series_batch(
     n: int = Query(1, description="N-gram size (1 = unigrams, 2 = bigrams)"),
     include_articles: bool = Query(True, description="Include top_articles in response (set false for sparkline-only, ~2x faster)"),
     articles_dates: Optional[str] = Query(None, description="Comma-separated dates to fetch articles for (e.g. '2025-06-05,2026-01-21'). When set, top_articles are only included for these dates instead of the full window. Sparkline data is unaffected."),
+    sparkline_dataset: str = Query("sparklines", description="Registry dataset_id for the sparkline precomputed data (default: 'sparklines')."),
     db: AsyncSession = Depends(get_session),
 ):
     """Batch time series lookup for multiple terms in a single request.
@@ -742,13 +374,8 @@ async def term_series_batch(
         raise HTTPException(status_code=404, detail="'wikimedia/ngrams' dataset not found")
     local_id = (await resolve_entity(db, "wikimedia", "ngrams", entity)).local_id
 
-    # Build filter_vals for path construction
-    _dim_values = {"granularity": granularity, "ngram_size": n}
-    ngrams_dims = get_queryable_dims(ngrams_obj)
-    ngrams_filter_vals: dict = {
-        dim: _dim_values[dim] for dim in ngrams_dims if dim in _dim_values
-    }
-    entity_path = entity_base_path(ngrams_obj, local_id, ngrams_filter_vals)
+    _, entity_path = ngrams_context(
+        ngrams_obj, local_id, {"granularity": granularity, "ngram_size": n})
     latest_date = latest_from_manifest(ngrams_obj, local_id, granularity)
 
     if not date:
@@ -759,24 +386,11 @@ async def term_series_batch(
             )
         date = latest_date
 
-    try:
-        end = datetime.strptime(date, "%Y-%m-%d")
-    except ValueError:
-        raise HTTPException(status_code=400, detail=f"Invalid date: {date}")
-
-    if window > 0:
-        start = end - timedelta(days=window)
-        start_str = start.strftime("%Y-%m-%d")
-    else:
-        start_str = None
+    date_filter, date_params = build_date_filter(date, window)
 
     type_list = [t.strip() for t in types.split(",") if t.strip()]
     if not type_list:
         raise HTTPException(status_code=400, detail="types parameter must contain at least one term")
-
-    placeholders = ", ".join(["?"] * len(type_list))
-    date_filter = "AND date BETWEEN ? AND ?" if start_str else "AND date <= ?"
-    date_params = [start_str, date] if start_str else [date]
 
     # Articles date filter: when articles_dates is provided, fetch articles
     # only for those specific dates (e.g. the two allotax comparison dates)
@@ -784,7 +398,7 @@ async def term_series_batch(
     if articles_dates:
         art_date_list = [d.strip() for d in articles_dates.split(",") if d.strip()]
         art_placeholders = ", ".join(["?"] * len(art_date_list))
-        art_date_filter = f"AND date IN ({art_placeholders})"
+        art_date_filter = f"date IN ({art_placeholders})"
         art_date_params = art_date_list
     else:
         art_date_filter = date_filter
@@ -794,155 +408,88 @@ async def term_series_batch(
     # Sparkline/article precomputed data is daily-only; skip for weekly/monthly.
     sparkline_rows = []
     articles_by_key: dict = {}  # (ngram, date_str) -> [[url, score], ...]
-    found_terms: set = set()
     use_fast_path = granularity == "daily"
 
     if use_fast_path:
         with timed("registry", "Sparkline registry lookup"):
-            sparkline_obj = await get_latest_entry(db, "wikimedia", "sparklines")
+            sparkline_obj = await get_latest_entry(db, "wikimedia", sparkline_dataset)
             top_articles_obj = await get_latest_entry(db, "wikimedia", "top_articles_ngrams")
     else:
         sparkline_obj = None
         top_articles_obj = None
 
     if sparkline_obj:
-        spark_hb = get_bucket_config(sparkline_obj)
-        spark_n_buckets = resolve_bucket_count(spark_hb, local_id, n)
-        # Compute which buckets contain our terms, then read only those files.
-        spark_buckets = {assign_bucket(t, spark_n_buckets) for t in type_list}
-        spark_bucket_files = [
-            build_hive_path(sparkline_obj, filter_vals={"ngram_size": n}, entity_value=local_id, bucket_value=b, glob_suffix="/data_0.parquet")
-            for b in spark_buckets
-        ]
-        spark_file_list = ", ".join(f"'{f}'" for f in spark_bucket_files)
+        def _fast():
+            with get_duckdb_client().timed_connect() as conn:
+                rows = fetch_sparkline_rows(
+                    conn, sparkline_obj, type_list, local_id, n,
+                    date_filter, date_params, "wikimedia/term-series/batch",
+                )
+                arts: dict = {}
+                found = {row[0] for row in rows}
+                if include_articles and found:
+                    arts = _fetch_top_articles(
+                        conn, top_articles_obj, found, local_id, n,
+                        art_date_filter, art_date_params,
+                    )
+                return rows, arts
 
         with timed("fast_query", "DuckDB sparkline + articles read"):
-            conn = get_duckdb_client().connect()
-            try:
-                sparkline_rows = conn.execute(
-                    f"""
-                    SELECT ngram, date, pv_count, pv_rank, pv_freq
-                    FROM read_parquet([{spark_file_list}])
-                    WHERE ngram IN ({placeholders})
-                      {date_filter}
-                    ORDER BY ngram, date
-                    """,
-                    [*type_list, *date_params],
-                ).fetchall()
+            sparkline_rows, articles_by_key = await run_blocking(_fast)
 
-                found_terms = {row[0] for row in sparkline_rows}
-
-                if include_articles and found_terms and top_articles_obj:
-                    try:
-                        art_hb = get_bucket_config(top_articles_obj)
-                        art_n_buckets = resolve_bucket_count(art_hb, local_id, n)
-                        buckets = {assign_bucket(t, art_n_buckets) for t in found_terms}
-                        bucket_files = [
-                            build_hive_path(top_articles_obj, filter_vals={"ngram_size": n}, entity_value=local_id, bucket_value=b, glob_suffix="/data_0.parquet")
-                            for b in buckets
-                        ]
-                        file_list = ", ".join(f"'{f}'" for f in bucket_files)
-                        found_placeholders = ", ".join(["?"] * len(found_terms))
-                        art_rows = conn.execute(
-                            f"""
-                            SELECT ngram, date, article_url, score
-                            FROM read_parquet([{file_list}])
-                            WHERE ngram IN ({found_placeholders})
-                              {art_date_filter}
-                            ORDER BY ngram, date, article_rank
-                            """,
-                            [*list(found_terms), *art_date_params],
-                        ).fetchall()
-                        for row in art_rows:
-                            key = (row[0], str(row[1]))
-                            articles_by_key.setdefault(key, []).append(
-                                [row[2], float(row[3]) if row[3] else 0.0]
-                            )
-                    except Exception:
-                        pass  # articles files may not exist yet
-            except Exception:
-                sparkline_rows = []
-                found_terms = set()
+    found_terms = {row[0] for row in sparkline_rows}
 
     # ── Slow path: partition fallback for missing terms ──
     missing_terms = [t for t in type_list if t not in found_terms]
     slow_results: dict = {}
     if missing_terms:
-        with timed("slow_query", "DuckDB partition scan"):
-            conn = get_duckdb_client().connect()
-            glob_pattern = f"{entity_path}/data_0.parquet"
-            slow_placeholders = ", ".join(["?"] * len(missing_terms))
+        glob_pattern = f"{entity_path}/data_0.parquet"
+        slow_placeholders = ", ".join(["?"] * len(missing_terms))
 
-            try:
-                slow_rows = conn.execute(
-                    f"""
-                    SELECT ngram, date, pv_count, pv_rank, pv_freq
-                    FROM read_parquet('{glob_pattern}', hive_partitioning=true)
-                    WHERE ngram IN ({slow_placeholders})
-                      {date_filter}
-                    ORDER BY ngram, date
-                    """,
-                    [*missing_terms, *date_params],
-                ).fetchall()
-            except Exception:
-                slow_rows = []
-
-            # Articles live in the separate top_articles_ngrams dataset.
-            slow_articles: dict = {}  # (ngram, date_str) -> [[url, score], ...]
-            if slow_rows and include_articles and use_fast_path and top_articles_obj:
+        def _slow():
+            with get_duckdb_client().timed_connect() as conn:
                 try:
-                    slow_found = {row[0] for row in slow_rows}
-                    art_hb = get_bucket_config(top_articles_obj)
-                    art_n_buckets = resolve_bucket_count(art_hb, local_id, n)
-                    buckets = {assign_bucket(t, art_n_buckets) for t in slow_found}
-                    bucket_files = [
-                        build_hive_path(top_articles_obj, filter_vals={"ngram_size": n}, entity_value=local_id, bucket_value=b, glob_suffix="/data_0.parquet")
-                        for b in buckets
-                    ]
-                    file_list = ", ".join(f"'{f}'" for f in bucket_files)
-                    slow_found_ph = ", ".join(["?"] * len(slow_found))
-                    art_rows = conn.execute(
+                    rows = conn.execute(
                         f"""
-                        SELECT ngram, date, article_url, score
-                        FROM read_parquet([{file_list}])
-                        WHERE ngram IN ({slow_found_ph})
-                          {art_date_filter}
-                        ORDER BY ngram, date, article_rank
+                        SELECT ngram, date, pv_count, pv_rank, pv_freq
+                        FROM read_parquet('{glob_pattern}', hive_partitioning=true)
+                        WHERE ngram IN ({slow_placeholders})
+                          AND {date_filter}
+                        ORDER BY ngram, date
                         """,
-                        [*list(slow_found), *art_date_params],
+                        [*missing_terms, *date_params],
                     ).fetchall()
-                    for row in art_rows:
-                        key = (row[0], str(row[1]))
-                        slow_articles.setdefault(key, []).append(
-                            [row[2], float(row[3]) if row[3] else 0.0]
-                        )
-                except Exception:
-                    pass  # articles files may not exist yet
+                except Exception as exc:
+                    # Batch semantics: terms with no data return empty arrays,
+                    # so a missing partition is fine — but log real errors.
+                    if is_data_missing(exc):
+                        log.info("wikimedia/term-series/batch: no partition data for %s", missing_terms)
+                    else:
+                        log.warning("wikimedia/term-series/batch: partition scan failed: %s", exc)
+                    return [], {}
+                arts: dict = {}
+                if rows and include_articles and use_fast_path:
+                    arts = _fetch_top_articles(
+                        conn, top_articles_obj, {row[0] for row in rows}, local_id, n,
+                        art_date_filter, art_date_params,
+                    )
+                return rows, arts
 
-            for row in slow_rows:
-                ngram = row[0]
-                date_str = str(row[1])
-                entry = {
-                    "date": date_str,
-                    "counts": int(row[2]) if row[2] else 0,
-                    "rank": int(row[3]) if row[3] else 0,
-                    "freq": float(row[4]) if row[4] else 0.0,
-                }
-                if include_articles and use_fast_path:
-                    entry["top_articles"] = slow_articles.get((ngram, date_str), [])
-                slow_results.setdefault(ngram, []).append(entry)
+        with timed("slow_query", "DuckDB partition scan"):
+            slow_rows, slow_articles = await run_blocking(_slow)
+
+        for row in slow_rows:
+            ngram, date_str = row[0], str(row[1])
+            entry = series_entry(date_str, row[2], row[3], row[4])
+            if include_articles and use_fast_path:
+                entry["top_articles"] = slow_articles.get((ngram, date_str), [])
+            slow_results.setdefault(ngram, []).append(entry)
 
     # ── Merge results ──
     results: dict = {t: [] for t in type_list}
     for row in sparkline_rows:
-        ngram = row[0]
-        date_str = str(row[1])
-        entry = {
-            "date": date_str,
-            "counts": int(row[2]) if row[2] else 0,
-            "rank": int(row[3]) if row[3] else 0,
-            "freq": float(row[4]) if row[4] else 0.0,
-        }
+        ngram, date_str = row[0], str(row[1])
+        entry = series_entry(date_str, row[2], row[3], row[4])
         if include_articles:
             entry["top_articles"] = articles_by_key.get((ngram, date_str), [])
         results[ngram].append(entry)
@@ -986,19 +533,22 @@ async def precomputed_rtd(
         glob_suffix="/data_0.parquet",
     )
 
+    def _query():
+        with get_duckdb_client().timed_connect() as conn:
+            with handle_query_error("wikimedia/precomputed_rtd"):
+                return conn.execute(
+                    f"""
+                    SELECT ngram, divergence
+                    FROM read_parquet('{path}')
+                    WHERE date = ? AND date_delta = ? AND granularity = ?
+                    ORDER BY ABS(divergence) DESC
+                    LIMIT ?
+                    """,
+                    [date, date_delta, granularity, limit],
+                ).fetchall()
+
     with timed("query", "DuckDB precomputed RTD read"):
-        conn = get_duckdb_client().connect()
-        with handle_query_error("wikimedia/precomputed_rtd"):
-            rows = conn.execute(
-                f"""
-                SELECT ngram, divergence
-                FROM read_parquet('{path}')
-                WHERE date = ? AND date_delta = ? AND granularity = ?
-                ORDER BY ABS(divergence) DESC
-                LIMIT ?
-                """,
-                [date, date_delta, granularity, limit],
-            ).fetchall()
+        rows = await run_blocking(_query)
 
     return {
         "data": [
