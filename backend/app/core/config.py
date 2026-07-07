@@ -19,6 +19,9 @@ class Settings(BaseSettings):
         "https://storywrangler.uvm.edu",
     ]
 
+    # DuckDB spill-to-disk location — override via DUCKDB_TEMP_DIRECTORY env var
+    duckdb_temp_directory: str = "/netfiles/compethicslab/duckdb_temp"
+
     # Admin user seeded on startup
     admin_username: str = "admin"
     admin_email: str = "admin@storywrangler.org"

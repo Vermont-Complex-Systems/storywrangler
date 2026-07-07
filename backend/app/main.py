@@ -13,7 +13,7 @@ from sqlmodel import select
 from app.core.auth import get_password_hash
 from app.core.config import settings
 from app.core.database import async_session_factory, init_db
-from app.core.exceptions import DataNotAvailableError, QueryError
+from app.core.exceptions import DataNotAvailableError, QueryError, QueryTimeoutError
 from app.core.timing import get_timings, init_timings
 from app.models.auth import User
 from app.core.health_check import health_check_loop
@@ -42,8 +42,25 @@ async def seed_admin() -> None:
             log.info("Admin user '%s' already exists.", settings.admin_username)
 
 
+def _warn_default_credentials() -> None:
+    """Scream when shipping-default credentials are still in effect."""
+    defaults = [
+        name for name, value in (
+            ("ADMIN_PASSWORD", settings.admin_password),
+            ("POSTGRES_PASSWORD", settings.postgres_password),
+        )
+        if value == "changethis"
+    ]
+    if defaults:
+        log.critical(
+            "%s still set to the default 'changethis' — change before exposing "
+            "this server beyond localhost.", ", ".join(defaults),
+        )
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    _warn_default_credentials()
     await init_db()
     await seed_admin()
     health_task = asyncio.create_task(health_check_loop())
@@ -121,6 +138,23 @@ async def query_error_handler(request: Request, exc: QueryError):
             "detail": {
                 "code": "QUERY_FAILED",
                 "message": f"An internal error occurred while querying '{exc.dataset}'.",
+                "dataset": exc.dataset,
+            }
+        },
+    )
+
+
+@app.exception_handler(QueryTimeoutError)
+async def query_timeout_handler(request: Request, exc: QueryTimeoutError):
+    return JSONResponse(
+        status_code=504,
+        content={
+            "detail": {
+                "code": "QUERY_TIMEOUT",
+                "message": (
+                    f"Query timed out for '{exc.dataset}'. "
+                    "The dataset may be too large or have inefficient partitioning."
+                ),
                 "dataset": exc.dataset,
             }
         },

@@ -45,10 +45,10 @@ def probe_dataset(dataset_obj: RegistryEntry) -> dict:
     except ValueError as e:
         return {"status": "unhealthy", "latency_ms": 0.0, "error": str(e)}
 
-    conn = get_admin_duckdb_client().connect()
     start = time.perf_counter()
     try:
-        conn.execute(f"SELECT 1 FROM {from_clause} LIMIT 1").fetchone()
+        with get_admin_duckdb_client().timed_connect() as conn:
+            conn.execute(f"SELECT 1 FROM {from_clause} LIMIT 1").fetchone()
         latency_ms = (time.perf_counter() - start) * 1000
 
         if latency_ms > DEGRADED_THRESHOLD_MS:

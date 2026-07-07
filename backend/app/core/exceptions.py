@@ -20,3 +20,11 @@ class QueryError(Exception):
     def __init__(self, dataset: str):
         self.dataset = dataset
         super().__init__(f"Query failed for '{dataset}'")
+
+
+class QueryTimeoutError(Exception):
+    """A DuckDB query was interrupted because it exceeded the timeout."""
+
+    def __init__(self, dataset: str):
+        self.dataset = dataset
+        super().__init__(f"Query timed out for '{dataset}'")
