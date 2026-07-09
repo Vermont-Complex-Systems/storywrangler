@@ -18,8 +18,20 @@ from app.core.timing import get_timings, init_timings
 from app.models.auth import User
 from app.core.health_check import health_check_loop
 from app.routers import auth, babynames, health, open_academic_analytics, reddit, registry, scisciDB, storywrangler, wikimedia, zoning_bylaws
+from storywrangler_mcp.server import mcp as mcp_server
 
 log = logging.getLogger(__name__)
+
+# ── Remote MCP transport ──────────────────────────────────────────────────────
+# Same tools as the uvx stdio server (storywrangler-mcp), served over
+# streamable HTTP at /mcp. Stateless: each request is self-contained, so it
+# works behind the reverse proxy without session affinity. The MCP's outbound
+# calls are configured via STORYWRANGLER_DOCS_URL / STORYWRANGLER_URL in the
+# server environment — point them at localhost to avoid looping back through
+# the public proxy.
+mcp_server.settings.streamable_http_path = "/"
+mcp_server.settings.stateless_http = True
+mcp_app = mcp_server.streamable_http_app()
 
 
 async def seed_admin() -> None:
@@ -64,7 +76,8 @@ async def lifespan(_app: FastAPI):
     await init_db()
     await seed_admin()
     health_task = asyncio.create_task(health_check_loop())
-    yield
+    async with mcp_server.session_manager.run():
+        yield
     health_task.cancel()
     try:
         await health_task
@@ -182,6 +195,8 @@ for _domain, _router in DOMAIN_ROUTERS.items():
 registry.VALID_DOMAINS = set(DOMAIN_ROUTERS)
 
 app.include_router(health.router, prefix="/health", tags=["health"])
+
+app.mount("/mcp", mcp_app)
 
 
 @app.get("/")

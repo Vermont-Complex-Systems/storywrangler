@@ -11,6 +11,7 @@ members = [
     "backend",
     "packages/schemas",
     "packages/sdk",
+    "packages/mcp-server",
 ]
 
 [tool.uv.sources]
