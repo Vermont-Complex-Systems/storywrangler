@@ -7,6 +7,8 @@ Distribution copies (generated — do not edit):
       wheel; `storywrangler new` scaffolds them into new dataset projects.
   plugins/storywrangler/skills/                        → the Claude plugin
       installed via the in-repo marketplace.
+  frontend/src/lib/skills/<skill>.md                   → rendered on the docs
+      site's /llms page (Agents & MCP) so the skill content is viewable/copyable.
 
 SKILL.md only — evals/ stay in the canonical location (dev-side, not shipped).
 Run after editing a skill: uv run python scripts/sync_agent_assets.py
@@ -35,6 +37,14 @@ def main() -> int:
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(CANONICAL / skill / "SKILL.md", dst)
             print(f"synced {dst.relative_to(ROOT)}")
+
+    # Frontend copy is flat (<skill>.md) so the docs site can glob-import it.
+    frontend_skills = ROOT / "frontend" / "src" / "lib" / "skills"
+    frontend_skills.mkdir(parents=True, exist_ok=True)
+    for skill in SKILLS:
+        dst = frontend_skills / f"{skill}.md"
+        shutil.copy2(CANONICAL / skill / "SKILL.md", dst)
+        print(f"synced {dst.relative_to(ROOT)}")
     return 0
 
 

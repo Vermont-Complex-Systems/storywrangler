@@ -7,6 +7,13 @@
 
 	const toc = new UseToc();
 
+	// The landing page (/) breaks out of the docs chrome: no nav/TOC sidebars,
+	// wider measure so instrument figures (e.g. the allotaxonometer) fit.
+	const isHome = $derived(page.url.pathname === '/');
+
+	// Instrument/tool pages also drop the sidebars so their figures can full-bleed.
+	const isWide = $derived(page.url.pathname.startsWith('/tools/'));
+
 	function slugify(text: string) {
 		return text
 			.toLowerCase()
@@ -40,6 +47,15 @@
 	}
 </script>
 
+{#if isHome}
+	<!-- -mt-14 pulls the gradient up under the transparent home header (h-14);
+	     pt-14 keeps the content below it. -->
+	<div class="home-gradient -mt-14 w-full overflow-x-clip px-4 pt-14 pb-10 sm:px-8">
+		<article class="prose dark:prose-invert prose-zinc mx-auto max-w-3xl">
+			{@render children()}
+		</article>
+	</div>
+{:else}
 <div class="flex min-h-[calc(100vh-3.5rem)]">
 	<!-- Left nav -->
 	<aside class="border-border/40 sticky top-14 h-[calc(100vh-3.5rem)] w-60 shrink-0 overflow-y-auto border-r pl-6 pr-4 py-8 max-lg:hidden">
@@ -72,7 +88,7 @@
 	<!-- Content + right TOC -->
 	<div class="flex min-w-0 flex-1">
 		<div class="min-w-0 flex-1 px-8 py-10 lg:px-14">
-			<div class="max-w-3xl mx-auto">
+			<div class={['mx-auto', isWide ? 'max-w-5xl' : 'max-w-3xl']}>
 				<span class="mb-4 inline-flex items-center gap-1.5 rounded-full bg-orange-600 px-2.5 py-0.5 text-xs font-medium text-white">
 					<svg class="h-3 w-3" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
 						<path d="M8 1.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13ZM0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8Zm9-1a1 1 0 1 1-2 0 1 1 0 0 1 2 0ZM6.75 10.25a.75.75 0 0 1 .75-.75h.75v-1.5h-.75a.75.75 0 0 1 0-1.5H8.5a.75.75 0 0 1 .75.75v2.25h.25a.75.75 0 0 1 0 1.5h-2a.75.75 0 0 1-.75-.75Z"/>
@@ -81,7 +97,7 @@
 				</span>
 			</div>
 			<article
-				class="prose dark:prose-invert prose-zinc max-w-3xl mx-auto"
+				class={['prose dark:prose-invert prose-zinc mx-auto', isWide ? 'max-w-5xl' : 'max-w-3xl']}
 				{@attach attachToc}
 			>
 				{@render children()}
@@ -114,3 +130,14 @@
 		{/if}
 	</div>
 </div>
+{/if}
+
+<style>
+	/* Home backdrop: purple → orange left-to-right, strong under the hero and
+	   fading down the page to a faint wash that carries the whole way. */
+	.home-gradient {
+		background:
+			linear-gradient(180deg, transparent 0, color-mix(in oklab, var(--background) 90%, transparent) 90vh),
+			linear-gradient(90deg, rgba(192, 132, 252, 0.5) 0%, rgba(251, 146, 60, 0.5) 100%);
+	}
+</style>

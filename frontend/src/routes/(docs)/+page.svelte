@@ -9,32 +9,6 @@
 uv sync # creates the ~/.venv
 uv add storywrangler`;
 
-	const usageCode = `# Import the SDK and the client module
-from storywrangler import Storywrangler, DatasetCreate
-
-# Connect to the Storywrangler API 
-client = Storywrangler(api_key='YOUR_API_KEY')
-
-# A basic request to verify connection is working
-me = client.users.whoami()
-
-# Create a dataset
-dataset = DatasetCreate(
-	  catalog="vcsi",
-    domain="babynames",
-    dataset_id="ngrams",
-    data_location="/mydata/babynames.parquet",
-    data_format="parquet",
-    description="Babynames frequencies by year and sex in the US.",
-	  endpoint_schema={"type": "types-counts"},
-	  transform={"time_dimension": "year", "filter_dimensions": ["sex"]},
-	  ownership={"owner_group": "vcsi", "contact": "vcsi@uvm.edu"},
-    lineage={"repo": "https://github.com/Vermont-Complex-Systems/babynames"}
-)
-
-# Register
-client.registry.register(dataset)`;
-
 	const usageAllotax = `result = client.instrument.rtd(
     domain="babynames",
     dataset="ngrams",
@@ -43,47 +17,21 @@ client.registry.register(dataset)`;
     dates2="2025",
     sex="M",
 )
-print(result['wordshift'][:5]`;
-
-   const resAllotax = `[{'type': 'Jackson',
-  'rank1': 676.0,
-  'rank2': 74.0,
-  'divergence': 0.00013999022173321902},
- {'type': 'Duvall',
-  'rank1': 10309.5,
-  'rank2': 428.0,
-  'divergence': 0.0001209265034150297},
- {'type': 'Bunny',
-  'rank1': 564.0,
-  'rank2': 5765.0,
-  'divergence': -9.604679669786964e-05},
- {'type': 'Weaver',
-  'rank1': 8522.5,
-  'rank2': 736.0,
-  'divergence': 9.389480911305102e-05},
- {'type': 'Bowl',
-  'rank1': 254.0,
-  'rank2': 1169.0,
-  'divergence': -8.660948752039387e-05}]
- `;
-
-	const dataframeCode = `types,counts,year,sex
-John,4394,1925,M
-Robert,2559,1925,M
-Axell,1956,1925,M
-Donald,1565,1925,M
-Peter,1464,1925,M
-...`;
+print(result['wordshift'][:5])`;
 </script>
 
 
-<div class="not-prose mt-10 mb-12 md:mt-20 md:mb-40 text-center">
+<!-- Gradient lives on the page container (layout .home-gradient); hero just centers. -->
+<div class="not-prose flex min-h-[60vh] flex-col items-center justify-center pb-8 text-center">
 	<h1 class="font-baskerville font-regular text-3xl md:text-5xl leading-snug tracking-tight mb-4 md:mb-5">
 		Storywrangler is a decentralized data catalog for <span style="background: linear-gradient(transparent 75%, rgba(192, 132, 252, 0.35) 45%)">complex system instruments</span> and <span style="background: linear-gradient(transparent 75%, rgba(251, 146, 60, 0.35) 45%)">data governance</span>
 	</h1>
 	<p class="text-muted-foreground text-sm md:text-lg max-w-2xl mx-auto">
 		By register your datasets to the Storywrangler platform, you first gain access to cool instruments out of the box. Built at the <a href="https://vermontcomplexsystems.org/" class="text-foreground underline underline-offset-4">Vermont Complex Systems Institute</a> to study collective attention as ecological timeseries, while improving data discoverability, ownership, and lineage tracking.
 	</p>
+	<a href="/getting-started" class="mt-8 inline-flex items-center gap-1 rounded-md bg-foreground px-5 py-2.5 text-sm font-medium text-background no-underline transition hover:opacity-90">
+		Get started →
+	</a>
 </div>
 
 	<h2 class="font-baskerville font-regular text-xl md:text-4xl leading-snug tracking-tight mb-2 md:mb-5">Text as ecological signal</h2>
@@ -96,13 +44,15 @@ Peter,1464,1925,M
 	<img src="/storywrangler.png" alt="Text sources flow into the Storywrangler platform and produce analytical instruments like time series and allotaxonometer visualizations" class="w-full rounded-lg dark:[filter:invert(.88)]" />
 </div>
 
-<h2 class="font-baskerville font-regular text-xl md:text-4xl leading-snug tracking-tight mb-2 md:mb-5">Storywrangler's architecture</h2>
-
 <p>
-	Submitters write datasets as parquet files to shared storage and register their metadata via a simple POST request. The API validates schema compatibility and availability, wires datasets to instruments automatically where applicable, and records ownership, lineage, and discoverability. 
+	The registered datasets are exposed out of the box via the <a href="/api-reference">storywrangler API</a> as well as the <a href="https://pypi.org/project/storywrangler/">python SDK</a> through the available instruments. For exposing the datasets through custom endpoints, submitters must open pull requests.
 </p>
 
-<ArchitectureDiagram />
+<div class="not-prose my-6">
+	<a href="/querying" class="inline-flex items-center gap-1 rounded-md bg-foreground px-5 py-2.5 text-sm font-medium text-background no-underline transition hover:opacity-90">
+		Query the registry →
+	</a>
+</div>
 
 <h2 class="font-baskerville font-regular text-xl md:text-4xl leading-snug tracking-tight mb-2 md:mb-5">Key features</h2>
 
@@ -112,47 +62,49 @@ Peter,1464,1925,M
 
 <KeyFeatures />
 
-<h2 class="font-baskerville font-regular text-xl md:text-4xl leading-snug tracking-tight mb-2 md:mb-5">Registering your first data pipeline</h2>
+<a href="/manifesto" class="mt-8 inline-flex items-center gap-1 rounded-md bg-foreground px-5 py-2.5 text-sm font-medium text-background no-underline transition hover:opacity-90">
+		See Manifesto →
+	</a>
+
+<h2 class="font-baskerville font-regular text-xl md:text-4xl leading-snug tracking-tight mb-2 md:mb-5">Storywrangler's architecture</h2>
+
+<p>
+	Submitters write datasets as parquet files to shared storage and register their metadata via a simple POST request. The API validates schema compatibility and availability, wires datasets to instruments automatically where applicable, and records ownership, lineage, and discoverability.
+</p>
+
+<ArchitectureDiagram />
+
+<div class="not-prose my-6">
+	<a href="/design" class="inline-flex items-center gap-1 rounded-md bg-foreground px-5 py-2.5 text-sm font-medium text-background no-underline transition hover:opacity-90">
+		More on design & architecture →
+	</a>
+</div>
+
+<h2 class="font-baskerville font-regular text-xl md:text-4xl leading-snug tracking-tight mb-2 md:mb-5">Register a dataset</h2>
 
 <Callout title="Beta release — manual account provisioning" class="mb-6">
 	Account creation is not yet self-serve. To get access, contact the VCSI team to have an account created and your API key issued. The key should then be stored in your <code class="rounded bg-zinc-200 px-1 dark:bg-zinc-800">API_KEY</code> environment variable.
 </Callout>
 
-<p>The registration process is a simple POST request documented <a href="/api-reference/registry/post-registry-register">here</a>.</p>
-
-<p>We also provide an SDK to ease the use of the platform, which we recommend to install with <a href="https://docs.astral.sh/uv/">uv</a> (or pip):</p>
+<p>
+	Register a parquet dataset with a single POST and its instruments — the <a href="/tools/allotaxonometer" class="text-foreground underline underline-offset-4">allotaxonometer</a> and others — light up automatically. Install the SDK with <a href="https://docs.astral.sh/uv/" class="text-foreground underline underline-offset-4">uv</a> (or pip):
+</p>
 
 <Code.Root code={installCode} lang="bash" hideLines={true}>
 	<Code.CopyButton />
 </Code.Root>
 
-<p>
-	Once you have your username and password, call <code>Storywrangler.login()</code> (or <code>POST /auth/login</code>)
-	to get your <code>api_key</code>. Save that key — on subsequent runs you can pass it
-	directly or store it in the <code>API_KEY</code> environment variable to avoid logging in again. Using the python SDK:
-</p>
-
-<Code.Root code={usageCode} lang="python">
-	<Code.CopyButton />
-</Code.Root>
-
-<p>You can find a walkthrough of the <code>types-counts</code> API schema that the allotaxonometer expects in <a href="/register">Registering a dataset</a>. In this case, we are telling the API that the dataset has the following shape and is available at the <code>data/</code> location:</p>
-
-<Code.Root code={dataframeCode} hideLines={true} />
-
-<p>Provided the registration is successful, you can now share your analysis of babynames with anyone on earth using:</p>
+<p>Once your data is registered, share its analysis with anyone on earth:</p>
 
 <Code.Root code={usageAllotax} lang="python">
 	<Code.CopyButton />
 </Code.Root>
 
-<p>Running this command you'll see:</p>
-
-<Code.Root code={resAllotax} hideLines={true} />
-
-<p>Under the hood, we are <a href="/versioning">versioning</a> the interaction of the allotaxonometer tool and the submitted babynames pipeline for reproducibility.</p>
-
-<p>For more details on entity mapping, discoverability, and storage options, see <a href="/register">Registering a dataset</a>.</p>
+<div class="not-prose mt-8 flex flex-wrap items-center gap-4">
+	<a href="/register" class="inline-flex items-center gap-1 rounded-md bg-foreground px-5 py-2.5 text-sm font-medium text-background no-underline transition hover:opacity-90">
+		Registering walkthrough →
+	</a>
+</div>
 
 <h2 class="font-baskerville font-regular text-xl md:text-4xl leading-snug tracking-tight mb-2 md:mb-5">Frequently asked questions</h2>
 

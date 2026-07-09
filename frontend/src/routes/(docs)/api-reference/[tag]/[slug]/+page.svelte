@@ -77,7 +77,7 @@
 	}
 
 	function toCurl(method: string, path: string, op: Operation): string {
-		const base = 'http://localhost:8000';
+		const base = 'https://api.storywrangler.uvm.edu';
 		const lines: string[] = [`curl -X ${method.toUpperCase()} ${base}${path} \\`];
 		if (['post', 'put', 'patch'].includes(method)) {
 			lines.push(`  -H 'Authorization: Bearer <token>' \\`);
@@ -88,7 +88,7 @@
 	}
 
 	function toPython(method: string, path: string, op: Operation): string {
-		const base = 'http://localhost:8000';
+		const base = 'https://api.storywrangler.uvm.edu';
 		const resolvedPath = path.replace(/\{([^}]+)\}/g, (_, p) => `<${p}>`);
 		const queryParams = ((op.parameters as Operation[]) ?? []).filter((p) => p.in === 'query');
 		const lines: string[] = ['import requests', ''];

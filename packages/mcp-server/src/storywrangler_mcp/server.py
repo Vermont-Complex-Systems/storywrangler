@@ -10,7 +10,7 @@ Four tools, two live sources:
 
 Configuration (env vars):
 - STORYWRANGLER_DOCS_URL — docs site base (default https://storywrangler.uvm.edu)
-- STORYWRANGLER_URL — API base (default https://storywrangler.uvm.edu, same
+- STORYWRANGLER_URL — API base (default https://api.storywrangler.uvm.edu, same
   env var the SDK uses)
 """
 from __future__ import annotations
@@ -27,7 +27,7 @@ from .matching import Section, match_section, suggest_sections
 from .validate import format_report, validate_submission
 
 DOCS_BASE_URL = os.getenv("STORYWRANGLER_DOCS_URL", "https://storywrangler.uvm.edu").rstrip("/")
-API_BASE_URL = os.getenv("STORYWRANGLER_URL", "https://storywrangler.uvm.edu").rstrip("/")
+API_BASE_URL = os.getenv("STORYWRANGLER_URL", "https://api.storywrangler.uvm.edu").rstrip("/")
 
 # TLS verification is on by default; set STORYWRANGLER_INSECURE=1 for
 # deployments with self-signed certificates (mirrors the SDK's behavior).

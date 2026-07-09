@@ -86,7 +86,7 @@ DATASET_ID={name}
 DOMAIN=my-domain          # must match a registered domain in the API
 DATA_PATH=/path/to/data
 
-API_URL=http://localhost:8000
+STORYWRANGLER_URL=https://api.storywrangler.uvm.edu   # API base; use http://localhost:8000 for local dev
 API_KEY=your-api-key
 """
 
@@ -298,7 +298,7 @@ def main():
     if "--dry-run" in sys.argv:
         print(json.dumps(payload))
         return
-    client = Storywrangler()  # reads API_KEY (and optionally API_URL) from .env
+    client = Storywrangler()  # reads API_KEY (and optionally STORYWRANGLER_URL) from .env
     name = payload["dataset_id"]
     success = client.registry.register(payload)
     print(f"\\n{name} registered" if success else "\\nRegistration failed")
@@ -374,7 +374,7 @@ def main():
     if "--dry-run" in sys.argv:
         print(json.dumps(payload))
         return
-    client = Storywrangler()  # reads API_KEY (and optionally API_URL) from .env
+    client = Storywrangler()  # reads API_KEY (and optionally STORYWRANGLER_URL) from .env
     name = payload["dataset_id"]
     success = client.registry.register(payload)
     print(f"\\n{name} registered" if success else "\\nRegistration failed")

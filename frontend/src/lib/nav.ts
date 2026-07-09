@@ -1,11 +1,11 @@
 export const nav = [
 	{
-		title: 'Getting Started',
+		title: '',
 		items: [
-			{ label: 'Introduction', href: '/' },
 			{ label: 'Getting started', href: '/getting-started' },
 			{ label: 'Why Storywrangler?', href: '/manifesto' },
-			{ label: 'Authentication', href: '/authentication' }
+			{ label: 'Authentication', href: '/authentication' },
+			{ label: 'Agents & MCP', href: '/llms' }
 		]
 	},
 	{

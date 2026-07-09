@@ -4,13 +4,25 @@
 	import MenuIcon from '@lucide/svelte/icons/menu';
 	import XIcon from '@lucide/svelte/icons/x';
 	import { toggleMode } from 'mode-watcher';
-	import { untrack } from 'svelte';
+	import { untrack, onMount } from 'svelte';
 	import { Button } from '$lib/components/ui/button/index.js';
 	import { page } from '$app/state';
 	import { nav } from '$lib/nav';
 
 	let menuOpen = $state(false);
 	let previousPathname = $state('');
+
+	// On the home page the header floats transparently over the gradient hero
+	// (so the gradient runs to the top), then turns solid once you scroll past it.
+	const isHome = $derived(page.url.pathname === '/');
+	let scrolled = $state(false);
+	onMount(() => {
+		const onScroll = () => (scrolled = window.scrollY > 300);
+		onScroll();
+		window.addEventListener('scroll', onScroll, { passive: true });
+		return () => window.removeEventListener('scroll', onScroll);
+	});
+	const solid = $derived(!isHome || scrolled);
 
 	function openMenu() {
 		menuOpen = true;
@@ -36,23 +48,24 @@
 	});
 </script>
 
-<header class="border-border/40 bg-background/95 supports-[backdrop-filter]:bg-background/60 sticky top-0 z-50 w-full border-b backdrop-blur">
+<header
+	class={[
+		'sticky top-0 z-50 w-full border-b transition-colors duration-300',
+		solid
+			? 'border-border/40 bg-background/95 supports-[backdrop-filter]:bg-background/60 backdrop-blur'
+			: 'border-transparent'
+	]}
+>
 	<div class="flex h-14 max-w-screen-2xl items-center px-4 sm:px-6">
 		<a href="/" class="flex items-center gap-2 font-semibold">
 			<span class="text-foreground">Storywrangler</span>
 		</a>
 
 		<nav class="ml-4 sm:ml-6 flex items-center gap-3 sm:gap-4 text-sm">
-			<a
-				href="/"
-				class="text-foreground/60 hover:text-foreground transition-colors"
-			>
+			<a href="/getting-started" class="text-foreground/60 hover:text-foreground transition-colors">
 				Guides
 			</a>
-			<a
-				href="/api-reference"
-				class="text-foreground/60 hover:text-foreground transition-colors"
-			>
+			<a href="/api-reference" class="text-foreground/60 hover:text-foreground transition-colors">
 				<span class="sm:hidden">API</span>
 				<span class="hidden sm:inline">API Reference</span>
 			</a>

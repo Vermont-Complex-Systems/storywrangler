@@ -4,6 +4,8 @@ import InstrumentDesignDiagram from '$lib/components/InstrumentDesignDiagram.sve
 import RegistrationFlowchart from '$lib/components/RegistrationFlowchart.svelte';
 import PipelineDiagram from '$lib/components/PipelineDiagram.svelte';
 import DemoVideo from '$lib/components/DemoVideo.svelte';
+import LiveDemo from '$lib/components/LiveDemo.svelte';
+import SkillViewer from '$lib/components/SkillViewer.svelte';
 
 /**
  * Components that doc markdown can embed via `<!-- Name -->` markers.
@@ -18,7 +20,9 @@ export const doc_components: Record<string, Component> = {
 	InstrumentDesignDiagram,
 	RegistrationFlowchart,
 	PipelineDiagram,
-	DemoVideo
+	DemoVideo,
+	LiveDemo,
+	SkillViewer
 };
 
 /** Split pattern matching only registered marker names (capturing the name). */

@@ -1,0 +1,104 @@
+[
+  {
+    "catalog": "vcsi",
+    "domain": "babynames",
+    "dataset_id": "ngrams",
+    "type": "types-counts"
+  },
+  {
+    "catalog": "vcsi",
+    "domain": "open-academic-analytics",
+    "dataset_id": "academic-research-groups",
+    "type": null
+  },
+  {
+    "catalog": "vcsi",
+    "domain": "open-academic-analytics",
+    "dataset_id": "authors",
+    "type": null
+  },
+  {
+    "catalog": "vcsi",
+    "domain": "open-academic-analytics",
+    "dataset_id": "coauthors",
+    "type": null
+  },
+  {
+    "catalog": "vcsi",
+    "domain": "open-academic-analytics",
+    "dataset_id": "papers",
+    "type": null
+  },
+  {
+    "catalog": "vcsi",
+    "domain": "open-academic-analytics",
+    "dataset_id": "training",
+    "type": null
+  },
+  {
+    "catalog": "vcsi",
+    "domain": "reddit",
+    "dataset_id": "ngrams",
+    "type": "types-counts"
+  },
+  {
+    "catalog": "vcsi",
+    "domain": "scisciDB",
+    "dataset_id": "field-topic-metrics",
+    "type": "time-series"
+  },
+  {
+    "catalog": "vcsi",
+    "domain": "scisciDB",
+    "dataset_id": "field-venue-metrics",
+    "type": "time-series"
+  },
+  {
+    "catalog": "verso",
+    "domain": "vt-zoning-atlas",
+    "dataset_id": "ngrams",
+    "type": "types-counts"
+  },
+  {
+    "catalog": "vcsi",
+    "domain": "wikimedia",
+    "dataset_id": "ngrams",
+    "type": "types-counts"
+  },
+  {
+    "catalog": "vcsi",
+    "domain": "wikimedia",
+    "dataset_id": "precomputed_rtd",
+    "type": null
+  },
+  {
+    "catalog": "vcsi",
+    "domain": "wikimedia",
+    "dataset_id": "revisions",
+    "type": null
+  },
+  {
+    "catalog": "vcsi",
+    "domain": "wikimedia",
+    "dataset_id": "sparklines",
+    "type": null
+  },
+  {
+    "catalog": "vcsi",
+    "domain": "wikimedia",
+    "dataset_id": "sparklines_ducklake",
+    "type": null
+  },
+  {
+    "catalog": "vcsi",
+    "domain": "wikimedia",
+    "dataset_id": "top_articles_ducklake",
+    "type": null
+  },
+  {
+    "catalog": "vcsi",
+    "domain": "wikimedia",
+    "dataset_id": "top_articles_ngrams",
+    "type": null
+  }
+]

@@ -4,7 +4,7 @@ Storywrangler client — API wrapper with dataset-scoped instruments.
 Usage::
 
     from storywrangler import Storywrangler
-    client = Storywrangler(base_url="http://localhost:8000", api_key="<your-key>")
+    client = Storywrangler(base_url="https://api.storywrangler.uvm.edu", api_key="<your-key>")
 
     # Dataset-scoped client (recommended)
     wiki = client.dataset("wikimedia", "ngrams")
@@ -397,14 +397,14 @@ class Storywrangler:
     """Top-level Storywrangler API client.
 
     Args:
-        base_url: API base URL. Defaults to STORYWRANGLER_URL env var or http://localhost:8000.
+        base_url: API base URL. Defaults to STORYWRANGLER_URL env var or https://api.storywrangler.uvm.edu.
         api_key:  API key (Bearer token). Defaults to API_KEY env var.
         timeout:  Request timeout in seconds. Defaults to 300 (5 min) to
                   accommodate slow parquet introspection over NFS.
     """
 
     def __init__(self, base_url: str = None, api_key: str = None, timeout: int = 300) -> None:
-        base_url = (base_url or os.getenv("STORYWRANGLER_URL", "http://localhost:8000")).rstrip("/")
+        base_url = (base_url or os.getenv("STORYWRANGLER_URL", "https://api.storywrangler.uvm.edu")).rstrip("/")
         api_key = api_key or os.getenv("API_KEY")
         if not api_key:
             raise ValueError(
@@ -445,7 +445,7 @@ class Storywrangler:
             client = Storywrangler.login("admin", "changethis")
             print(client.users.whoami())
         """
-        base_url = (base_url or os.getenv("STORYWRANGLER_URL", "http://localhost:8000")).rstrip("/")
+        base_url = (base_url or os.getenv("STORYWRANGLER_URL", "https://api.storywrangler.uvm.edu")).rstrip("/")
         verify = not base_url.startswith("https")
         resp = requests.post(
             f"{base_url}/auth/login",

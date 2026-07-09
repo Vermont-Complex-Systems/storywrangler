@@ -7,7 +7,7 @@ The Storywrangler API uses **API key authentication**. Accounts are created by a
 Once your account exists, POST your credentials to `/auth/login`. The response includes your permanent `api_key`.
 
 ```bash
-curl -X POST http://localhost:8000/auth/login \
+curl -X POST https://api.storywrangler.uvm.edu/auth/login \
   -H 'Content-Type: application/json' \
   -d '{"username": "alice", "password": "secret"}'
 ```
@@ -32,7 +32,7 @@ Save your `api_key` — this is the token you'll use for every subsequent reques
 Pass the key as a Bearer token in the `Authorization` header:
 
 ```bash
-curl http://localhost:8000/auth/me \
+curl https://api.storywrangler.uvm.edu/auth/me \
   -H 'Authorization: Bearer sk_abc123...'
 ```
 
@@ -67,7 +67,7 @@ The generated API key is printed to the server log on first boot. Use it to prov
 ## Verify your token
 
 ```bash
-curl http://localhost:8000/auth/me \
+curl https://api.storywrangler.uvm.edu/auth/me \
   -H 'Authorization: Bearer <your-api-key>'
 ```
 

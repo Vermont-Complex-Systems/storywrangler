@@ -1,6 +1,7 @@
 {
 	"getting-started": "setup, install SDK, storywrangler new, scaffold project, core concepts, domains, datasets, registry, register first dataset, DatasetCreate, query, allotax, rtd, base URL",
 	"querying": "querying data, filters, entities, availability, granularity, term series, top ngrams, performance, error codes",
+	"llms": "LLM agents, MCP server, model context protocol, llms.txt, machine-readable docs, storywrangler-mcp, uvx, list-datasets, get-dataset, validate-submission, Claude skills, storywrangler-analyst, storywrangler-submitter, plugin marketplace, agentic setup",
 	"register": "registering a dataset, submission, DatasetCreate, endpoint_schema, transform, entity_mapping, hive partitioning, hash buckets",
 	"authentication": "API keys, Bearer token, login, roles, admin bootstrap",
 	"versioning": "dataset versions, semver, immutable snapshots, schema_version, archival, DOI, Dataverse, reproducibility",

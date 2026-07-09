@@ -4,6 +4,11 @@ The reliable way to query Storywrangler is discovery-first: read the registry
 metadata, then construct queries from what it says actually exists. Never guess
 entity IDs, granularities, or date ranges.
 
+Here is the whole flow at a glance — list the catalog, then pull two terms' time
+series and plot them, straight from the live API:
+
+<!-- LiveDemo -->
+
 ## Step 1 — discover datasets
 
 ```
