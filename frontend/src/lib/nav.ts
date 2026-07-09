@@ -3,6 +3,7 @@ export const nav = [
 		title: 'Getting Started',
 		items: [
 			{ label: 'Introduction', href: '/' },
+			{ label: 'Getting started', href: '/getting-started' },
 			{ label: 'Why Storywrangler?', href: '/manifesto' },
 			{ label: 'Authentication', href: '/authentication' }
 		]
@@ -10,6 +11,7 @@ export const nav = [
 	{
 		title: 'Guides',
 		items: [
+			{ label: 'Querying datasets', href: '/querying' },
 			{ label: 'Registering a dataset', href: '/register' },
 			{ label: 'Design & architecture', href: '/design' },
 			{ label: 'Versioning', href: '/versioning' },

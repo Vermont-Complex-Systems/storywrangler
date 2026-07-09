@@ -1,0 +1,13 @@
+{
+	"getting-started": "setup, install SDK, storywrangler new, scaffold project, core concepts, domains, datasets, registry, register first dataset, DatasetCreate, query, allotax, rtd, base URL",
+	"querying": "querying data, filters, entities, availability, granularity, term series, top ngrams, performance, error codes",
+	"register": "registering a dataset, submission, DatasetCreate, endpoint_schema, transform, entity_mapping, hive partitioning, hash buckets",
+	"authentication": "API keys, Bearer token, login, roles, admin bootstrap",
+	"versioning": "dataset versions, semver, immutable snapshots, schema_version, archival, DOI, Dataverse, reproducibility",
+	"design": "architecture, data catalog, pointer store, decentralized storage, specifications, instrument tiers, data sovereignty",
+	"manifesto": "motivation, why storywrangler, academic data commons, collective attention, background",
+	"specification": "entity standards, entity identifier systems, wikidata namespace, field taxonomies, entity mapping requirements",
+	"roadmap": "current gaps, planned features, ownership succession, lineage, S3 migration, frozen ducklake, open policy questions",
+	"case-studies/wikimedia": "wikimedia pipeline example, parquet_hive submission, entity mapping benefits, large-scale ngrams",
+	"case-studies/scisciDB": "scisciDB pipeline example, time-series endpoint, pre-aggregation, group_by queries, semantic scholar"
+}

@@ -1,5 +1,7 @@
 # Storywrangler Entity Standards v0.0.3
 
+*v0.0.3 · 2026-04-19*
+
 ## Table of Contents
 
 1. [Introduction](#1-introduction)
