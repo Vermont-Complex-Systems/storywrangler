@@ -1,0 +1,16 @@
+{
+	"name": "storywrangler",
+	"description": "Agent tooling for the Storywrangler data platform — skills and MCP server for querying datasets and registering new ones.",
+	"owner": {
+		"name": "Vermont Complex Systems Institute",
+		"email": "compstorylab@uvm.edu"
+	},
+	"plugins": [
+		{
+			"name": "storywrangler",
+			"source": "./plugins/storywrangler",
+			"description": "Work with the Storywrangler data platform: querying and dataset-registration skills plus the storywrangler MCP server (docs, live registry, submission validation).",
+			"version": "0.1.0"
+		}
+	]
+}

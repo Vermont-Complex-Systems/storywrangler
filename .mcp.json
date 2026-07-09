@@ -1,0 +1,12 @@
+{
+	"mcpServers": {
+		"storywrangler": {
+			"command": "uv",
+			"args": ["run", "storywrangler-mcp"],
+			"env": {
+				"STORYWRANGLER_DOCS_URL": "http://localhost:5173",
+				"STORYWRANGLER_URL": "http://localhost:3003"
+			}
+		}
+	}
+}

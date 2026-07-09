@@ -1,0 +1,62 @@
+{
+	"skill": "storywrangler-submitter",
+	"description": "Guards against the classic failure modes when agents write dataset registrations for Storywrangler.",
+	"evals": [
+		{
+			"id": 1,
+			"name": "output-shape-vs-slice-axes",
+			"failure_mode": "Agent conflates endpoint_schema with transform — declares granularities, time dimensions, or filter lists inside endpoint_schema.",
+			"prompt": "Add granularity support to my dataset registration so callers can pick daily or weekly.",
+			"expected": [
+				"endpoint_schema keeps only the output shape (type, type_column, count_column)",
+				"Granularity is handled as a hive partition level (auto-discovered) or transform axis, never in endpoint_schema",
+				"Explains the boundary: endpoint_schema = what comes back, transform = which rows are read"
+			]
+		},
+		{
+			"id": 2,
+			"name": "declare-minimum-derive-rest",
+			"failure_mode": "Agent enumerates every hive level in transform and/or computes availability client-side in submit.py.",
+			"prompt": "My hive tree is ngram_size=1/granularity=daily/country=US/date=2024-01-01. Write the submit.py.",
+			"expected": [
+				"transform declares only time_dimension (plus optional filter_dimensions/hash_bucket)",
+				"No enumeration of ngram_size/granularity/country levels — notes they are auto-discovered",
+				"No client-side availability computation — notes the server derives it at registration"
+			]
+		},
+		{
+			"id": 3,
+			"name": "hive-naming-is-non-negotiable",
+			"failure_mode": "Agent accepts non-hive directory names (1grams/, daily/) or points data_location below/above the hive root.",
+			"prompt": "My data is laid out as /data/ngrams/1grams/daily/US/2024-01-01.parquet. Register it as parquet_hive.",
+			"expected": [
+				"Flags that 1grams/, daily/, US/ violate the col=val convention and must be renamed (ngram_size=1/, granularity=daily/, country=US/)",
+				"data_location points at the hive root — the directory directly above the first col=val level",
+				"Does not silently register the non-conforming layout",
+				"Does NOT rename or restructure the user's data itself — proposes the fix (e.g. a rename script) and waits for the user to run it"
+			]
+		},
+		{
+			"id": 4,
+			"name": "version-bump-restraint",
+			"failure_mode": "Agent bumps a semver version on a routine pipeline re-run, or edits an existing immutable snapshot.",
+			"prompt": "The nightly pipeline just appended yesterday's rows. Should I register this as 1.0.1?",
+			"expected": [
+				"Recommends staying on version='latest' — routine re-runs are not version bumps",
+				"Explains bumps track interface changes (schema, axes), not data refreshes",
+				"Notes semver snapshots are immutable (409 on re-register)"
+			]
+		},
+		{
+			"id": 5,
+			"name": "register-then-verify",
+			"failure_mode": "Agent POSTs the registration and declares success without checking what the server derived.",
+			"prompt": "Register my dataset and confirm it worked.",
+			"expected": [
+				"Proposes the DatasetCreate payload before POSTing (registry identity is shared state)",
+				"After registration, GETs the dataset and inspects level_order and manifest.availability",
+				"Treats empty derived fields as introspection failure (unreachable data_location or naming violation), not success"
+			]
+		}
+	]
+}

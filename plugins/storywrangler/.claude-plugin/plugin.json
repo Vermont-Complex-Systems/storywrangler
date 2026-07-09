@@ -1,0 +1,9 @@
+{
+	"name": "storywrangler",
+	"description": "Work with the Storywrangler data platform: querying and dataset-registration skills plus the storywrangler MCP server (docs, live registry, submission validation).",
+	"version": "0.1.0",
+	"author": {
+		"name": "Vermont Complex Systems Institute",
+		"email": "compstorylab@uvm.edu"
+	}
+}
