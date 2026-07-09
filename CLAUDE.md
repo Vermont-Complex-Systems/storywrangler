@@ -297,3 +297,64 @@ Templates do **not** compute availability client-side — the server auto-derive
 registration time from `parquet_introspect.py`. The `parquet_hive` template declares
 only `time_dimension` (and optionally `filter_dimensions` / `hash_bucket`); all hive
 partition levels are auto-discovered.
+
+---
+
+## Agent/LLM layer: docs-as-markdown + MCP (vcsi-starter pattern)
+
+Documentation follows the volatility split used by sveltejs/ai-tools and
+vcsi-starter: durable prose lives as markdown, volatile API reference is
+generated live from the OpenAPI spec, and an MCP server fetches both at
+runtime so nothing is duplicated or drifts.
+
+- **Source of truth for prose:** `frontend/src/lib/docs/*.md`. Each file is one
+  section; the first `# heading` is its title; `use_cases.json` holds discovery
+  keywords per slug. The `(docs)/[...slug]` catch-all renders every doc at its
+  slug URL via `MarkdownDoc.svelte` (svelte-exmarkdown) — no per-page route
+  files. Docs can embed Svelte components (diagrams, flowchart, demo video)
+  with `<!-- ComponentName -->` markers; the catch-all splits on names
+  registered in `lib/docs-components.ts` and interleaves them. To add an
+  embed: register the component there, drop the marker in the markdown.
+  Markers are stripped from llms.txt exports.
+- **Machine exports (frontend, adapter-node, all live):** `/sections.json`,
+  `/llms.txt` (everything), `/{slug}/llms.txt` per guide, and
+  `/api-reference/{tag}/llms.txt` rendered from the backend's `openapi.json`
+  (`src/lib/server/llms.ts` + `openapi-md.ts`, 5-min cache, graceful when the
+  backend is down).
+- **Endpoint reference content** comes from `backend/app/routers/openapi_docs.py`
+  (`openapi_extra` payloads: response schemas, examples, `x-performance`,
+  `x-frontend-notes`). To document an endpoint for agents, enrich it there —
+  never hand-write endpoint docs in markdown.
+- **MCP server:** `packages/mcp-server` (`storywrangler-mcp`). Two transports,
+  one tool implementation: uvx stdio, and remote streamable HTTP mounted by
+  the backend at `/mcp` (stateless; session manager runs inside the app
+  lifespan in `main.py`; configure `STORYWRANGLER_*_URL` to localhost on the
+  server). Tools: `list-sections` / `get-documentation` (docs site),
+  `list-datasets` / `get-dataset` (live registry), `validate-submission`
+  (local dry-run of a DatasetCreate: real storywrangler-schemas contract +
+  mirrored registration guards from `routers/registry.py` + conflation lints
+  + on-disk hive layout checks — keep `validate.py` in sync when guards
+  change). Env: `STORYWRANGLER_DOCS_URL`, `STORYWRANGLER_URL`; TLS
+  verification is on by default (`STORYWRANGLER_INSECURE=1` to opt out while
+  the uvm.edu cert mismatch persists).
+- **Skills (durable workflow craft):** `.claude/skills/storywrangler-analyst`
+  (discovery-first querying, entity resolution, empty-result diagnosis,
+  reproducibility) and `.claude/skills/storywrangler-submitter` (field
+  responsibilities, declare-minimum/derive-rest, hive naming, versioning
+  discipline). Skills hold the *when/why*; exact endpoint and field reference
+  stays in docs/MCP — don't duplicate it into skills. Each skill has
+  `evals/evals.json` guarding its classic failure modes; update the evals
+  when a convention changes.
+- **Distribution:** `.claude/skills/` is canonical; after editing a skill run
+  `scripts/sync_agent_assets.py`, which copies SKILL.md (not evals) into the
+  two generated locations: `packages/sdk/src/storywrangler/agent_assets/`
+  (shipped in the SDK wheel — `storywrangler new` scaffolds `.mcp.json` +
+  `.claude/skills/` into new dataset projects) and `plugins/storywrangler/`
+  (Claude plugin, installable via the in-repo marketplace:
+  `/plugin marketplace add Vermont-Complex-Systems/storywrangler`). Never
+  edit the generated copies.
+
+When adding a guide: create the `.md` in `lib/docs/`, add a `use_cases.json`
+entry and a nav entry (`lib/nav.ts` — section order in the exports follows the
+nav; unlisted docs are appended alphabetically). The page and the llms.txt
+exports appear automatically.

@@ -25,3 +25,6 @@ README_files/
 README.html
 *.sql
 backend/storywrangler.db
+
+# Skill eval scratch (fixtures + run outputs)
+.claude/skill-evals/
