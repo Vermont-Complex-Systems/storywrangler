@@ -28,7 +28,7 @@ This documentation site is also machine-readable: `/llms.txt` returns everything
 
 ## Scaffold a dataset project
 
-The SDK ships a scaffolder that lays out a complete submission project — `extract/` → `transform/` → `adapter/` — with a `submit.py` wired to the current schema and the agent assets (MCP config + Claude skills) already in place:
+The SDK ships a scaffolder that lays out a complete submission project — `extract/` → `transform/` → `load/` — with a `submit.py` wired to the current schema and the agent assets (MCP config + Claude skills) already in place:
 
 ```bash
 uvx storywrangler new babynames --format parquet
@@ -36,7 +36,7 @@ uvx storywrangler new babynames --format parquet
 uvx storywrangler new ngrams --format parquet_hive
 ```
 
-Fill in `.env` (`DATASET_ID`, `DOMAIN`, `DATA_PATH`, `API_KEY`), map your entities in `config/entities.yaml`, edit `adapter/submit.py`, then `make submit` to register. See [registering a dataset](/register) for the field-by-field walkthrough.
+Fill in `.env` (`DATASET_ID`, `DOMAIN`, `DATA_PATH`, `API_KEY`), map your entities in `config/entities.yaml`, edit `load/submit.py`, then `make submit` to register. See [registering a dataset](/register) for the field-by-field walkthrough.
 
 ## Register your first dataset
 

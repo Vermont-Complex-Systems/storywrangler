@@ -12,6 +12,7 @@ export const nav = [
 		title: 'Guides',
 		items: [
 			{ label: 'Querying datasets', href: '/querying' },
+			{ label: 'Building a pipeline', href: '/pipelines' },
 			{ label: 'Registering a dataset', href: '/register' },
 			{ label: 'Design & architecture', href: '/design' },
 			{ label: 'Versioning', href: '/versioning' },

@@ -64,7 +64,7 @@ from what actually exists — no guessed entity IDs, granularities, or date rang
 ## Skills
 
 Two Claude skills carry the *when and why* — the discovery-first analyst craft
-([querying](/querying)) and the submitter craft ([registering](/register)) — while
+([querying](/querying)) and the submission craft ([registering](/register)) — while
 the exact field and endpoint reference stays in the docs and MCP tools, so nothing
 drifts. Here they are in full; copy either into your agent, or let
 `storywrangler new` scaffold both:

@@ -19,7 +19,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 CANONICAL = ROOT / ".claude" / "skills"
-SKILLS = ["storywrangler-analyst", "storywrangler-submitter"]
+SKILLS = ["storywrangler-analyst", "storywrangler-submission"]
 TARGETS = [
     ROOT / "packages" / "sdk" / "src" / "storywrangler" / "agent_assets" / "skills",
     ROOT / "plugins" / "storywrangler" / "skills",

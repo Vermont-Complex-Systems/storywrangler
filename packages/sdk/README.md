@@ -31,7 +31,7 @@ my-dataset/
   config/entities.yaml      # entity mappings (local_id → canonical ID)
   extract/src/scrape.py     # download raw data
   transform/src/process.py  # process into parquet
-  adapter/submit.py         # register with the platform
+  load/submit.py         # register with the platform
   tests/                    # entity coverage tests
   Makefile                  # or Snakefile
 ```
@@ -42,7 +42,7 @@ my-dataset/
 cd my-dataset
 cp .env.example .env        # fill in DATASET_ID, DOMAIN, DATA_PATH, API_KEY
 uv sync
-# Edit adapter/submit.py, config/entities.yaml
+# Edit load/submit.py, config/entities.yaml
 make submit
 ```
 

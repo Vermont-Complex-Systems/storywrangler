@@ -1,20 +1,43 @@
 ---
-name: storywrangler-submitter
-description: Craft for registering datasets with the Storywrangler platform — parquet/parquet_hive conventions, DatasetCreate field responsibilities, what the server auto-derives, the progressive registration workflow, and versioning discipline. Load this whenever writing or editing a submit.py, preparing parquet files for registration, or designing hive partition layouts for Storywrangler.
+name: storywrangler-submission
+description: Craft for submitting datasets to the Storywrangler platform — the DatasetCreate contract and field responsibilities, pre-submission registry checks, what the server auto-derives, validation before POST, and versioning discipline. Load this when registering or re-registering a dataset, writing or reviewing a submit.py, checking whether existing data is submittable, or deciding what shape a pipeline's output must take (endpoint type, partition layout). NOT for building the extract/transform pipeline itself — that is generic ETL work; this skill owns the contract the pipeline's output must meet, and starts once the data (or its design) exists.
 ---
 
-# Registering datasets with Storywrangler
+# Submitting datasets to Storywrangler
 
 Registration is one API call, but the payload encodes a contract. The craft is
 knowing which field answers which question, declaring the minimum, and letting
 the server derive the rest.
 
-## Two formats, one naming convention
+**Scope:** this skill covers the *act of submission* — not the pipeline that
+produces the data. Two entry points, same contract:
+
+- **From scratch** — read the contract *forward*: design the pipeline's output
+  to satisfy it (see "Designing for submission" below, and the `pipelines`
+  guide for the full pipeline craft).
+- **Migration** — read the contract *backward*: an existing dataset either
+  gets reshaped (pipeline work, out of scope here) or *declared around*
+  (column-name overrides, `filter_dimensions`) to meet it.
+
+## Check the registry before you register
+
+The registry is shared state — inspect it before writing to it (the
+`storywrangler-analyst` skill covers this discovery craft in depth):
+
+- **Does the target domain exist?** `GET /registry/domains` (datasets can
+  fall back to the `guest` domain).
+- **Is the `dataset_id` taken?** `list-datasets` / `get-dataset` — an existing
+  entry means you are updating, not creating: check its live `version` and
+  whether your change is a re-register or a version bump.
+- **What do sibling datasets do?** Match their entity namespace and column
+  conventions so datasets compose (`wikidata:` entities join across datasets).
+
+## The output contract — what the data must satisfy
 
 - `parquet` — single file or flat directory.
 - `parquet_hive` — hive-partitioned tree where **every** level uses `col=val/`
-  naming. Non-hive directory names (`1grams/`, `daily/`) are not supported —
-  rename them (`ngram_size=1/`, `granularity=daily/`).
+  naming. Non-hive directory names (`1grams/`, `daily/`) are not registrable —
+  the tree must be renamed (`ngram_size=1/`, `granularity=daily/`).
 - `data_location` for `parquet_hive` is the **root** of the tree: the
   directory directly above the first `col=val/` level.
 - The path must be reachable *from the API server* (institutional storage),
@@ -49,7 +72,7 @@ hash-bucket counts. Therefore:
 - `filter_dimensions` is only for *non-hive columns inside the parquet files*
   where omitting the parameter means "aggregate over all values" (e.g. `sex`).
 - `hash_bucket` is just the column name as a string (e.g. `"ngram_bucket"`);
-  the server derives per-entity bucket counts. In the pipeline, assign rows
+  the server derives per-entity bucket counts. The pipeline must assign rows
   with `storywrangler.hashing.assign_bucket()` — the same murmur3 the query
   layer uses. Never hand-roll the hash.
 
@@ -72,6 +95,24 @@ that `manifest.availability` is populated. Empty derived fields mean
 introspection failed — usually a `data_location` the server cannot reach or a
 naming-convention violation.
 
+## Designing for submission (from-scratch pipelines)
+
+When the pipeline doesn't exist yet, the contract is cheap to satisfy by
+design and expensive to retrofit after terabytes are written. Settle these
+before the transform is built:
+
+- **Endpoint type first**: `types-counts` (rank distributions → the
+  allotaxonometer) or `time-series` (tabular GROUP BY). It determines the
+  column shape everything else feeds.
+- **Partition keys = query axes**: partition by what callers will filter on
+  (entity, granularity, time), nothing else.
+- **One time column, one entity column**, named consistently across the tree.
+- Sanity-check the planned layout early: `validate-submission` on a sample.
+
+The pipeline craft itself — medallion tiers, parquet-first transforms,
+orchestration, file sizing — is the `pipelines` guide
+(`get-documentation pipelines`), not this skill.
+
 ## Versioning discipline
 
 - `version="latest"` (default) is the mutable slot — re-register freely on
@@ -93,8 +134,6 @@ naming-convention violation.
   storage where other consumers read the same paths, and may already be a
   registered dataset's `data_location` — renaming directories silently breaks
   every query against that registration.
-- Confirm the target domain exists first: `GET /registry/domains` (datasets
-  can fall back to the `guest` domain).
 - **Validate before POSTing**: run the `validate-submission` MCP tool on the
   payload after writing or editing a submit.py. It applies the real
   registration schema, the server's guards, and lints for silently-ignored
@@ -112,5 +151,7 @@ naming-convention violation.
 
 The full walkthrough with five worked examples (filter-only → entity-mapped →
 time axis → hive → hash buckets) is the `register` section on the
-`storywrangler` MCP server (`get-documentation`), alongside `versioning` and
-`api-reference/registry`. Without MCP: `{docs}/register/llms.txt`.
+`storywrangler` MCP server (`get-documentation`), alongside `versioning`,
+`pipelines` (pipeline structure and design-for-submission), and
+`api-reference/registry`. Registry inspection craft is the
+`storywrangler-analyst` skill. Without MCP: `{docs}/register/llms.txt`.

@@ -6,7 +6,7 @@ Usage:
     uvx storywrangler new <project-name> --format parquet_hive
 
 The generated project follows the simple-make pattern:
-  extract/ → transform/ → adapter/ (submit) → tests/
+  extract/ → transform/ → load/ (submit) → tests/
 """
 
 import argparse
@@ -55,7 +55,7 @@ def _print_formats() -> None:
 # submission conventions and can reach the storywrangler MCP server. Shipped
 # as package data; synced from the monorepo's .claude/skills by
 # scripts/sync_agent_assets.py.
-AGENT_SKILLS = ("storywrangler-submitter", "storywrangler-analyst")
+AGENT_SKILLS = ("storywrangler-submission", "storywrangler-analyst")
 
 
 # ── Common files (format-independent) ────────────────────────
@@ -64,7 +64,7 @@ PYPROJECT = """\
 [project]
 name = "{name}"
 version = "0.1.0"
-description = "Dataset adapter for Storywrangler"
+description = "Dataset pipeline for Storywrangler"
 requires-python = ">=3.11"
 dependencies = [
     "duckdb>=1.4",
@@ -101,10 +101,10 @@ transform:
 
 # Dry-run the registration payload through the validator before submitting.
 validate:
-\tuv run python adapter/submit.py --dry-run | uvx storywrangler-mcp validate-submission -
+\tuv run python load/submit.py --dry-run | uvx storywrangler-mcp validate-submission -
 
 submit:
-\tuv run python adapter/submit.py
+\tuv run python load/submit.py
 
 test:
 \tuv run pytest tests/
@@ -152,12 +152,12 @@ rule transform:
 
 rule validate:
     shell:
-        "uv run python adapter/submit.py --dry-run | uvx storywrangler-mcp validate-submission -"
+        "uv run python load/submit.py --dry-run | uvx storywrangler-mcp validate-submission -"
 
 
 rule submit:
     shell:
-        "uv run python adapter/submit.py"
+        "uv run python load/submit.py"
 
 
 rule test:
@@ -246,7 +246,7 @@ def test_no_null_entities(db):
 SUBMIT = {
 
 "parquet": """\
-\"\"\"Adapter — Submit (parquet)\"\"\"
+\"\"\"Load — submit the dataset to Storywrangler (parquet)\"\"\"
 
 import json
 import os
@@ -294,7 +294,7 @@ def main():
     payload = build_payload()
     # `--dry-run` prints the payload as JSON and skips registration, so you can
     # validate it before submitting (see `make validate`):
-    #   uv run python adapter/submit.py --dry-run | uvx storywrangler-mcp validate-submission -
+    #   uv run python load/submit.py --dry-run | uvx storywrangler-mcp validate-submission -
     if "--dry-run" in sys.argv:
         print(json.dumps(payload))
         return
@@ -309,7 +309,7 @@ if __name__ == "__main__":
 """,
 
 "parquet_hive": """\
-\"\"\"Adapter — Submit (parquet_hive)
+\"\"\"Load — submit the dataset to Storywrangler (parquet_hive)
 
 Hive partition levels are auto-discovered from the directory structure.
 You only need to declare time_dimension and (optionally) hash_bucket.
@@ -370,7 +370,7 @@ def main():
     payload = build_payload()
     # `--dry-run` prints the payload as JSON and skips registration, so you can
     # validate it before submitting (see `make validate`):
-    #   uv run python adapter/submit.py --dry-run | uvx storywrangler-mcp validate-submission -
+    #   uv run python load/submit.py --dry-run | uvx storywrangler-mcp validate-submission -
     if "--dry-run" in sys.argv:
         print(json.dumps(payload))
         return
@@ -489,7 +489,7 @@ def scaffold(name: str, fmt: str, orch: str):
         root / "transform" / "src",
         root / "transform" / "input",
         root / "transform" / "hand",
-        root / "adapter",
+        root / "load",
         root / "tests",
     ]
     if orch == "snakemake":
@@ -503,7 +503,7 @@ def scaffold(name: str, fmt: str, orch: str):
         "config/entities.yaml":     ENTITIES_YAML,
         "extract/src/scrape.py":    SCRAPE_PY,
         "transform/src/process.py": PROCESS_PY,
-        "adapter/submit.py":        SUBMIT[fmt],
+        "load/submit.py":        SUBMIT[fmt],
         "tests/conftest.py":        CONFTEST[fmt],
         "tests/test_coverage.py":   TEST_COVERAGE,
     }
@@ -527,7 +527,7 @@ def scaffold(name: str, fmt: str, orch: str):
     print(f"  cd {name}")
     print(f"  cp .env.example .env   # fill in DATASET_ID, DOMAIN, DATA_PATH, API_KEY")
     print(f"  uv sync")
-    print(f"  # Edit config/entities.yaml, adapter/submit.py")
+    print(f"  # Edit config/entities.yaml, load/submit.py")
     print(f"  {validate_cmd}   # dry-run the payload through the validator first")
     print(f"  {run_cmd}")
     print()

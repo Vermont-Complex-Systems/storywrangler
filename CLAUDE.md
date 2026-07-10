@@ -339,7 +339,7 @@ runtime so nothing is duplicated or drifts.
   the uvm.edu cert mismatch persists).
 - **Skills (durable workflow craft):** `.claude/skills/storywrangler-analyst`
   (discovery-first querying, entity resolution, empty-result diagnosis,
-  reproducibility) and `.claude/skills/storywrangler-submitter` (field
+  reproducibility) and `.claude/skills/storywrangler-submission` (field
   responsibilities, declare-minimum/derive-rest, hive naming, versioning
   discipline). Skills hold the *when/why*; exact endpoint and field reference
   stays in docs/MCP — don't duplicate it into skills. Each skill has

@@ -12,7 +12,7 @@ Install from the in-repo marketplace:
 Contents:
 
 - `skills/storywrangler-analyst` — discovery-first querying craft
-- `skills/storywrangler-submitter` — dataset registration craft
+- `skills/storywrangler-submission` — dataset registration craft
 - `.mcp.json` — the `storywrangler-mcp` server (stdio via uvx; switch to the
   remote `https://storywrangler.uvm.edu/mcp/` endpoint once the TLS
   certificate is fixed)

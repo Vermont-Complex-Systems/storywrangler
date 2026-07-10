@@ -32,6 +32,10 @@ registry records what actually exists, introspected from the data itself:
 With the SDK, `client.dataset(domain, id).filters` and `.availability` wrap
 steps 1–2 and validate parameters before sending.
 
+The same discovery craft serves pre-submission checks (does a domain exist,
+is a `dataset_id` taken, what conventions do sibling datasets follow) — the
+`storywrangler-submission` skill defers to this one for registry inspection.
+
 ## Entities are namespaced identifiers
 
 Datasets are partitioned by an entity (a country, a subreddit, a town) using
