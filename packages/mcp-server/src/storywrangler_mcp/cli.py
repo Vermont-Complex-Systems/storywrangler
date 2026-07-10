@@ -107,7 +107,13 @@ def main(argv: list[str] | None = None) -> None:
     p.set_defaults(func=_cmd_get_dataset)
 
     args = parser.parse_args(argv)
-    sys.exit(args.func(args))
+    try:
+        sys.exit(args.func(args))
+    except RuntimeError as exc:
+        # Network/host errors from the tools surface as clean RuntimeErrors —
+        # print the message instead of a traceback.
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

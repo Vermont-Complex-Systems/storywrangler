@@ -52,12 +52,20 @@ async def _get(url: str) -> httpx.Response:
     try:
         async with httpx.AsyncClient(timeout=30, follow_redirects=True, verify=VERIFY_TLS) as client:
             res = await client.get(url)
-            res.raise_for_status()
-            return res
     except httpx.ConnectError as exc:
         if "certificate" in str(exc).lower():
             raise RuntimeError(_CERT_HINT.format(url=url)) from exc
-        raise
+        raise RuntimeError(f"Could not connect to {url}: {exc}") from exc
+    except httpx.HTTPError as exc:
+        raise RuntimeError(f"Request to {url} failed: {exc}") from exc
+
+    if res.status_code >= 400:
+        raise RuntimeError(
+            f"{url} returned HTTP {res.status_code}. Check that the MCP is pointed at "
+            f"the right hosts — docs at STORYWRANGLER_DOCS_URL ({DOCS_BASE_URL}) and the "
+            f"registry API at STORYWRANGLER_URL ({API_BASE_URL})."
+        )
+    return res
 
 
 async def _fetch_json(url: str) -> Any:
