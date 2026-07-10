@@ -100,7 +100,12 @@ def log_fast_path_miss(label: str, exc: Exception) -> None:
 
 
 def bucket_files(dataset_obj, terms, local_id, n: int) -> List[str]:
-    """Paths of the hash-bucket files that can contain *terms*."""
+    """Glob paths of the hash-bucket directories that can contain *terms*.
+
+    Each bucket is globbed with ``/*.parquet`` — never a pinned filename:
+    DuckLake-backed buckets hold several uniquely-named
+    ``ducklake-<uuid>.parquet`` files whose set changes on every compaction.
+    """
     hb = get_bucket_config(dataset_obj)
     n_buckets = resolve_bucket_count(hb, local_id, n)
     buckets = {assign_bucket(t, n_buckets) for t in terms}
@@ -110,7 +115,7 @@ def bucket_files(dataset_obj, terms, local_id, n: int) -> List[str]:
             filter_vals={"ngram_size": n},
             entity_value=local_id,
             bucket_value=b,
-            glob_suffix="/data_0.parquet",
+            glob_suffix="/*.parquet",
         )
         for b in sorted(buckets)
     ]

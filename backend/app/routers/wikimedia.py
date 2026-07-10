@@ -242,7 +242,7 @@ async def term_series(
     granularity: str = Query("daily", description="Hive granularity: daily | weekly | monthly"),
     n: int = Query(1, description="N-gram size (1 = unigrams, 2 = bigrams)"),
     include_articles: bool = Query(True, description="Include top_articles in response (set false for sparkline-only, ~2x faster)"),
-    sparkline_dataset: str = Query("sparklines", description="Registry dataset_id for the sparkline precomputed data (default: 'sparklines')."),
+    sparkline_dataset: str = Query("sparklines_ducklake", description="Registry dataset_id for the sparkline precomputed data (default: 'sparklines_ducklake')."),
     db: AsyncSession = Depends(get_session),
 ):
     """Per-date time series for a single n-gram term within one entity (country).
@@ -281,7 +281,7 @@ async def term_series(
     articles: dict = {}  # (ngram, date_str) -> [[url, score], ...]
     with timed("registry", "Sparkline registry lookup"):
         sparkline_obj = await get_latest_entry(db, "wikimedia", sparkline_dataset)
-        top_articles_obj = await get_latest_entry(db, "wikimedia", "top_articles_ngrams")
+        top_articles_obj = await get_latest_entry(db, "wikimedia", "top_articles_ducklake")
 
     if sparkline_obj:
         def _fast():
@@ -356,7 +356,7 @@ async def term_series_batch(
     n: int = Query(1, description="N-gram size (1 = unigrams, 2 = bigrams)"),
     include_articles: bool = Query(True, description="Include top_articles in response (set false for sparkline-only, ~2x faster)"),
     articles_dates: Optional[str] = Query(None, description="Comma-separated dates to fetch articles for (e.g. '2025-06-05,2026-01-21'). When set, top_articles are only included for these dates instead of the full window. Sparkline data is unaffected."),
-    sparkline_dataset: str = Query("sparklines", description="Registry dataset_id for the sparkline precomputed data (default: 'sparklines')."),
+    sparkline_dataset: str = Query("sparklines_ducklake", description="Registry dataset_id for the sparkline precomputed data (default: 'sparklines_ducklake')."),
     db: AsyncSession = Depends(get_session),
 ):
     """Batch time series lookup for multiple terms in a single request.
@@ -413,7 +413,7 @@ async def term_series_batch(
     if use_fast_path:
         with timed("registry", "Sparkline registry lookup"):
             sparkline_obj = await get_latest_entry(db, "wikimedia", sparkline_dataset)
-            top_articles_obj = await get_latest_entry(db, "wikimedia", "top_articles_ngrams")
+            top_articles_obj = await get_latest_entry(db, "wikimedia", "top_articles_ducklake")
     else:
         sparkline_obj = None
         top_articles_obj = None
