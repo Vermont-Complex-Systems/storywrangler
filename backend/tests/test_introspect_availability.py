@@ -259,6 +259,53 @@ class TestAvailabilityTimeDimensionTypes:
         assert avail == {"min": "2015", "max": "2023"}
 
 
+class TestAvailabilityMultiFileBucket:
+    """DuckLake-shaped buckets: several files per leaf, bounds must span all.
+
+    Regression: the alphabetically-first file in a DuckLake bucket can be a
+    single day's append — reading MIN/MAX from one file registered wildly
+    wrong availability (e.g. a two-year dataset reduced to one date).
+    """
+
+    def test_min_max_spans_all_files_in_bucket(self, conn, tmp_path):
+        root = tmp_path / "sparklines"
+        bucket = root / "ngram_size=1" / "country=Canada" / "bucket=0"
+        bucket.mkdir(parents=True)
+        # Sorts first, holds a single mid-range date
+        conn.execute(f"""
+            COPY (SELECT DATE '2025-01-15' AS date, 'cat' AS ngram, 10 AS pv_count)
+            TO '{bucket / "a-daily-append.parquet"}' (FORMAT PARQUET)
+        """)
+        # Sorts second, holds the true range
+        conn.execute(f"""
+            COPY (
+                SELECT * FROM (VALUES
+                    (DATE '2024-09-30', 'dog', 5),
+                    (DATE '2026-07-01', 'emu', 7)
+                ) AS t(date, ngram, pv_count)
+            ) TO '{bucket / "b-tier-merged.parquet"}' (FORMAT PARQUET)
+        """)
+        ds = _ns(
+            data_location=str(root),
+            data_format="parquet_hive",
+            transform=_ns(
+                time_dimension="date",
+                filter_dimensions=None,
+                hash_bucket="bucket",
+            ),
+            entity_mapping=_ns(local_id_column="country"),
+        )
+        level_order = [
+            {"column": "ngram_size", "type": "partition", "default_value": 1},
+            {"column": "country", "type": "entity", "default_value": "Canada"},
+            {"column": "bucket", "type": "hash_bucket", "default_value": 0},
+        ]
+        result = introspect(conn, ds, level_order=level_order)
+        avail = result["availability"]
+        assert avail["Canada"]["1"]["min"] == "2024-09-30"
+        assert avail["Canada"]["1"]["max"] == "2026-07-01"
+
+
 class TestAvailabilityNoTimeDimension:
     """Availability should be absent when time_dimension is not set."""
 
@@ -285,6 +332,150 @@ class TestAvailabilityNoTimeDimension:
         )
         result = introspect(conn, ds)
         assert "availability" not in result
+
+
+class TestAvailabilityTypeCounts:
+    """types-counts datasets gain a `types` (vocabulary size) key per leaf.
+
+    The count is the row count of the latest date's partition — used by
+    frontends as a topN ceiling hint. Other endpoint types keep bounds-only
+    leaves, and a failed count degrades to bounds-only rather than dropping
+    availability.
+    """
+
+    LEVEL_ORDER = [
+        {"column": "country", "type": "entity", "default_value": "Canada"},
+        {"column": "granularity", "type": "partition", "default_value": "daily"},
+        {"column": "date", "type": "time", "default_value": "2024-01-01"},
+    ]
+
+    @pytest.fixture
+    def hive_types(self, conn, tmp_path):
+        """Latest date holds 3 types, earliest holds 1 — the count must come
+        from the max-date leaf, not the min leaf or the whole combo."""
+        root = str(tmp_path / "wikigrams")
+        conn.execute(f"""
+            COPY (
+                SELECT * FROM (VALUES
+                    ('Canada', 'daily',  '2024-01-01', 'cat', 100),
+                    ('Canada', 'daily',  '2024-06-15', 'cat',  80),
+                    ('Canada', 'daily',  '2024-06-15', 'dog',  60),
+                    ('Canada', 'daily',  '2024-06-15', 'emu',  40),
+                    ('Canada', 'weekly', '2024-01-07', 'cat', 700),
+                    ('Canada', 'weekly', '2024-06-09', 'dog', 500),
+                    ('Canada', 'weekly', '2024-06-09', 'emu', 300)
+                ) AS t(country, granularity, date, ngram, pv_count)
+            ) TO '{root}' (FORMAT PARQUET, PARTITION_BY (country, granularity, date))
+        """)
+        return root
+
+    def _dataset(self, root, endpoint_schema):
+        return _ns(
+            data_location=root,
+            data_format="parquet_hive",
+            transform=_ns(
+                time_dimension="date",
+                filter_dimensions=None,
+                hash_bucket=None,
+            ),
+            entity_mapping=_ns(local_id_column="country"),
+            endpoint_schema=endpoint_schema,
+        )
+
+    def test_leaf_gains_vocab_size_from_max_date(self, conn, hive_types):
+        ds = self._dataset(
+            hive_types,
+            _ns(type="types-counts", type_column="ngram", count_column="pv_count"),
+        )
+        avail = introspect(conn, ds, level_order=self.LEVEL_ORDER)["availability"]
+        assert avail["Canada"]["daily"] == {
+            "min": "2024-01-01", "max": "2024-06-15", "types": 3}
+        assert avail["Canada"]["weekly"] == {
+            "min": "2024-01-07", "max": "2024-06-09", "types": 2}
+
+    def test_other_endpoint_types_keep_bounds_only(self, conn, hive_types):
+        ds = self._dataset(
+            hive_types,
+            _ns(type="time-series", type_column=None, count_column="pv_count"),
+        )
+        avail = introspect(conn, ds, level_order=self.LEVEL_ORDER)["availability"]
+        assert avail["Canada"]["daily"] == {"min": "2024-01-01", "max": "2024-06-15"}
+
+    def test_count_spans_hash_buckets_below_time_leaf(self, conn, tmp_path):
+        """Types are disjoint across hash buckets — the count must sum them."""
+        root = tmp_path / "bucketed"
+        old = root / "country=Canada" / "date=2024-01-01" / "bucket=0"
+        old.mkdir(parents=True)
+        conn.execute(f"""
+            COPY (SELECT 'cat' AS ngram, 10 AS pv_count)
+            TO '{old / "data.parquet"}' (FORMAT PARQUET)
+        """)
+        new0 = root / "country=Canada" / "date=2024-06-15" / "bucket=0"
+        new0.mkdir(parents=True)
+        conn.execute(f"""
+            COPY (
+                SELECT * FROM (VALUES ('dog', 5), ('emu', 7)) AS t(ngram, pv_count)
+            ) TO '{new0 / "data.parquet"}' (FORMAT PARQUET)
+        """)
+        new1 = root / "country=Canada" / "date=2024-06-15" / "bucket=1"
+        new1.mkdir(parents=True)
+        conn.execute(f"""
+            COPY (SELECT 'fox' AS ngram, 3 AS pv_count)
+            TO '{new1 / "data.parquet"}' (FORMAT PARQUET)
+        """)
+        ds = _ns(
+            data_location=str(root),
+            data_format="parquet_hive",
+            transform=_ns(
+                time_dimension="date",
+                filter_dimensions=None,
+                hash_bucket="bucket",
+            ),
+            entity_mapping=_ns(local_id_column="country"),
+            endpoint_schema=_ns(
+                type="types-counts", type_column="ngram", count_column="pv_count"),
+        )
+        level_order = [
+            {"column": "country", "type": "entity", "default_value": "Canada"},
+            {"column": "date", "type": "time", "default_value": "2024-01-01"},
+            {"column": "bucket", "type": "hash_bucket", "default_value": 0},
+        ]
+        avail = introspect(conn, ds, level_order=level_order)["availability"]
+        assert avail["Canada"] == {
+            "min": "2024-01-01", "max": "2024-06-15", "types": 3}
+
+    def test_flat_parquet_dataset_level_count(self, conn, flat_parquet):
+        ds = _ns(
+            data_location=flat_parquet,
+            data_format="parquet",
+            transform=_ns(
+                time_dimension="year",
+                filter_dimensions=None,
+                hash_bucket=None,
+            ),
+            entity_mapping=None,
+            endpoint_schema=_ns(
+                type="types-counts", type_column="type", count_column="count"),
+        )
+        avail = introspect(conn, ds)["availability"]
+        assert avail == {"min": "2015", "max": "2023", "types": 2}
+
+    def test_flat_parquet_missing_type_column_degrades_to_bounds(self, conn, flat_parquet):
+        """type_column=None defaults to 'types', absent here — bounds survive."""
+        ds = _ns(
+            data_location=flat_parquet,
+            data_format="parquet",
+            transform=_ns(
+                time_dimension="year",
+                filter_dimensions=None,
+                hash_bucket=None,
+            ),
+            entity_mapping=None,
+            endpoint_schema=_ns(
+                type="types-counts", type_column=None, count_column=None),
+        )
+        avail = introspect(conn, ds)["availability"]
+        assert avail == {"min": "2015", "max": "2023"}
 
 
 # ── bucket config derivation ─────────────────────────────────────────────────

@@ -923,8 +923,8 @@ Pre-computed coverage metadata, never read at query time. Used for discovery, UI
 ```json
 {
   "availability": {
-    "United States": {"daily": {"min": "2024-01-01", "max": "2026-04-20"}},
-    "Canada": {"daily": {"min": "2024-01-01", "max": "2026-04-20"}}
+    "United States": {"daily": {"min": "2024-01-01", "max": "2026-04-20", "types": 2648755}},
+    "Canada": {"daily": {"min": "2024-01-01", "max": "2026-04-20", "types": 1893002}}
   },
   "partition_index": [
     {"identifier": "Cat", "revision_count": 142, "first_edit": "2001-01-01"}
@@ -935,9 +935,10 @@ Pre-computed coverage metadata, never read at query time. Used for discovery, UI
 | Field | Derived? | Description |
 |---|---|---|
 | `availability` | Yes — auto-populated at registration | Time coverage summary: MIN/MAX of the time dimension, grouped by entity and partition dimensions. Entity-first format when `entity_mapping` is present; flat otherwise |
+| `availability.*.types` | Yes — types-counts datasets only | Vocabulary size (distinct type count) at the latest available date, per entity × partition combination. A representative ceiling hint for `topN`-style parameters, not an exact figure for arbitrary date ranges |
 | `partition_index` | No — submitter-provided | Enumerable partition list with optional per-partition stats. Stored separately from summary responses |
 
-**`availability` auto-population:** When `transform.time_dimension` is set, the registry computes availability by scanning the data files at registration time. Submitters SHOULD NOT compute this manually.
+**`availability` auto-population:** When `transform.time_dimension` is set, the registry computes availability by scanning the data files at registration time. Submitters SHOULD NOT compute this manually. For datasets with `endpoint_schema.type = "types-counts"`, each availability leaf also gains a `types` count (best-effort — a leaf may hold bounds only if the count could not be read).
 
 ---
 

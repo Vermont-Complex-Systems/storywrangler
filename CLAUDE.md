@@ -161,9 +161,15 @@ and file-level statistics — exactly what `availability` and `partition_index` 
 when `transform.time_dimension` is set. It computes `MIN/MAX` of the time column
 grouped by entity and partition dimensions. Entity-first format:
 ```json
-{"United States": {"daily": {"min": "2024-01-01", "max": "2026-04-20"}, "weekly": {...}}}
+{"United States": {"daily": {"min": "2024-01-01", "max": "2026-04-20", "types": 2648755}, "weekly": {...}}}
 ```
 For datasets without entity_mapping: `{"daily": {"min": ..., "max": ...}}`.
+
+`types` appears only on **types-counts datasets**: the vocabulary size (distinct type count) at the latest available date, a topN ceiling hint for UI consumers. Hive-time datasets get it from a footer-only
+`COUNT(*)` on the max-date leaf (one row per type per date; buckets summed via `**` glob); flat parquet gets one dataset-level `COUNT(DISTINCT type_col)`.
+Best-effort — a leaf holds bounds only if its count could not be read. Datasets
+where time lives inside the files (`_targeted_availability`, e.g. reddit) do
+not get counts yet — that path needs a real data scan per combo.
 
 `partition_index` is submitter-provided, stored in a separate DB column (excluded
 from summary responses via SQLAlchemy `load_only`) and re-injected into `manifest`

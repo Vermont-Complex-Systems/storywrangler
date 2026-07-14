@@ -11,12 +11,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..core.database import get_session
 from ..core.duckdb_client import get_duckdb_client, run_blocking
 from ..core.query_utils import (
-    build_hive_path, handle_query_error, is_data_missing, latest_from_manifest,
-    resolve_entity,
+    build_hive_path, handle_query_error, is_data_missing, resolve_entity,
 )
 from ..core.registry_utils import get_latest_entry
 from ..core.term_series import (
-    bucket_files, build_date_filter, fetch_sparkline_rows, log_fast_path_miss,
+    bucket_files, build_date_filter, fetch_sparkline_rows, latest_series_date,
     ngrams_context, run_top_ngrams, series_entry, validated_dims,
 )
 from ..core.timing import timed
@@ -242,7 +241,7 @@ async def term_series(
     granularity: str = Query("daily", description="Hive granularity: daily | weekly | monthly"),
     n: int = Query(1, description="N-gram size (1 = unigrams, 2 = bigrams)"),
     include_articles: bool = Query(True, description="Include top_articles in response (set false for sparkline-only, ~2x faster)"),
-    sparkline_dataset: str = Query("sparklines_ducklake", description="Registry dataset_id for the sparkline precomputed data (default: 'sparklines_ducklake')."),
+    sparkline_dataset: str = Query("sparklines", description="Registry dataset_id for the sparkline precomputed data (default: 'sparklines')."),
     db: AsyncSession = Depends(get_session),
 ):
     """Per-date time series for a single n-gram term within one entity (country).
@@ -263,8 +262,12 @@ async def term_series(
     _, entity_path = ngrams_context(
         ngrams_obj, local_id, {"granularity": granularity, "ngram_size": n})
 
+    with timed("registry", "Sparkline registry lookup"):
+        sparkline_obj = await get_latest_entry(db, "wikimedia", sparkline_dataset)
+        top_articles_obj = await get_latest_entry(db, "wikimedia", "top_articles_ngrams")
+
     with timed("discover", "Latest date from manifest"):
-        latest_date = latest_from_manifest(ngrams_obj, local_id, granularity)
+        latest_date = latest_series_date(ngrams_obj, sparkline_obj, local_id, granularity, n)
 
     if not date:
         if not latest_date:
@@ -279,9 +282,6 @@ async def term_series(
     # ── Fast path: sequential point lookups on sorted Parquet files ──
     series_rows = []
     articles: dict = {}  # (ngram, date_str) -> [[url, score], ...]
-    with timed("registry", "Sparkline registry lookup"):
-        sparkline_obj = await get_latest_entry(db, "wikimedia", sparkline_dataset)
-        top_articles_obj = await get_latest_entry(db, "wikimedia", "top_articles_ducklake")
 
     if sparkline_obj:
         def _fast():
@@ -356,7 +356,7 @@ async def term_series_batch(
     n: int = Query(1, description="N-gram size (1 = unigrams, 2 = bigrams)"),
     include_articles: bool = Query(True, description="Include top_articles in response (set false for sparkline-only, ~2x faster)"),
     articles_dates: Optional[str] = Query(None, description="Comma-separated dates to fetch articles for (e.g. '2025-06-05,2026-01-21'). When set, top_articles are only included for these dates instead of the full window. Sparkline data is unaffected."),
-    sparkline_dataset: str = Query("sparklines_ducklake", description="Registry dataset_id for the sparkline precomputed data (default: 'sparklines_ducklake')."),
+    sparkline_dataset: str = Query("sparklines", description="Registry dataset_id for the sparkline precomputed data (default: 'sparklines')."),
     db: AsyncSession = Depends(get_session),
 ):
     """Batch time series lookup for multiple terms in a single request.
@@ -376,7 +376,18 @@ async def term_series_batch(
 
     _, entity_path = ngrams_context(
         ngrams_obj, local_id, {"granularity": granularity, "ngram_size": n})
-    latest_date = latest_from_manifest(ngrams_obj, local_id, granularity)
+
+    # Sparkline/article precomputed data is daily-only; skip for weekly/monthly.
+    use_fast_path = granularity == "daily"
+    if use_fast_path:
+        with timed("registry", "Sparkline registry lookup"):
+            sparkline_obj = await get_latest_entry(db, "wikimedia", sparkline_dataset)
+            top_articles_obj = await get_latest_entry(db, "wikimedia", "top_articles_ngrams")
+    else:
+        sparkline_obj = None
+        top_articles_obj = None
+
+    latest_date = latest_series_date(ngrams_obj, sparkline_obj, local_id, granularity, n)
 
     if not date:
         if not latest_date:
@@ -405,18 +416,8 @@ async def term_series_batch(
         art_date_params = date_params
 
     # ── Fast path: sequential point lookups on sorted Parquet files ──
-    # Sparkline/article precomputed data is daily-only; skip for weekly/monthly.
     sparkline_rows = []
     articles_by_key: dict = {}  # (ngram, date_str) -> [[url, score], ...]
-    use_fast_path = granularity == "daily"
-
-    if use_fast_path:
-        with timed("registry", "Sparkline registry lookup"):
-            sparkline_obj = await get_latest_entry(db, "wikimedia", sparkline_dataset)
-            top_articles_obj = await get_latest_entry(db, "wikimedia", "top_articles_ducklake")
-    else:
-        sparkline_obj = None
-        top_articles_obj = None
 
     if sparkline_obj:
         def _fast():
@@ -530,7 +531,6 @@ async def precomputed_rtd(
         rtd_obj,
         filter_vals={"ngram_size": n, "alpha": alpha},
         entity_value=local_id,
-        glob_suffix="/data_0.parquet",
     )
 
     def _query():

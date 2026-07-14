@@ -172,9 +172,31 @@ def _hive_distinct_values(root: str, level_order: List[Dict[str, Any]], column: 
     return sorted(values)
 
 
+def _leaf_type_count(conn, leaf_dir: str) -> Optional[int]:
+    """Row count of one leaf partition, read from parquet footers only.
+
+    For types-counts datasets a time-leaf holds one row per distinct type,
+    so COUNT(*) equals the vocabulary size at that date. The ``**`` glob
+    also covers hash_bucket subdirectories below the leaf — types are
+    disjoint across buckets, so the sum is still the distinct count.
+    """
+    try:
+        row = conn.execute(
+            f"SELECT COUNT(*) FROM read_parquet('{leaf_dir}/**/*.parquet')"
+        ).fetchone()
+    except duckdb.InterruptException:
+        raise
+    except Exception as e:
+        log.debug("Type count failed for %s: %s", leaf_dir, e)
+        return None
+    return row[0] if row else None
+
+
 def _hive_availability(
     root: str,
     level_order: List[Dict[str, Any]],
+    conn=None,
+    count_types: bool = False,
 ) -> Dict[str, Any]:
     """Compute availability (min/max of time dimension) by walking the directory tree.
 
@@ -182,8 +204,13 @@ def _hive_availability(
     Walks all combinations of partition × entity levels, then reads the time
     level directory names to determine min/max.
 
+    When *count_types* is set (types-counts datasets), each leaf gains a
+    ``types`` key: the row count of the latest date's partition, read from
+    parquet footers via *conn* — one cheap query per entity × partition
+    combo. Count failures degrade to bounds-only leaves.
+
     Returns availability in entity-first format:
-      {"United States": {"daily": {"min": "2024-01-01", "max": "2026-04-20"}, ...}}
+      {"United States": {"daily": {"min": "2024-01-01", "max": "2026-04-20", "types": 560198}, ...}}
     Or without entity: {"daily": {"min": ..., "max": ...}}
     Or flat: {"min": ..., "max": ...}
     """
@@ -220,14 +247,32 @@ def _hive_availability(
     availability: Dict[str, Any] = {}
     for path, ctx, _bound in work:
         try:
-            entries = sorted(os.listdir(path))
+            entries = os.listdir(path)
         except OSError:
             continue
-        time_vals = sorted([unquote(e.split("=", 1)[1]) for e in entries if e.startswith(f"{time_col}=")])
-        if not time_vals:
+        # (value, raw_entry) pairs — sorted by unquoted value, raw entry kept
+        # so the max leaf's on-disk directory name can be re-joined for counting.
+        time_entries = sorted(
+            (unquote(e.split("=", 1)[1]), e)
+            for e in entries if e.startswith(f"{time_col}=")
+        )
+        if not time_entries:
             continue
 
-        bounds = {"min": time_vals[0], "max": time_vals[-1]}
+        bounds = {"min": time_entries[0][0], "max": time_entries[-1][0]}
+        if count_types and conn is not None:
+            try:
+                n = _leaf_type_count(conn, os.path.join(path, time_entries[-1][1]))
+            except duckdb.InterruptException:
+                # Admin timeout fired mid-count: keep every leaf's bounds and
+                # stop counting — a partial types index is still valid.
+                log.warning(
+                    "Type counting interrupted for %s; remaining leaves get bounds only", root,
+                )
+                count_types = False
+                n = None
+            if n:
+                bounds["types"] = n
         ent = ctx.get(entity_col) if entity_col else None
 
         # Build nested dict for partition dims.
@@ -329,24 +374,30 @@ def _derive_bucket_config(
     return config
 
 
-def _find_first_parquet(path: str) -> Optional[str]:
-    """Find the first parquet file in *path* or one directory level below."""
+def _parquet_glob(path: str) -> Optional[str]:
+    """Glob covering every parquet file in *path* or one directory level below.
+
+    Must be a glob, not a single file: multi-file leaves (e.g. DuckLake
+    buckets) split their date range across files — the alphabetically-first
+    file may hold a single day's append, so per-file MIN/MAX is wrong.
+    """
     try:
-        files = [f for f in os.listdir(path) if f.endswith(".parquet")]
+        entries = os.listdir(path)
     except OSError:
         return None
-    if files:
-        return os.path.join(path, sorted(files)[0])
-    # Try one level deeper (e.g. hash_bucket directories below the leaf)
-    try:
-        for sd in sorted(os.listdir(path)):
-            sd_path = os.path.join(path, sd)
-            if os.path.isdir(sd_path):
-                files = [f for f in os.listdir(sd_path) if f.endswith(".parquet")]
-                if files:
-                    return os.path.join(sd_path, sorted(files)[0])
-    except OSError:
-        pass
+    if any(f.endswith(".parquet") for f in entries):
+        return os.path.join(path, "*.parquet")
+    # Try one level deeper (e.g. hash_bucket directories below the leaf);
+    # buckets share the same date range, so the first one is representative.
+    for sd in sorted(entries):
+        sd_path = os.path.join(path, sd)
+        if not os.path.isdir(sd_path):
+            continue
+        try:
+            if any(f.endswith(".parquet") for f in os.listdir(sd_path)):
+                return os.path.join(sd_path, "*.parquet")
+        except OSError:
+            continue
     return None
 
 
@@ -365,13 +416,13 @@ def _targeted_availability(
       pinned to their first value to match pre-time_partition behaviour.)
     * **time_partition** levels are handled smartly: only the *first* and
       *last* sorted entries are followed (for min/max date bounds).
-      This reads 2 files per filter combo instead of scanning every
-      year×month directory.
+      This reads 2 leaf directories per filter combo instead of scanning
+      every year×month directory.
     * **hash_bucket** levels are pinned to their first value (all buckets
       share the same date range).
 
     For reddit (~100 langs × 3 n-values = 300 combos × 2 reads), this
-    reads ~600 files — manageable on NFS.
+    reads ~600 leaf directories — manageable on NFS.
     """
     entity_col = (
         dataset.entity_mapping.local_id_column
@@ -422,9 +473,9 @@ def _targeted_availability(
         if bound in ("max", None):
             ctx_paths[key]["max"].append(path)
 
-    # Read MIN/MAX from one file at each endpoint.  A path can serve min,
+    # Read MIN/MAX across each endpoint directory.  A path can serve min,
     # max, or both (bound=None when the dataset has no time_partition
-    # levels) — read each file exactly once with a combined MIN/MAX query.
+    # levels) — read each directory exactly once with a combined MIN/MAX query.
     availability: Dict[str, Any] = {}
     for ctx_key, endpoints in ctx_paths.items():
         ctx = dict(ctx_key)
@@ -438,13 +489,13 @@ def _targeted_availability(
             need.setdefault(path, set()).add("max")
 
         for path, bounds_needed in need.items():
-            pq_file = _find_first_parquet(path)
-            if not pq_file:
+            pq_glob = _parquet_glob(path)
+            if not pq_glob:
                 continue
             try:
                 row = conn.execute(
                     f"SELECT MIN({time_col})::TEXT, MAX({time_col})::TEXT "
-                    f"FROM read_parquet('{pq_file}')"
+                    f"FROM read_parquet('{pq_glob}')"
                 ).fetchone()
             except duckdb.InterruptException:
                 # Timeout fired — propagate so the caller records the failure
@@ -738,6 +789,10 @@ def introspect(
     #   (instant, full coverage across all entities and partitions).
     # Otherwise (flat parquet, or hive where time is a data column): DuckDB MIN/MAX.
     time_col = tr.time_dimension if tr else None
+    # types-counts datasets get a `types` (vocabulary size) key in each
+    # availability leaf — the topN ceiling hint for allotax-style consumers.
+    ep = getattr(dataset, "endpoint_schema", None)
+    count_types = bool(ep) and getattr(ep, "type", None) == "types-counts"
     if time_col:
         time_is_hive_level = has_level_order and any(
             lv["column"] == time_col and lv["type"] == "time"
@@ -745,17 +800,18 @@ def introspect(
         )
         if time_is_hive_level:
             try:
-                availability = _hive_availability(loc, level_order)
+                availability = _hive_availability(
+                    loc, level_order, conn=conn, count_types=count_types)
                 if availability:
                     result["availability"] = availability
             except Exception as e:
                 log.debug("Hive availability walk failed: %s", e)
         elif has_level_order:
-            # DuckDB MIN/MAX with targeted file reads.
+            # DuckDB MIN/MAX with targeted directory reads.
             # Instead of scanning ALL files via **/*.parquet, iterate over
-            # entity × partition combos and read ONE file each (pin hash_bucket
-            # to its first value).  This avoids opening redundant bucket files
-            # that share the same date range.
+            # entity × partition combos and read ONE leaf directory each
+            # (pin hash_bucket to its first value).  This avoids opening
+            # redundant bucket directories that share the same date range.
             try:
                 availability = _targeted_availability(conn, loc, level_order, time_col, dataset)
                 if availability:
@@ -783,6 +839,19 @@ def introspect(
                 rows = conn.execute(sql).fetchall()
                 if rows and rows[0][0] is not None:
                     result["availability"] = {"min": rows[0][0], "max": rows[0][1]}
+                    if count_types:
+                        # Dataset-level vocabulary size (flat parquet has no
+                        # per-combo leaves). Best-effort — bounds survive a
+                        # failed count.
+                        type_col = getattr(ep, "type_column", None) or "types"
+                        try:
+                            n = conn.execute(
+                                f"SELECT COUNT(DISTINCT {type_col}) FROM {path_expr}"
+                            ).fetchone()[0]
+                            if n:
+                                result["availability"]["types"] = n
+                        except Exception as e:
+                            log.debug("Type count failed: %s", e)
             except Exception as e:
                 log.debug("Availability introspection failed: %s", e)
 

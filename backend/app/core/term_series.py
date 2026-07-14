@@ -23,8 +23,8 @@ from fastapi import HTTPException
 from .duckdb_client import get_duckdb_client, run_blocking
 from .query_utils import (
     assign_bucket, build_hive_path, entity_base_path, get_bucket_config,
-    get_queryable_dims, handle_query_error, is_data_missing, load_system,
-    parse_dates, resolve_bucket_count,
+    get_queryable_dims, handle_query_error, is_data_missing, latest_from_manifest,
+    load_system, parse_dates, resolve_bucket_count,
 )
 
 log = logging.getLogger(__name__)
@@ -76,6 +76,24 @@ def build_date_filter(date_str: str, window: int) -> tuple:
         start_str = (end - timedelta(days=window)).strftime("%Y-%m-%d")
         return "date BETWEEN ? AND ?", [start_str, date_str]
     return "date <= ?", [date_str]
+
+
+def latest_series_date(
+    ngrams_obj, sparkline_obj, local_id, granularity: str, n: int,
+) -> Optional[str]:
+    """Latest available date for term-series defaults and responses.
+
+    Takes the max across the ngrams and sparkline manifests: the two are
+    built by separate pipelines, so either can run ahead of the other
+    (e.g. DuckLake sparklines update nightly while the raw ngrams sync
+    lags). Sparkline data is daily-only, so its manifest — keyed by
+    entity → ngram_size — only participates for daily requests.
+    """
+    candidates = [latest_from_manifest(ngrams_obj, local_id, granularity)]
+    if sparkline_obj and granularity == "daily":
+        candidates.append(latest_from_manifest(sparkline_obj, local_id, str(n)))
+    dates = [d for d in candidates if d]
+    return max(dates) if dates else None
 
 
 def series_entry(date_str: str, count, rank, freq) -> dict:
