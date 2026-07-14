@@ -5,16 +5,12 @@ description: Craft for submitting datasets to the Storywrangler platform — the
 
 # Submitting datasets to Storywrangler
 
-Registration is one API call, but the payload encodes a contract. The craft is
-knowing which field answers which question, declaring the minimum, and letting
-the server derive the rest.
+Registration is one API call, but the payload encodes a contract. The craft is knowing which field answers which question, declaring the minimum, and letting the server derive the rest.
 
 **Scope:** this skill covers the *act of submission* — not the pipeline that
 produces the data. Two entry points, same contract:
 
-- **From scratch** — read the contract *forward*: design the pipeline's output
-  to satisfy it (see "Designing for submission" below, and the `pipelines`
-  guide for the full pipeline craft).
+- **From scratch** — read the contract *forward*: design the pipeline's output to satisfy it (see "Designing for submission" below, and the `pipelines` guide for the full pipeline craft).
 - **Migration** — read the contract *backward*: an existing dataset either
   gets reshaped (pipeline work, out of scope here) or *declared around*
   (column-name overrides, `filter_dimensions`) to meet it.
@@ -26,9 +22,7 @@ The registry is shared state — inspect it before writing to it (the
 
 - **Does the target domain exist?** `GET /registry/domains` (datasets can
   fall back to the `guest` domain).
-- **Is the `dataset_id` taken?** `list-datasets` / `get-dataset` — an existing
-  entry means you are updating, not creating: check its live `version` and
-  whether your change is a re-register or a version bump.
+- **Is the `dataset_id` taken?** `list-datasets` / `get-dataset` — an existing entry means you are updating, not creating: check its live `version` and whether your change is a re-register or a version bump.
 - **What do sibling datasets do?** Match their entity namespace and column
   conventions so datasets compose (`wikidata:` entities join across datasets).
 
@@ -56,8 +50,7 @@ The registry is shared state — inspect it before writing to it (the
 | `ownership` / `lineage` | Who owns it, where did it come from? (governance) |
 
 The classic mistake is stuffing query axes into `endpoint_schema` or output
-columns into `transform`. If it changes *what comes back*, it's
-`endpoint_schema`; if it changes *which rows are read*, it's `transform`.
+columns into `transform`. If it changes *what comes back*, it's `endpoint_schema`; if it changes *which rows are read*, it's `transform`.
 
 ## Declare the minimum — the server derives the rest
 
@@ -89,11 +82,8 @@ hash-bucket counts. Therefore:
 4. **Move to `parquet_hive`** for scale; add `hash_bucket` only when
    term-first lookups (single term across all dates) matter.
 
-**Verify after every registration**: `GET /registry/{domain}/{dataset_id}` and
-check that `level_order` lists the expected levels with the right types and
-that `manifest.availability` is populated. Empty derived fields mean
-introspection failed — usually a `data_location` the server cannot reach or a
-naming-convention violation.
+**Verify after every registration**: `GET /registry/{domain}/{dataset_id}` and check that `level_order` lists the expected levels with the right types and that `manifest.availability` is populated. Empty derived fields mean
+introspection failed — usually a `data_location` the server cannot reach or a naming-convention violation.
 
 ## Designing for submission (from-scratch pipelines)
 
