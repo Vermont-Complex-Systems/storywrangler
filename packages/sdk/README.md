@@ -87,6 +87,7 @@ follow the URL, so you can guess them without docs:
 | `GET /registry/{domain}/{id}/versions` | `client.registry.versions(domain, id)` |
 | `GET /registry/{domain}/{id}/validate-sources` | `client.registry.validate_sources(domain, id)` |
 | `POST /admin/registry/{domain}/{id}/entities` | `client.registry.upsert_entities(domain, id, rows)` |
+| `DELETE /admin/registry/{domain}/{id}` | `client.registry.delete(domain, id)` |
 | `POST /auth/login` | `Storywrangler.login(username, password)` |
 | `GET /auth/me` | `client.users.whoami()` |
 | `GET /admin/auth/users` | `client.users.list()` |
@@ -119,6 +120,7 @@ wiki = client.dataset("wikimedia", "ngrams")
 wiki.filters       # filter dimensions with defaults and valid values
 wiki.availability  # date ranges per entity
 wiki.adapter       # entity mapping rows: local_id ↔ entity_id ↔ entity_name
+wiki.endpoints     # routes served under this domain, from the live OpenAPI spec
 wiki.versions()    # version history
 
 wiki.top_ngrams(dates="2026-05-01", granularity="daily", ngram_size=1)

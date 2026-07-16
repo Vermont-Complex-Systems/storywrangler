@@ -156,6 +156,7 @@ class TestRouteCoverage:
         "/registry/{domain}/{dataset_id}/versions": ("RegistryClient", "versions"),
         "/registry/{domain}/{dataset_id}/validate-sources": ("RegistryClient", "validate_sources"),
         "/admin/registry/{domain}/{dataset_id}/entities": ("RegistryClient", "upsert_entities"),
+        "/admin/registry/{domain}/{dataset_id}": ("RegistryClient", "delete"),
         "/auth/login": ("Storywrangler", "login"),
         "/auth/me": ("UsersClient", "whoami"),
         "/admin/auth/users": ("UsersClient", "list"),  # + create() for POST

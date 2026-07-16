@@ -163,6 +163,10 @@ class _SubClient:
         kwargs.setdefault("timeout", self._timeout)
         return self._session.put(self._url(path), **kwargs)
 
+    def _delete(self, path: str, **kwargs) -> requests.Response:
+        kwargs.setdefault("timeout", self._timeout)
+        return self._session.delete(self._url(path), **kwargs)
+
 
 class RegistryClient(_SubClient):
     """Interact with /registry endpoints.
@@ -177,6 +181,7 @@ class RegistryClient(_SubClient):
         GET  /registry/{domain}/{id}/versions          → versions(domain, id)
         GET  /registry/{domain}/{id}/validate-sources  → validate_sources(domain, id)
         POST /admin/registry/{domain}/{id}/entities    → upsert_entities(domain, id, rows)
+        DELETE /admin/registry/{domain}/{id}           → delete(domain, id)
     """
 
     def register(self, payload: "DatasetCreate | dict") -> bool:
@@ -260,6 +265,15 @@ class RegistryClient(_SubClient):
             for e in entities
         ]
         resp = self._post(f"/admin/registry/{domain}/{dataset_id}/entities", json=rows)
+        resp.raise_for_status()
+        return resp.json()
+
+    def delete(self, domain: str, dataset_id: str) -> Dict[str, Any]:
+        """Retire a dataset (admin only): removes all registry versions and
+        entity mappings. Data on disk is untouched — the dataset can be
+        re-registered at any time.
+        """
+        resp = self._delete(f"/admin/registry/{domain}/{dataset_id}")
         resp.raise_for_status()
         return resp.json()
 
@@ -442,6 +456,7 @@ class DatasetClient(_SubClient):
         self.dataset_id = dataset_id
         self._meta: Optional[Dict[str, Any]] = None
         self._adapter: Optional[List[Dict[str, Any]]] = None
+        self._endpoints: Optional[Dict[str, str]] = None
         self._instrument = InstrumentClient(session, base_url, timeout)
         self._registry = RegistryClient(session, base_url, timeout)
 
@@ -454,6 +469,7 @@ class DatasetClient(_SubClient):
         """Clear cached metadata so the next access re-fetches from the registry."""
         self._meta = None
         self._adapter = None
+        self._endpoints = None
         return self
 
     @property
@@ -503,6 +519,29 @@ class DatasetClient(_SubClient):
                 resp.raise_for_status()
                 self._adapter = _wrap(resp.json())
         return self._adapter
+
+    @property
+    def endpoints(self) -> Dict[str, str]:
+        """Routes served under this dataset's domain, from the live OpenAPI spec.
+
+        Returns ``{path: summary}``, e.g.::
+
+            {'/wikimedia/term-series': 'Term Series',
+             '/wikimedia/top-ngrams': 'Get Top Ngrams', ...}
+
+        Note: routes are per-domain, and the platform instruments
+        (``/storywrangler/allotax``, ``/storywrangler/rtd``) work for every
+        dataset — reach them via :meth:`allotax` and :meth:`rtd`.
+        """
+        if self._endpoints is None:
+            spec = self._get_json("/openapi.json")
+            prefix = f"/{self.domain}/"
+            self._endpoints = {
+                path: next(iter(ops.values())).get("summary", "")
+                for path, ops in spec.get("paths", {}).items()
+                if path.startswith(prefix)
+            }
+        return self._endpoints
 
     @property
     def description(self) -> Optional[str]:
