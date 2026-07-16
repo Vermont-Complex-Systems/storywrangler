@@ -17,11 +17,6 @@ router = APIRouter()
     "/top-ngrams",
     openapi_extra=docs.ZONING_BYLAWS_GET_ZONING_BYLAWS_NGRAMS,
 )
-@router.get(
-    "/ngrams",
-    openapi_extra=docs.ZONING_BYLAWS_GET_ZONING_BYLAWS_NGRAMS,
-    deprecated=True,
-)
 async def get_zoning_bylaws_ngrams(
     locations: str = Query(default="Arlington", description="Town name (e.g. 'Arlington') or Wikidata entity ID (e.g. 'wikidata:Q675558')"),
     limit: int = Query(default=100),

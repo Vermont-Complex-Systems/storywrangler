@@ -175,9 +175,7 @@ class TestRouteCoverage:
         "/reddit/term-series": ("DatasetClient", "term_series"),
         "/reddit/term-series/batch": ("DatasetClient", "term_series_batch"),
         "/babynames/top-ngrams": ("DatasetClient", "top_ngrams"),
-        "/babynames/ngrams": ("DatasetClient", "top_ngrams"),  # deprecated alias
         "/vt-zoning-atlas/top-ngrams": ("DatasetClient", "top_ngrams"),
-        "/vt-zoning-atlas/ngrams": ("DatasetClient", "top_ngrams"),  # deprecated alias
         # Bespoke routes — served via the escape hatch for now
         "/wikimedia/precomputed-rtd": ("Storywrangler", "get"),
         "/wikimedia/revisions": ("Storywrangler", "get"),

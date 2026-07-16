@@ -19,11 +19,6 @@ router = APIRouter()
     "/top-ngrams",
     openapi_extra=docs.BABYNAMES_GET_BABYNAMES_TOP_NGRAMS,
 )
-@router.get(
-    "/ngrams",
-    openapi_extra=docs.BABYNAMES_GET_BABYNAMES_TOP_NGRAMS,
-    deprecated=True,
-)
 async def get_babynames_top_ngrams(
     dates: str = Query(default="1991,1993", description="Year range for system 1. Single value '1991' or range '1991,1993'"),
     dates2: Optional[str] = Query(default=None, description="Optional second year range for temporal comparison"),
