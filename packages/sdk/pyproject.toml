@@ -1,6 +1,6 @@
 [project]
 name = "storywrangler"
-version = "0.0.5"
+version = "0.0.6"
 description = "Dataset registration client, entity validation, and project scaffolding for Storywrangler"
 requires-python = ">=3.11"
 readme = "README.md"
@@ -24,6 +24,12 @@ dependencies = [
     "requests>=2.31.0",
     "storywrangler-schemas>=0.1.0",
 ]
+
+[project.optional-dependencies]
+pandas = ["pandas>=2.0"]
+
+[dependency-groups]
+dev = ["pandas>=2.0", "pytest>=8.0"]
 
 [project.urls]
 Homepage = "https://github.com/vermont-complex-systems/storywrangler"

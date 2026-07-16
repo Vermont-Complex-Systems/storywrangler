@@ -72,6 +72,85 @@ client.registry.register({
 })
 ```
 
+## Client API Map
+
+The SDK mirrors API routes one-to-one (Label Studio style) — method names
+follow the URL, so you can guess them without docs:
+
+| Route | SDK call |
+|---|---|
+| `POST /registry/register` | `client.registry.register(payload)` |
+| `GET /registry/` | `client.registry.list()` |
+| `GET /registry/domains` | `client.registry.domains()` |
+| `GET /registry/{domain}/{id}` | `client.registry.get(domain, id, full=, version=)` |
+| `GET /registry/{domain}/{id}/adapter` | `client.registry.adapter(domain, id)` |
+| `GET /registry/{domain}/{id}/versions` | `client.registry.versions(domain, id)` |
+| `GET /registry/{domain}/{id}/validate-sources` | `client.registry.validate_sources(domain, id)` |
+| `POST /admin/registry/{domain}/{id}/entities` | `client.registry.upsert_entities(domain, id, rows)` |
+| `POST /auth/login` | `Storywrangler.login(username, password)` |
+| `GET /auth/me` | `client.users.whoami()` |
+| `GET /admin/auth/users` | `client.users.list()` |
+| `POST /admin/auth/users` | `client.users.create(username, email, password, role=)` |
+| `PUT /admin/auth/users/{id}/role` | `client.users.set_role(user_id, role)` |
+| `GET /storywrangler/allotax` | `client.instrument.allotax(...)` |
+| `GET /storywrangler/rtd` | `client.instrument.rtd(...)` |
+| `GET /{domain}/top-ngrams` | `client.dataset(domain, id).top_ngrams(...)` |
+| `GET /{domain}/term-series` | `client.dataset(domain, id).term_series(type, ...)` |
+| `GET /{domain}/term-series/batch` | `client.dataset(domain, id).term_series_batch(types, ...)` |
+| `GET /health/status` | `client.health.status()` |
+| `GET /health/status/history` | `client.health.history()` |
+| `GET /health/status/{domain}/{id}` | `client.health.dataset(domain, id)` |
+| `GET /version` | `client.version()` |
+| anything else | `client.get(path, **params)` — raw escape hatch |
+
+Reading data requires **no API key** — `Storywrangler()` works without one.
+A key is only needed for registration and admin routes.
+
+`tests/test_api_drift.py` enforces this: a new API route fails CI until it has
+an SDK method (bespoke routes may map to the `client.get()` escape hatch).
+
+### Dataset-scoped client
+
+`client.dataset(domain, id)` binds a dataset and adds cached discovery
+properties on top of the raw routes:
+
+```python
+wiki = client.dataset("wikimedia", "ngrams")
+wiki.filters       # filter dimensions with defaults and valid values
+wiki.availability  # date ranges per entity
+wiki.adapter       # entity mapping rows: local_id ↔ entity_id ↔ entity_name
+wiki.versions()    # version history
+
+wiki.top_ngrams(dates="2026-05-01", granularity="daily", ngram_size=1)
+wiki.term_series("hello", entity="wikidata:Q30", window=30)
+wiki.term_series_batch(["hello", "world"], entity="wikidata:Q30")
+wiki.allotax(entity="wikidata:Q30", dates="2026-05-01", ngram_size=1)
+```
+
+Use `.adapter` to translate between global entity IDs and the values stored on
+disk:
+
+```python
+wiki.adapter[0]
+# {'local_id': 'United States', 'entity_id': 'wikidata:Q30',
+#  'entity_name': 'United States', 'entity_ids': ['iso:US', ...]}
+```
+
+### DataFrames
+
+Every response is a plain dict/list, plus a `.df()` accessor that converts the
+tabular payload to pandas (install the extra: `pip install 'storywrangler[pandas]'`):
+
+```python
+wiki.term_series("hello", entity="wikidata:Q30", window=30).df()
+#          date  counts   rank          freq
+# 0  2026-06-13  109678  64247  4.700000e-07
+# ...
+
+wiki.adapter.df()                      # entity mapping as a table
+wiki.term_series_batch(["a", "b"]).df()  # long format with a `type` column
+```
+
 ## Registration Schema
 
 The registration payload (`DatasetCreate`) is defined in [Specification §3.7](https://github.com/vermont-complex-systems/Storywrangler-Specification/blob/main/versions/0.0.3.md#37-dataset-registration-schema).

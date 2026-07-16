@@ -1,6 +1,12 @@
 """Storywrangler SDK - Entity validation, standards, and registry client"""
 
-__version__ = "0.0.3"
+from importlib.metadata import PackageNotFoundError, version as _pkg_version
+
+try:
+    __version__ = _pkg_version("storywrangler")
+except PackageNotFoundError:  # running from source without an install
+    __version__ = "0.0.0+unknown"
+
 __standards_version__ = "0.0.3"
 __standards_url__ = "https://github.com/vermont-complex-systems/Storywrangler-Specification"
 
