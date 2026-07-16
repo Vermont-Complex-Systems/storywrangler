@@ -19,7 +19,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 CANONICAL = ROOT / ".claude" / "skills"
-SKILLS = ["storywrangler-analyst", "storywrangler-submission"]
 TARGETS = [
     ROOT / "packages" / "sdk" / "src" / "storywrangler" / "agent_assets" / "skills",
     ROOT / "plugins" / "storywrangler" / "skills",
@@ -27,24 +26,36 @@ TARGETS = [
 
 
 def main() -> int:
-    missing = [s for s in SKILLS if not (CANONICAL / s / "SKILL.md").exists()]
-    if missing:
-        print(f"canonical skill(s) missing: {missing}", file=sys.stderr)
+    skills = sorted(
+        p.parent.name for p in CANONICAL.glob("*/SKILL.md")
+    )
+    if not skills:
+        print(f"no skills found under {CANONICAL}", file=sys.stderr)
         return 1
+
     for target_root in TARGETS:
-        for skill in SKILLS:
+        for skill in skills:
             dst = target_root / skill / "SKILL.md"
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(CANONICAL / skill / "SKILL.md", dst)
             print(f"synced {dst.relative_to(ROOT)}")
+        # Prune copies whose canonical skill no longer exists.
+        for stale in target_root.glob("*/"):
+            if stale.is_dir() and stale.name not in skills:
+                shutil.rmtree(stale)
+                print(f"pruned {stale.relative_to(ROOT)}")
 
     # Frontend copy is flat (<skill>.md) so the docs site can glob-import it.
     frontend_skills = ROOT / "frontend" / "src" / "lib" / "skills"
     frontend_skills.mkdir(parents=True, exist_ok=True)
-    for skill in SKILLS:
+    for skill in skills:
         dst = frontend_skills / f"{skill}.md"
         shutil.copy2(CANONICAL / skill / "SKILL.md", dst)
         print(f"synced {dst.relative_to(ROOT)}")
+    for stale in frontend_skills.glob("*.md"):
+        if stale.stem not in skills:
+            stale.unlink()
+            print(f"pruned {stale.relative_to(ROOT)}")
     return 0
 
 

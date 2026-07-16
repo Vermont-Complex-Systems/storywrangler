@@ -51,11 +51,11 @@ def _print_formats() -> None:
         print(f"      {summary}")
         print(f"      {when}\n")
 
-# Scaffolded into new projects so Claude Code (and other agents) know the
-# submission conventions and can reach the storywrangler MCP server. Shipped
-# as package data; synced from the monorepo's .claude/skills by
-# scripts/sync_agent_assets.py.
-AGENT_SKILLS = ("storywrangler-submission", "storywrangler-analyst")
+# Agent skills are scaffolded into new projects so Claude Code (and other
+# agents) know the submission conventions and can reach the storywrangler MCP
+# server. Shipped as package data under agent_assets/skills/, synced from the
+# monorepo's .claude/skills by scripts/sync_agent_assets.py — discovered at
+# scaffold time, never hard-coded here.
 
 
 # ── Common files (format-independent) ────────────────────────
@@ -463,9 +463,9 @@ def scaffold_agent_assets(root: Path) -> None:
     try:
         assets = pkg_files("storywrangler") / "agent_assets"
         (root / ".mcp.json").write_text((assets / "mcp.json").read_text())
-        for skill in AGENT_SKILLS:
-            skill_md = (assets / "skills" / skill / "SKILL.md").read_text()
-            skill_dir = root / ".claude" / "skills" / skill
+        for entry in (assets / "skills").iterdir():
+            skill_md = (entry / "SKILL.md").read_text()
+            skill_dir = root / ".claude" / "skills" / entry.name
             skill_dir.mkdir(parents=True)
             (skill_dir / "SKILL.md").write_text(skill_md)
     except (FileNotFoundError, OSError) as exc:
