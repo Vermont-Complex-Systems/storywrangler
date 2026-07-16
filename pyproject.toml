@@ -4,6 +4,7 @@ version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
     "storywrangler",
+    "storywrangler-api",
 ]
 
 [tool.uv.workspace]
@@ -16,10 +17,13 @@ members = [
 
 [tool.uv.sources]
 storywrangler = { workspace = true }
+storywrangler-api = { workspace = true }
 
 [tool.uv]
 dev-dependencies = [
     "ipython>=9.13.0",
+    "ipykernel>=6.29",
+    "pandas>=2.0",
     "pytest>=8.0.0",
     "ruff>=0.1.0",
 ]
