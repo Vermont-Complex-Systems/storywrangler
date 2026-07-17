@@ -17,8 +17,9 @@ from storywrangler_schemas.coercion import coerce_scalar
 from ..core.database import get_session
 from ..core.duckdb_client import get_duckdb_client, run_blocking
 from ..core.query_utils import (
-    get_partition_defaults, get_queryable_dims,
-    handle_query_error, latest_from_manifest, load_system, parse_dates, resolve_entity,
+    get_partition_defaults, get_queryable_dims, handle_query_error,
+    latest_from_manifest, load_system, parse_dates, resolve_count_column,
+    resolve_entity,
 )
 from ..core.registry_utils import get_latest_entry
 from . import openapi_docs as docs
@@ -99,6 +100,7 @@ async def allotaxonometer(
     dates2: Optional[str] = Query(None, description="Date/year range for system 2. Omit to load all time."),
     alpha: str = Query("1.0", description="RTD alpha parameter (number or 'inf')"),
     alphas: Optional[str] = Query(None, description="Comma-separated alphas for multi-alpha mode, e.g. '0.5,1.0,inf'"),
+    weight: Optional[str] = Query(None, description="Count measure for both systems — one of the dataset's endpoint_schema.count_column entries. Defaults to the first registered measure."),
     ngram_limit: int = Query(10000, description="Max types to load per system before computing"),
     wordshift_limit: int = Query(200, description="Truncate wordshift output to top N entries"),
     db: AsyncSession = Depends(get_session),
@@ -153,6 +155,8 @@ async def allotaxonometer(
     # Validate and coerce filter values against introspected distinct values.
     _validate_and_coerce_filters([filter_vals1, filter_vals2], fv)
 
+    count_col = resolve_count_column(dataset_obj, weight)
+
     dr1 = parse_dates(dates)
     dr2 = parse_dates(dates2)
 
@@ -179,8 +183,8 @@ async def allotaxonometer(
     def _sync():
         with handle_query_error(f"{domain}/{dataset}"):
             with get_duckdb_client().timed_connect() as conn:
-                sys1 = load_system(conn, dataset_obj, local_id1, dr1, filter_vals1, ngram_limit)
-                sys2 = load_system(conn, dataset_obj, local_id2, dr2, filter_vals2, ngram_limit)
+                sys1 = load_system(conn, dataset_obj, local_id1, dr1, filter_vals1, ngram_limit, count_col=count_col)
+                sys2 = load_system(conn, dataset_obj, local_id2, dr2, filter_vals2, ngram_limit, count_col=count_col)
 
         try:
             if alphas:
@@ -199,6 +203,7 @@ async def allotaxonometer(
                 "meta": {
                     "system1": {"entity": entity, "dates": dates, "filters": filter_vals1, "types": len(sys1["types"])},
                     "system2": {"entity": entity2, "dates": dates2, "filters": filter_vals2, "types": len(sys2["types"])},
+                    "weight": count_col,
                     "domain": domain,
                     "dataset": dataset,
                     "dataset_version": dataset_obj.version,
@@ -221,6 +226,7 @@ async def rank_turbulence_divergence(
     dates2: Optional[str] = Query(None, description="Reference date, e.g. '2026-02-10'"),
     alpha: str = Query("0.25", description="RTD alpha parameter (number or 'inf')"),
     alphas: Optional[str] = Query(None, description="Comma-separated alphas for multi-alpha mode, e.g. '0.25,1.0,inf'"),
+    weight: Optional[str] = Query(None, description="Count measure for both systems — one of the dataset's endpoint_schema.count_column entries. Defaults to the first registered measure."),
     ngram_limit: int = Query(10000, description="Max types to load per system (0 = no limit)"),
     wordshift_limit: int = Query(10000, description="Max wordshift entries to return (0 = no limit)"),
     db: AsyncSession = Depends(get_session),
@@ -282,6 +288,8 @@ async def rank_turbulence_divergence(
     if not filter_vals2:
         filter_vals2 = dict(filter_vals)
 
+    count_col = resolve_count_column(dataset_obj, weight)
+
     dr1 = parse_dates(dates)
     dr2 = parse_dates(dates2)
 
@@ -307,8 +315,8 @@ async def rank_turbulence_divergence(
         with timed("query", "DuckDB data load"):
             with handle_query_error(f"{domain}/{dataset}"):
                 with get_duckdb_client().timed_connect() as conn:
-                    target = load_system(conn, dataset_obj, local_id, dr1, filter_vals, ngram_limit)
-                    ref = load_system(conn, dataset_obj, local_id, dr2, filter_vals2, ngram_limit)
+                    target = load_system(conn, dataset_obj, local_id, dr1, filter_vals, ngram_limit, count_col=count_col)
+                    ref = load_system(conn, dataset_obj, local_id, dr2, filter_vals2, ngram_limit, count_col=count_col)
 
         if not target["types"]:
             raise HTTPException(status_code=404, detail=f"No data for target date {dates}")

@@ -2,6 +2,7 @@
 Wikimedia endpoints — Wikipedia n-grams, revision histories, and term time series.
 """
 
+import json
 import logging
 from typing import Optional
 from urllib.parse import quote
@@ -11,7 +12,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..core.database import get_session
 from ..core.duckdb_client import get_duckdb_client, run_blocking
 from ..core.query_utils import (
-    build_hive_path, handle_query_error, is_data_missing, resolve_entity,
+    build_hive_path, handle_query_error, is_data_missing,
+    resolve_entity,
 )
 from ..core.registry_utils import get_latest_entry
 from ..core.term_series import (
@@ -571,3 +573,104 @@ async def precomputed_rtd(
             "alpha": alpha,
         },
     }
+
+
+# ── semantic-timeseries ───────────────────────────────────────────────────────
+
+@router.get("/semantic-timeseries")
+async def semantic_timeseries(
+    country: str = Query("United States", description="Country name as stored in the data (e.g. 'United States'), or 'All' for the global pageview-weighted corpus"),
+    db: AsyncSession = Depends(get_session),
+):
+    """Daily lexicon-scored time series for one country's pageview-weighted corpus.
+
+    Returns the full history: one entry per day with the labMT happiness score
+    (avg_happs), ousiometric power/danger/structure scores, and the
+    pageview-weighted word-count denominators behind each average.
+    """
+    dataset_obj = await get_latest_entry(db, "wikimedia", "semantic-timeseries")
+    if not dataset_obj:
+        raise HTTPException(status_code=404, detail="'wikimedia/semantic-timeseries' dataset not found")
+
+    def _query():
+        # handle_query_error translates DuckDB failures into API errors:
+        # timeout → 504, missing data file → 404, anything else → a 500
+        # that doesn't leak filesystem paths.
+        with handle_query_error("wikimedia/semantic-timeseries"):
+            # timed_connect hands this request its own cursor on the shared
+            # connection (parquet metadata stays cached across requests) and
+            # interrupts the query after 120s — the timeout the 504 refers to.
+            with get_duckdb_client().timed_connect() as conn:
+                cur = conn.execute(
+                    f"""
+                    SELECT * REPLACE (strftime(date, '%Y-%m-%d') AS date)
+                    FROM read_parquet('{dataset_obj.data_location}')
+                    WHERE country = ?
+                    ORDER BY date
+                    """,
+                    [country],
+                )
+                columns = [d[0] for d in cur.description]
+                return [dict(zip(columns, row)) for row in cur.fetchall()]
+
+    # DuckDB is blocking: run_blocking moves the query to a bounded worker
+    # pool so a slow read doesn't stall every other request on the API.
+    return await run_blocking(_query)
+
+
+# ── semantic-ngrams ───────────────────────────────────────────────────────────
+
+@router.get("/semantic-ngrams")
+async def semantic_ngrams(
+    country: str = Query("United States", description="Country name as stored in the data (e.g. 'United States'), or 'All' for the global pageview-weighted corpus"),
+    date: str = Query(..., description="Date (YYYY-MM-DD)"),
+    granularity: str = Query("daily", description="daily, weekly, or monthly"),
+    db: AsyncSession = Depends(get_session),
+):
+    """Per-word labMT counts for one country and day — the word shift graph's input.
+
+    Returns the row for (country, date): the daily lexicon scores plus `count`,
+    a map of labMT word → pageview-weighted count for every labMT word that
+    appeared that day.
+    """
+    dataset_obj = await get_latest_entry(db, "wikimedia", "semantic-ngrams")
+    if not dataset_obj:
+        raise HTTPException(status_code=404, detail="'wikimedia/semantic-ngrams' dataset not found")
+
+    # build_hive_path pins the exact partition leaf from the registered
+    # level_order — one directory read instead of globbing the tree over NFS.
+    # country is passed both ways so the path resolves whether or not the
+    # registration declared entity_mapping (level type entity vs partition).
+    path = build_hive_path(
+        dataset_obj,
+        entity_value=country,
+        filter_vals={"granularity": granularity, "country": country},
+    )
+    if not path:
+        raise HTTPException(
+            status_code=500,
+            detail="'wikimedia/semantic-ngrams' has no level_order — register it with data_format='parquet_hive'",
+        )
+
+    def _query():
+        with handle_query_error("wikimedia/semantic-ngrams"):
+            with get_duckdb_client().timed_connect() as conn:
+                cur = conn.execute(
+                    f"""
+                    SELECT *
+                    FROM read_parquet('{path}', hive_partitioning=true)
+                    WHERE date = ?
+                    """,
+                    [date],
+                )
+                columns = [d[0] for d in cur.description]
+                return [dict(zip(columns, row)) for row in cur.fetchall()]
+
+    rows = await run_blocking(_query)
+
+    # count is stored as a JSON string; return it as a real object so the
+    # frontend reads word counts directly (and avoids double-encoding).
+    for entry in rows:
+        if isinstance(entry.get("count"), str):
+            entry["count"] = json.loads(entry["count"])
+    return rows

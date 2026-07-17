@@ -7,7 +7,7 @@ import re
 from typing import Any, Dict, List, Optional
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import load_only
 from sqlmodel import select
@@ -16,6 +16,7 @@ from storywrangler_schemas.registry import DatasetCreate, EntityRow
 
 from ..core.database import get_session
 from ..core.duckdb_client import get_admin_duckdb_client
+from ..core.openapi_menus import refresh_weight_menus
 from ..core.parquet_introspect import (
     _derive_bucket_config,
     _discover_levels,
@@ -104,7 +105,12 @@ def _validate_column_identifiers(dataset: DatasetCreate) -> None:
     declared: Dict[str, Any] = {}
     if dataset.endpoint_schema:
         declared["endpoint_schema.type_column"] = dataset.endpoint_schema.type_column
-        declared["endpoint_schema.count_column"] = dataset.endpoint_schema.count_column
+        cc = dataset.endpoint_schema.count_column
+        if isinstance(cc, list):
+            for col in cc:
+                declared[f"endpoint_schema.count_column[{col!r}]"] = col
+        else:
+            declared["endpoint_schema.count_column"] = cc
     if dataset.transform:
         declared["transform.time_dimension"] = dataset.transform.time_dimension
         for fd in dataset.transform.filter_dimensions or []:
@@ -162,11 +168,14 @@ def _validate_types_counts(dataset: DatasetCreate, derived: Dict[str, Any]) -> N
         )
 
     # 2. If we could read the schema, verify the declared columns exist.
+    # count_column may be a list (selectable measure menu) — every entry
+    # must exist, since any of them can reach SUM() via ?weight=.
     data_schema = derived.get("data_schema") or {}
     if data_schema:
-        type_col  = ep.type_column  or "types"
-        count_col = ep.count_column or "counts"
-        expected = [type_col, count_col]
+        type_col   = ep.type_column  or "types"
+        count_cols = ep.count_column or "counts"
+        count_cols = count_cols if isinstance(count_cols, list) else [count_cols]
+        expected = [type_col, *count_cols]
         if dataset.transform and dataset.transform.time_dimension:
             expected.append(dataset.transform.time_dimension)
         missing = [c for c in expected if c not in data_schema]
@@ -215,9 +224,10 @@ def _validate_time_series(dataset: DatasetCreate, derived: Dict[str, Any]) -> No
     data_schema = derived.get("data_schema") or {}
     if data_schema:
         time_col    = dataset.transform.time_dimension
-        count_col   = ep.count_column or "count"
+        count_cols  = ep.count_column or "count"
+        count_cols  = count_cols if isinstance(count_cols, list) else [count_cols]
         filter_cols = list(dataset.transform.filter_dimensions or [])
-        expected    = [time_col, count_col] + filter_cols
+        expected    = [time_col, *count_cols] + filter_cols
         missing     = [c for c in expected if c not in data_schema]
         if missing:
             raise HTTPException(
@@ -332,6 +342,7 @@ def _coerce_derived(derived: Dict[str, Any]) -> None:
 )
 async def register_dataset(
     dataset: DatasetCreate,
+    request: Request,
     response: Response,
     _: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
@@ -510,6 +521,12 @@ async def register_dataset(
     # Refresh to avoid MissingGreenlet on lazy-loaded attributes after commit.
     await db.refresh(entry)
 
+    # Keep the OpenAPI weight enums in step with the registry: rebuild the
+    # menu snapshot and drop FastAPI's cached spec so the next /openapi.json
+    # request re-renders with this registration's count_column menu.
+    await refresh_weight_menus(db)
+    request.app.openapi_schema = None
+
     # Build full response after all fields (including derived) are persisted.
     msg: Dict[str, Any] = {
         "message": f"RegistryEntry '{dataset.dataset_id}' {action} successfully",
@@ -537,6 +554,48 @@ async def upsert_dataset_entities(
     count = await _upsert_entities(db, domain, dataset_id, entities)
     await db.commit()
     return {"domain": domain, "dataset_id": dataset_id, "entities_upserted": count}
+
+
+@admin_router.delete("/{domain}/{dataset_id}")
+async def delete_dataset(
+    domain: str,
+    dataset_id: str,
+    _: None = Depends(get_admin_user),
+    db: AsyncSession = Depends(get_session),
+):
+    """Retire a dataset: remove all registry versions and its entity mappings.
+
+    Data on disk is untouched — a retired dataset can be re-registered at any time.
+    """
+    result = await db.execute(
+        select(RegistryEntry).where(
+            RegistryEntry.domain == domain, RegistryEntry.dataset_id == dataset_id
+        )
+    )
+    entries = result.scalars().all()
+    if not entries:
+        raise HTTPException(status_code=404, detail=f"RegistryEntry '{domain}/{dataset_id}' not found")
+
+    em_result = await db.execute(
+        select(EntityMapping).where(
+            EntityMapping.domain == domain, EntityMapping.dataset_id == dataset_id
+        )
+    )
+    entity_rows = em_result.scalars().all()
+
+    for row in entity_rows:
+        await db.delete(row)
+    for entry in entries:
+        await db.delete(entry)
+    await db.commit()
+    log.info("Retired dataset '%s/%s' (%d versions, %d entity rows)",
+             domain, dataset_id, len(entries), len(entity_rows))
+    return {
+        "domain": domain,
+        "dataset_id": dataset_id,
+        "versions_deleted": len(entries),
+        "entities_deleted": len(entity_rows),
+    }
 
 
 # ── Public endpoints ───────────────────────────────────────────────────────────

@@ -104,6 +104,38 @@ def get_queryable_dims(dataset_obj) -> list:
     ]
 
 
+# ── Count-column menu ────────────────────────────────────────────────────────
+# endpoint_schema.count_column is a single column or a list of selectable
+# measure columns (first = default). Endpoints expose the choice as ?weight=.
+
+def get_count_columns(dataset_obj) -> list:
+    """Registered count-column menu as a list (may be empty)."""
+    cc = (dataset_obj.endpoint_schema or {}).get("count_column")
+    if not cc:
+        return []
+    return cc if isinstance(cc, list) else [cc]
+
+
+def resolve_count_column(dataset_obj, weight: Optional[str] = None, default: str = "counts") -> str:
+    """Pick the count column for a request.
+
+    No weight → the first registered column (or *default* when the dataset
+    declares none). With a weight, it must be one of the registered columns:
+    the menu doubles as the SQL-injection allowlist, since the result is
+    interpolated into SUM() unparameterized.
+    """
+    menu = get_count_columns(dataset_obj)
+    if weight is None:
+        return menu[0] if menu else default
+    if weight not in menu:
+        detail = (
+            f"weight must be one of {menu}" if len(menu) > 1
+            else "this dataset has a single count column; omit the weight parameter"
+        )
+        raise HTTPException(status_code=400, detail=detail)
+    return weight
+
+
 # ── Time-partition derivation ──────────────────────────────────────────────
 # Derives year/month/day values from requested dates for time_partition levels.
 
@@ -157,8 +189,14 @@ def _derive_time_partitions(
     if not tp_levels or not dates:
         return {}, [], []
 
-    start = dt_date.fromisoformat(str(dates[0])[:10])
-    end = dt_date.fromisoformat(str(dates[1])[:10])
+    # Files can span partition boundaries — e.g. reddit's weekly files are
+    # bucketed under the month/year their ISO week starts in, so rows near a
+    # range edge may live in a neighboring directory. Pad the candidate window
+    # by one week on each side: pruning reads at most one extra directory per
+    # edge, and the in-file time filter keeps results exact.
+    pad = timedelta(days=6)
+    start = dt_date.fromisoformat(str(dates[0])[:10]) - pad
+    end = dt_date.fromisoformat(str(dates[1])[:10]) + pad
 
     path_vals: dict = {}
     conditions: list = []
@@ -487,6 +525,7 @@ def load_system(
     dates: Optional[List[str]],
     filter_vals: dict,
     limit: int,
+    count_col: Optional[str] = None,
 ) -> dict:
     """Load types-counts for one system.
 
@@ -500,8 +539,10 @@ def load_system(
     a wildcard (``/*``), dramatically reducing NFS directory enumeration.
 
     Column names come from endpoint_schema (type_column / count_column),
-    defaulting to 'types' / 'counts'. The time column comes from
-    transform.time_dimension.
+    defaulting to 'types' / 'counts'. When count_column is a list, the first
+    entry is used unless *count_col* overrides it — callers must resolve the
+    override through resolve_count_column() so only registered columns reach
+    the SQL. The time column comes from transform.time_dimension.
 
     Extra filter dimensions (e.g. granularity='daily', ngram_size=1) are
     passed directly in filter_vals by the caller.
@@ -512,7 +553,7 @@ def load_system(
     tr = dataset_obj.transform or {}
     entity_col = (dataset_obj.entity_mapping or {}).get("local_id_column")
     type_col  = ep.get("type_column")  or "types"
-    count_col = ep.get("count_column") or "counts"
+    count_col = count_col or resolve_count_column(dataset_obj)
     time_col  = tr.get("time_dimension")
 
     schema = dataset_obj.data_schema or {}
@@ -684,10 +725,9 @@ def load_time_series(
 
     Returns [{col1: v1, ..., "count": n}, ...] ordered by group_cols ASC.
     """
-    ep = dataset_obj.endpoint_schema or {}
     tr = dataset_obj.transform or {}
     time_col = tr.get("time_dimension") or "year"
-    count_col = ep.get("count_column") or "count"
+    count_col = resolve_count_column(dataset_obj, default="count")
 
     schema = dataset_obj.data_schema or {}
     from_clause = _path_expr(dataset_obj)

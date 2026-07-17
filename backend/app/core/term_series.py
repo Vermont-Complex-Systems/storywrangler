@@ -178,23 +178,26 @@ async def run_top_ngrams(
     limit: int,
     metadata: dict,
     range_sep: str = "_",
+    count_col: Optional[str] = None,
 ) -> dict:
     """Shared top-ngrams endpoint body, executed off the event loop.
 
     Loads one types-counts system (or two for a temporal comparison keyed
     by date range) and formats the response. *range_sep* joins start/end
     in the comparison keys (wikimedia/reddit use "_", babynames "-").
+    *count_col* selects a measure from the registered count-column menu
+    (resolve via resolve_count_column); None uses the dataset default.
     """
     def _query():
         with handle_query_error(label):
             with get_duckdb_client().timed_connect() as conn:
                 dr1 = parse_dates(dates)
-                sys1 = load_system(conn, dataset_obj, local_id, dr1, filter_vals, limit)
+                sys1 = load_system(conn, dataset_obj, local_id, dr1, filter_vals, limit, count_col=count_col)
                 formatted1 = [{"types": t, "counts": c} for t, c in zip(sys1["types"], sys1["counts"])]
 
                 if dates2:
                     dr2 = parse_dates(dates2)
-                    sys2 = load_system(conn, dataset_obj, local_id, dr2, filter_vals, limit)
+                    sys2 = load_system(conn, dataset_obj, local_id, dr2, filter_vals, limit, count_col=count_col)
                     formatted2 = [{"types": t, "counts": c} for t, c in zip(sys2["types"], sys2["counts"])]
                     key1 = dr1[0] if dr1[0] == dr1[1] else f"{dr1[0]}{range_sep}{dr1[1]}"
                     key2 = dr2[0] if dr2[0] == dr2[1] else f"{dr2[0]}{range_sep}{dr2[1]}"

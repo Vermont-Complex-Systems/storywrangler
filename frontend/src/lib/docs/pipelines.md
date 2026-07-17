@@ -140,6 +140,7 @@ with its author. The conventions that prevent it:
 ## Where to go next
 
 - [Registering a dataset](/register) — the submission contract, field by field.
+- [Registering at scale](/register-big-data) — the `parquet_hive` and `hash_bucket` declarations for large datasets.
 - [Versioning](/versioning) — when a re-run is just a re-run and when it's a release.
 - [Wikimedia](/case-studies/wikimedia) and [scisciDB](/case-studies/scisciDB) —
   the patterns above applied to 100 GB/day of dumps and 200M paper records.

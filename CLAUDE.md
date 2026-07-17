@@ -67,6 +67,14 @@ Each top-level field answers a distinct question. Do not conflate them.
 Only three fields: endpoint type and the column names for types and counts.
 No time dimension, no filter dimensions, no granularities, no ngram_sizes here.
 
+`count_column` may be a **list** of selectable measure columns (first = default)
+when the data carries several alternative measures of the same count — e.g.
+reddit's content type × weighting columns. Endpoints expose the choice as a
+`?weight=` query param; `resolve_count_column()` in `core/query_utils.py`
+validates it against the registered list (which doubles as the SQL-injection
+allowlist) and `load_system(count_col=...)` applies it. Stored rank columns
+are canonical (pipeline-side) and do not switch with the weight.
+
 ### `transform` — query slice axes
 
 For `parquet_hive`, most of the transform is auto-discovered from the hive directory

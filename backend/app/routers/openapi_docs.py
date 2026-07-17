@@ -332,7 +332,7 @@ REDDIT_GET_TOP_NGRAMS = {
                                     "type": "object",
                                     "properties": {
                                         "types": {"type": "string", "description": "The n-gram string"},
-                                        "counts": {"type": "integer", "description": "Total occurrence count over the date range"},
+                                        "counts": {"type": "number", "description": "Summed score-weighted count over the date range"},
                                     },
                                 },
                             },
@@ -340,23 +340,27 @@ REDDIT_GET_TOP_NGRAMS = {
                                 "type": "object",
                                 "description": "Request metadata echoed back",
                                 "properties": {
-                                    "granularity": {"type": "string", "description": "Granularity used (daily/weekly/monthly)"},
-                                    "entity": {"type": "string", "description": "Entity ID used"},
+                                    "lang": {"type": "string", "description": "Language code used"},
+                                    "n": {"type": "integer", "description": "N-gram size used"},
+                                    "weight": {"type": "string", "description": "Count column the counts were aggregated from"},
                                 },
                             },
                         },
                     },
                     "example": {
                         "data": [
-                            {"types": "the", "counts": 12345678},
-                            {"types": "of", "counts": 9876543},
+                            {"types": "the", "counts": 12345678.5},
+                            {"types": "of", "counts": 9876543.25},
                         ],
-                        "metadata": {"granularity": "daily", "entity": "AskReddit"},
+                        "metadata": {"lang": "en", "n": 1, "weight": "all_score_weighted"},
                     },
                 }
             },
         }
-    }
+    },
+    "x-frontend-notes": {
+        "weight": "Valid weight values are the dataset's endpoint_schema.count_column list (GET /registry/reddit/ngrams) — content type (comments/submissions/all) × weighting (score/controversy/unweighted). Omit for the default (first entry).",
+    },
 }
 
 REDDIT_TERM_SERIES = {
@@ -375,7 +379,7 @@ REDDIT_TERM_SERIES = {
                             "latest_available_date": {
                                 "type": "string",
                                 "format": "date",
-                                "description": "Most recent date with data for this entity.",
+                                "description": "Most recent date with data for this language.",
                             },
                             "series": {
                                 "type": "array",
@@ -384,8 +388,9 @@ REDDIT_TERM_SERIES = {
                                     "type": "object",
                                     "properties": {
                                         "date": {"type": "string", "format": "date"},
-                                        "counts": {"type": "integer", "description": "Total count for this term on this date"},
+                                        "counts": {"type": "integer", "description": "Score-weighted count for this term on this date (truncated to integer)"},
                                         "rank": {"type": "integer", "description": "Rank by count on this date (1 = most frequent). 0 means not ranked."},
+                                        "freq": {"type": "number", "description": "Score-weighted relative frequency on this date"},
                                     },
                                 },
                             },
@@ -393,15 +398,22 @@ REDDIT_TERM_SERIES = {
                     },
                     "example": {
                         "type": "trump",
-                        "latest_available_date": "2026-04-20",
+                        "latest_available_date": "2022-12-11",
                         "series": [
-                            {"date": "2026-04-19", "counts": 41964, "rank": 487},
-                            {"date": "2026-04-20", "counts": 45655, "rank": 455},
+                            {"date": "2022-12-10", "counts": 41964, "rank": 487, "freq": 0.00021},
+                            {"date": "2022-12-11", "counts": 45655, "rank": 455, "freq": 0.00023},
                         ],
                     },
                 }
             },
         }
+    },
+    "x-performance": {
+        "window": "Scan cost grows with the number of weekly files touched: roughly 3-5s per year of history for large languages (en). window=0 (full history) scans 2005-2022 — minutes for en — and will exceed the reverse-proxy timeout. Use a bounded window.",
+        "no_fast_path": "No precomputed sparkline dataset exists for reddit; every request is a partition scan (files are not sorted by ngram, so there is no row-group pruning).",
+    },
+    "x-frontend-notes": {
+        "weight": "Valid weight values are the dataset's endpoint_schema.count_column list (GET /registry/reddit/ngrams). counts and freq switch with the weight; rank does NOT — it is the pipeline's canonical ranking (score-weighted) regardless of weight.",
     },
 }
 

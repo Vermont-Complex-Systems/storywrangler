@@ -245,12 +245,16 @@ class EndpointSchemaConfig(BaseModel):
             "Defaults to 'types'. Declare only when different."
         ),
     )
-    count_column: Optional[str] = Field(
+    count_column: Optional[Union[str, List[str]]] = Field(
         None,
         description=(
             "Column holding the numeric measure to aggregate. "
             "Defaults to 'counts' for types-counts, 'count' for time-series. "
-            "Declare only when different from the default."
+            "Declare only when different from the default. A list declares a "
+            "menu of selectable measures — the first is the default; callers "
+            "pick others per request via the endpoint's `weight` parameter "
+            "(e.g. reddit's comments/submissions/all × score/controversy/"
+            "unweighted columns)."
         ),
     )
 

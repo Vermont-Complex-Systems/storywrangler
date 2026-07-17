@@ -229,7 +229,7 @@
 	<div class="flex items-stretch gap-2">
 		<!-- netfiles -->
 		<a
-			href="docs/register#choosing-a-storage-format"
+			href="/register-big-data"
 			class="flex min-w-0 flex-1 flex-col gap-2 rounded-xl border border-zinc-200 bg-white p-3 transition-colors hover:border-zinc-300 dark:border-zinc-700 dark:bg-zinc-900 dark:hover:border-zinc-500"
 		>
 			<div class="flex items-center justify-between">

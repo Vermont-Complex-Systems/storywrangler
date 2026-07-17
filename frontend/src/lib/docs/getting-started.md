@@ -10,7 +10,7 @@ Register a parquet dataset once, and its analytical instruments — the allotaxo
 - **Dataset** — a registered parquet source inside a domain, identified as `{domain}/{dataset_id}` (e.g. `wikimedia/ngrams`). The registry stores its location, layout, slice axes, and introspected metadata.
 - **Registry** — the catalog. `GET /registry/` lists every dataset with its `level_order` (hive nesting), `filter_values` (valid values per dimension), and `endpoint_schema` (output shape). This is the ground truth for what is queryable — always check it before constructing queries.
 - **Instruments** — the analysis endpoints layered on datasets: top n-grams, per-term time series, and the [allotaxonometer](/tools/allotaxonometer) (rank-turbulence divergence between two systems).
-- **Entities** — datasets are partitioned by an entity (a country, a subreddit, a town). Entities use namespaced identifiers such as `wikidata:Q30` (United States). `GET /registry/{domain}/{dataset_id}/adapter` maps local IDs to canonical entity IDs and human-readable names.
+- **Entities** — some datasets are partitioned by an entity (a country, a town). Entities use namespaced identifiers such as `wikidata:Q30` (United States). `GET /registry/{domain}/{dataset_id}/adapter` maps local IDs to canonical entity IDs and human-readable names. Entity-less datasets (e.g. `reddit/ngrams`) are sliced by plain filter dimensions instead and compared across dates.
 
 ## Install the SDK
 
@@ -134,5 +134,6 @@ print(result["wordshift"][:5])
 ## Where to go next
 
 - [Querying datasets](/querying) — the discovery-first query workflow, instrument endpoints, and performance guidance.
-- [Registering a dataset](/register) — how to publish a new parquet dataset to the platform, including the hive-partitioning convention.
+- [Registering a dataset](/register) — how to publish a new parquet dataset to the platform, whether through an existing endpoint type or a bespoke endpoint.
+- [Registering big data](/register-big-data) — the hive-partitioning convention and hash buckets for large datasets.
 - [Why Storywrangler?](/manifesto) — the motivation behind the platform.

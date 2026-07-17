@@ -14,6 +14,7 @@ from app.core.auth import get_password_hash
 from app.core.config import settings
 from app.core.database import async_session_factory, init_db
 from app.core.exceptions import DataNotAvailableError, QueryError, QueryTimeoutError
+from app.core.openapi_menus import install_dynamic_openapi, refresh_weight_menus
 from app.core.timing import get_timings, init_timings
 from app.models.auth import User
 from app.core.health_check import health_check_loop
@@ -75,6 +76,10 @@ async def lifespan(_app: FastAPI):
     _warn_default_credentials()
     await init_db()
     await seed_admin()
+    # Snapshot registered count-column menus so the OpenAPI spec can enumerate
+    # weight values straight from the registry (see core/openapi_menus.py).
+    async with async_session_factory() as db:
+        await refresh_weight_menus(db)
     health_task = asyncio.create_task(health_check_loop())
     async with mcp_server.session_manager.run():
         yield
@@ -91,6 +96,7 @@ app = FastAPI(
     description="Text analysis platform API",
     lifespan=lifespan,
 )
+install_dynamic_openapi(app)
 
 app.add_middleware(
     CORSMiddleware,
