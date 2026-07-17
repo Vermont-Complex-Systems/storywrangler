@@ -489,13 +489,21 @@ class DatasetClient(_SubClient):
         meta = self._ensure_meta()
         level_order: List[Dict[str, Any]] = meta.get("level_order") or []
         filter_values: Dict[str, list] = meta.get("filter_values") or {}
-        return {
-            level["column"]: {
-                "default": level.get("default_value"),
-                "valid": filter_values.get(level["column"], []),
+        if level_order:
+            return {
+                level["column"]: {
+                    "default": level.get("default_value"),
+                    "valid": filter_values.get(level["column"], []),
+                }
+                for level in level_order
+                if level.get("type") in ("partition", "filter")
             }
-            for level in level_order
-            if level.get("type") in ("partition", "filter")
+        # Flat parquet has no hive levels — fall back to the introspected
+        # filter_values (populated from transform.filter_dimensions), so
+        # filter validation still works. Defaults are server-side only here.
+        return {
+            col: {"default": None, "valid": vals}
+            for col, vals in filter_values.items()
         }
 
     @property

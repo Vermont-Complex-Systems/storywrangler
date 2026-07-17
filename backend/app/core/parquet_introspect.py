@@ -830,28 +830,59 @@ def introspect(
             except Exception as e:
                 log.debug("Targeted availability introspection failed: %s", e)
         else:
-            # Fallback for non-hive datasets: single DuckDB MIN/MAX query.
+            # Fallback for non-hive datasets: DuckDB MIN/MAX, grouped by the
+            # entity column when one is declared (entity-first format, matching
+            # the hive walk); dataset-level otherwise.
+            em = getattr(dataset, "entity_mapping", None)
+            entity_col = getattr(em, "local_id_column", None) if em else None
+            type_col = (getattr(ep, "type_column", None) or "types") if count_types else None
             try:
-                sql = (
-                    f"SELECT MIN({time_col})::TEXT, MAX({time_col})::TEXT "
-                    f"FROM {path_expr}"
-                )
-                rows = conn.execute(sql).fetchall()
-                if rows and rows[0][0] is not None:
-                    result["availability"] = {"min": rows[0][0], "max": rows[0][1]}
-                    if count_types:
-                        # Dataset-level vocabulary size (flat parquet has no
-                        # per-combo leaves). Best-effort — bounds survive a
-                        # failed count.
-                        type_col = getattr(ep, "type_column", None) or "types"
-                        try:
-                            n = conn.execute(
-                                f"SELECT COUNT(DISTINCT {type_col}) FROM {path_expr}"
-                            ).fetchone()[0]
-                            if n:
-                                result["availability"]["types"] = n
-                        except Exception as e:
-                            log.debug("Type count failed: %s", e)
+                if entity_col:
+                    rows = conn.execute(
+                        f"SELECT {entity_col}, MIN({time_col})::TEXT, MAX({time_col})::TEXT "
+                        f"FROM {path_expr} WHERE {entity_col} IS NOT NULL "
+                        f"GROUP BY {entity_col} ORDER BY {entity_col}"
+                    ).fetchall()
+                    if rows:
+                        result["availability"] = {
+                            ent: {"min": mn, "max": mx} for ent, mn, mx in rows
+                        }
+                        if type_col:
+                            # Per-entity vocabulary size at that entity's latest
+                            # time value. Best-effort — bounds survive a failed count.
+                            try:
+                                counts = conn.execute(
+                                    f"SELECT {entity_col}, COUNT(DISTINCT {type_col}) "
+                                    f"FROM {path_expr} t "
+                                    f"WHERE {time_col} = ("
+                                    f"  SELECT MAX({time_col}) FROM {path_expr} "
+                                    f"  WHERE {entity_col} = t.{entity_col}) "
+                                    f"GROUP BY {entity_col}"
+                                ).fetchall()
+                                for ent, n in counts:
+                                    if n and ent in result["availability"]:
+                                        result["availability"][ent]["types"] = n
+                            except Exception as e:
+                                log.debug("Per-entity type count failed: %s", e)
+                else:
+                    rows = conn.execute(
+                        f"SELECT MIN({time_col})::TEXT, MAX({time_col})::TEXT "
+                        f"FROM {path_expr}"
+                    ).fetchall()
+                    if rows and rows[0][0] is not None:
+                        result["availability"] = {"min": rows[0][0], "max": rows[0][1]}
+                        if type_col:
+                            # Dataset-level vocabulary size (flat parquet has no
+                            # per-combo leaves). Best-effort — bounds survive a
+                            # failed count.
+                            try:
+                                n = conn.execute(
+                                    f"SELECT COUNT(DISTINCT {type_col}) FROM {path_expr}"
+                                ).fetchone()[0]
+                                if n:
+                                    result["availability"]["types"] = n
+                            except Exception as e:
+                                log.debug("Type count failed: %s", e)
             except Exception as e:
                 log.debug("Availability introspection failed: %s", e)
 
