@@ -288,6 +288,14 @@ def _check_data_location_shape(payload: dict, errors: list[str], warnings: list[
 
 def _check_disk_layout(payload: dict, errors: list[str], warnings: list[str], notes: list[str]) -> None:
     loc = payload.get("data_location")
+    if payload.get("data_format") == "mongodb":
+        notes.append(
+            "note: mongodb is a pass-through format — no on-disk layout to check. "
+            "The server introspects the collection live at registration (requires "
+            "MONGODB_URI configured server-side); no level_order or hash buckets are "
+            "derived, and queries are equality filters + time range only."
+        )
+        return
     if not isinstance(loc, str):
         return
     if not os.path.exists(loc):

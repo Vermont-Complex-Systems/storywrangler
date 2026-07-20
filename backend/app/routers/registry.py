@@ -16,6 +16,7 @@ from storywrangler_schemas.registry import DatasetCreate, EntityRow
 
 from ..core.database import get_session
 from ..core.duckdb_client import get_admin_duckdb_client
+from ..core.mongo_client import mongo_introspect, run_blocking_mongo
 from ..core.openapi_menus import refresh_weight_menus
 from ..core.parquet_introspect import (
     _derive_bucket_config,
@@ -398,30 +399,71 @@ async def register_dataset(
                 if bucket_config:
                     derived["bucket_config"] = bucket_config
 
-    # 2. Introspect parquet files (read-only) — schema, filter_values, availability.
-    #    When the submitter provides data_schema, glob-based schema introspection
-    #    is skipped (allows registration during schema transitions).
-    try:
-        with get_admin_duckdb_client().timed_connect() as conn:
-            derived.update(
-                introspect(conn, dataset, provided_schema=dataset.data_schema,
-                           level_order=derived.get("level_order"))
+    # 2. Introspect the storage backend (read-only) — schema, filter_values,
+    #    availability. When the submitter provides data_schema, schema
+    #    introspection is skipped (allows registration during schema transitions).
+    #    mongodb datasets are pass-through: no DuckDB — best-effort pymongo
+    #    probes (sampled data_schema, distinct() filter_values, min/max
+    #    availability), same never-raises contract as parquet introspection.
+    if dataset.data_format == "mongodb":
+        derived.update(await run_blocking_mongo(lambda: mongo_introspect(dataset)))
+        if "data_schema" not in derived:
+            reason = derived.get("introspect_error", "")
+            hint = f" MongoDB error: {reason}" if reason else ""
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"Collection '{dataset.data_location}' is not accessible.{hint} "
+                    "Ensure MONGODB_URI is configured on the server and the "
+                    "database/collection exist, or provide data_schema in the "
+                    "registration payload to declare the authoritative schema."
+                ),
             )
-    except Exception as e:
-        log.warning("Parquet introspection failed for %s/%s: %s", dataset.domain, dataset.dataset_id, e)
-        derived["introspect_error"] = str(e)
+    else:
+        try:
+            with get_admin_duckdb_client().timed_connect() as conn:
+                derived.update(
+                    introspect(conn, dataset, provided_schema=dataset.data_schema,
+                               level_order=derived.get("level_order"))
+                )
+        except Exception as e:
+            log.warning("Parquet introspection failed for %s/%s: %s", dataset.domain, dataset.dataset_id, e)
+            derived["introspect_error"] = str(e)
 
-    if "data_schema" not in derived:
+        if "data_schema" not in derived:
+            reason = derived.get("introspect_error", "")
+            hint = f" DuckDB error: {reason}" if reason else ""
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"Data not accessible at '{dataset.data_location}'.{hint} "
+                    "Ensure the path exists and is available to the API before registering. "
+                    "If your files have inconsistent schemas (e.g. after a column was added or "
+                    "removed), provide data_schema in the registration payload to declare the "
+                    "authoritative schema and skip glob-based introspection."
+                ),
+            )
+
+    # 2b. Refuse to register data we can't serve. A parquet_hive dataset with a
+    #     time dimension resolves its "latest date" (and coverage) from
+    #     manifest.availability; an empty result means the data was unreachable
+    #     at registration (e.g. an NFS blip) — fail loudly instead of storing a
+    #     silent null that 404s at query time.
+    if (
+        dataset.data_format == "parquet_hive"
+        and dataset.transform and dataset.transform.time_dimension
+        and derived.get("level_order")
+        and not derived.get("availability")
+    ):
         reason = derived.get("introspect_error", "")
-        hint = f" DuckDB error: {reason}" if reason else ""
+        hint = f" ({reason})" if reason else ""
         raise HTTPException(
             status_code=422,
             detail=(
-                f"Data not accessible at '{dataset.data_location}'.{hint} "
-                "Ensure the path exists and is available to the API before registering. "
-                "If your files have inconsistent schemas (e.g. after a column was added or "
-                "removed), provide data_schema in the registration payload to declare the "
-                "authoritative schema and skip glob-based introspection."
+                f"Could not derive manifest.availability for "
+                f"'{dataset.domain}/{dataset.dataset_id}'.{hint} The data may be unreachable "
+                "(e.g. NFS). Refusing to register a dataset whose latest date can't be "
+                "resolved — retry when the data is reachable."
             ),
         )
 

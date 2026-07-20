@@ -420,9 +420,6 @@ def _targeted_availability(
       every year×month directory.
     * **hash_bucket** levels are pinned to their first value (all buckets
       share the same date range).
-
-    For reddit (~100 langs × 3 n-values = 300 combos × 2 reads), this
-    reads ~600 leaf directories — manageable on NFS.
     """
     entity_col = (
         dataset.entity_mapping.local_id_column
@@ -535,6 +532,14 @@ def _targeted_availability(
         else:
             availability = bounds
 
+    # Found partition leaves but derived no bounds → every leaf read failed
+    # (the data is unreachable, e.g. an NFS blip). Raise rather than return an
+    # empty index the caller would silently accept.
+    if work and not availability:
+        raise RuntimeError(
+            f"availability walk found {len(work)} partition leaves under {root} "
+            "but could not read date bounds from any — data unreachable?"
+        )
     return availability
 
 
@@ -666,7 +671,7 @@ def _path_expr(dataset) -> Optional[str]:
 
     For parquet_hive without level_order, falls back to ``**/*.parquet`` glob.
     This is only hit during introspection — query-time code uses
-    ``build_hive_path()`` from query_utils.py which requires level_order.
+    ``build_hive_path()`` from duckdb_query.py which requires level_order.
     """
     fmt = dataset.data_format
     loc = dataset.data_location
@@ -805,7 +810,10 @@ def introspect(
                 if availability:
                     result["availability"] = availability
             except Exception as e:
-                log.debug("Hive availability walk failed: %s", e)
+                # Don't swallow silently — the caller refuses to register a
+                # hive+time dataset without availability, and needs the reason.
+                log.warning("Hive availability walk failed for %s: %s", loc, e)
+                result["introspect_error"] = f"availability walk failed: {e}"
         elif has_level_order:
             # DuckDB MIN/MAX with targeted directory reads.
             # Instead of scanning ALL files via **/*.parquet, iterate over
@@ -828,7 +836,8 @@ def introspect(
                     "manifest.availability not derived — re-register to retry"
                 )
             except Exception as e:
-                log.debug("Targeted availability introspection failed: %s", e)
+                log.warning("Targeted availability introspection failed for %s: %s", loc, e)
+                result["introspect_error"] = f"availability introspection failed: {e}"
         else:
             # Fallback for non-hive datasets: DuckDB MIN/MAX, grouped by the
             # entity column when one is declared (entity-first format, matching

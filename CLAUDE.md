@@ -4,16 +4,42 @@ Decisions made during development. Read this before suggesting schema or query c
 
 ---
 
-## Data formats: parquet only
+## Data formats: parquet first-class, mongodb pass-through
 
-Storywrangler accepts exactly two storage formats from submitters:
+Storywrangler accepts three storage formats from submitters:
 
 - `parquet` — single file or flat directory
 - `parquet_hive` — hive-partitioned directory tree (all partition levels use `col=val` naming)
+- `mongodb` — pass-through: served from a live MongoDB collection (guest format, see below)
 
 **Why not ducklake or duckdb:** Both were dropped because at query time they resolved
 to `read_parquet()` anyway. DuckLake catalogs were bypassed; duckdb with `table_files`
 was just parquet under a path convention. No legacy formats are tolerated.
+
+**Why mongodb is different:** it does *not* resolve to `read_parquet()` — it is a
+genuinely different backend, admitted for corpora where migration is not worth it
+(twitter ngrams). It is a pass-through format, not a first-class one:
+
+- `data_location` is a non-secret locator — a literal `<database>/<collection>`
+  (sampled at registration), a Mongo host (e.g. `wranglerdb01a.uvm.edu:27017`,
+  signalling where the data lives while a bespoke router owns db/collection
+  routing), or a `{placeholder}` routing template. Host/template forms need an
+  explicit `data_schema`. Credentials never appear here — the connection URI is
+  server config (`MONGODB_URI`). twitter uses the host form; its layout
+  (n-gram size → database, language → collection) is hardcoded in the router.
+- No level_order, no hash buckets, no `load_system()` — served by a bespoke router
+  (`routers/twitter.py`) via `core/mongo_client.py`.
+- Registration skips DuckDB introspection; `mongo_introspect()` does best-effort
+  pymongo probes instead (sampled `data_schema`, `distinct()` → `filter_values`,
+  min/max → `manifest.availability` as flat `{"min", "max"}`).
+- Schema-level guards (in `DatasetCreate.validate_mongodb_constraints`): location
+  must be `db/collection`, `hash_bucket` rejected.
+- **Scope guardrail:** mongo queries are equality filters + time range + sort/limit
+  only — never aggregation pipelines. The moment an endpoint needs an aggregation,
+  that slice of the data wants to be parquet. This is what keeps the pass-through
+  from re-growing into the old half-Mongo half-parquet bifurcation.
+- Timeouts use Mongo's native `maxTimeMS` (`ExecutionTimeout` → 504); blocking
+  pymongo work runs on a dedicated executor (`run_blocking_mongo`), not DuckDB's.
 
 ---
 
@@ -144,7 +170,7 @@ The query layer computes the bucket at request time via `assign_bucket()`:
 - `overrides` is a nested dict: `entity → {partition_dim_value → count}`.
   Resolution: `overrides[entity][str(dim_value)]` → `default_count`.
 - Hash buckets are routing-only, not query axes.
-- Helpers in `core/query_utils.py`: `assign_bucket()` (imported from
+- Helpers in `core/duckdb_query.py`: `assign_bucket()` (imported from
   `storywrangler_schemas.hashing`), `get_bucket_config()`,
   `resolve_bucket_count()` — generic, usable by any router.
 
@@ -187,7 +213,7 @@ on `GET ?full=true`.
 
 ## Query layer: `load_system()` is format-agnostic
 
-`load_system()` in `core/query_utils.py` uses identical WHERE-based logic for both
+`load_system()` in `core/duckdb_query.py` (the parquet/DuckDB query engine; format-agnostic helpers stay in `core/query_utils.py`) uses identical WHERE-based logic for both
 formats. The only difference is the FROM expression:
 
 ```python

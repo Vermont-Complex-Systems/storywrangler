@@ -12,6 +12,9 @@ class Settings(BaseSettings):
     postgres_user: str = "postgres"
     postgres_password: str = "changethis"
 
+    # mongoDB URI
+    mongodb_uri: str | None = None
+
     # CORS — override via ALLOWED_ORIGINS env var (comma-separated) in production
     allowed_origins: List[str] = [
         "http://localhost:5173",
