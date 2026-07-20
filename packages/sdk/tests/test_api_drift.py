@@ -163,6 +163,21 @@ class TestRouteCoverage:
         "/admin/auth/users/{user_id}/role": ("UsersClient", "set_role"),
         "/storywrangler/allotax": ("InstrumentClient", "allotax"),
         "/storywrangler/rtd": ("InstrumentClient", "rtd"),
+        # Domain roots — GET /{domain} lists endpoints + datasets
+        "/babynames": ("DatasetClient", "endpoints"),
+        "/storywrangler": ("DatasetClient", "endpoints"),
+        "/reddit": ("DatasetClient", "endpoints"),
+        "/wikimedia": ("DatasetClient", "endpoints"),
+        "/open-academic-analytics": ("DatasetClient", "endpoints"),
+        "/scisciDB": ("DatasetClient", "endpoints"),
+        "/twitter": ("DatasetClient", "endpoints"),
+        "/vt-zoning-atlas": ("DatasetClient", "endpoints"),
+        # Twitter (mongodb pass-through, bespoke router mirroring the generic shapes)
+        "/twitter/top-ngrams": ("DatasetClient", "top_ngrams"),
+        "/twitter/term-series": ("DatasetClient", "term_series"),
+        "/twitter/term-series/batch": ("DatasetClient", "term_series_batch"),
+        "/twitter/allotax": ("DatasetClient", "allotax"),
+        "/twitter/rtd": ("DatasetClient", "rtd"),
         # Platform
         "/version": ("Storywrangler", "version"),
         "/health/status": ("HealthClient", "status"),

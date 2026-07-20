@@ -95,6 +95,7 @@ follow the URL, so you can guess them without docs:
 | `PUT /admin/auth/users/{id}/role` | `client.users.set_role(user_id, role)` |
 | `GET /storywrangler/allotax` | `client.instrument.allotax(...)` |
 | `GET /storywrangler/rtd` | `client.instrument.rtd(...)` |
+| `GET /{domain}` | `client.dataset(domain)` — repr lists endpoints; `.endpoints` / `.datasets` |
 | `GET /{domain}/top-ngrams` | `client.dataset(domain, id).top_ngrams(...)` |
 | `GET /{domain}/term-series` | `client.dataset(domain, id).term_series(type, ...)` |
 | `GET /{domain}/term-series/batch` | `client.dataset(domain, id).term_series_batch(types, ...)` |
@@ -110,15 +111,18 @@ A key is only needed for registration and admin routes.
 `tests/test_api_drift.py` enforces this: a new API route fails CI until it has
 an SDK method (bespoke routes may map to the `client.get()` escape hatch).
 
-### Dataset-scoped client
+### Domain- and dataset-scoped clients
 
-`client.dataset(domain, id)` binds a dataset and adds cached discovery
-properties on top of the raw routes. The id is optional when the domain has
-exactly one dataset (`client.dataset("twitter")`); multi-dataset domains
-raise with the list of choices. Any domain route without a dedicated method
-is still callable by its guessable name — `wiki.revisions(limit=10)` →
-`GET /wikimedia/revisions` (underscores map to dashes; kwargs become query
-params; use `.endpoints` to discover what exists):
+`client.dataset(domain)` is domain-scoped: displaying it lists the domain's
+endpoints (mirroring `GET /{domain}`), data endpoints are callable as
+methods, and filter kwargs are validated against the dataset each route
+declares it serves (its `x-dataset` annotation). Dataset-specific metadata
+(`.meta`/`.filters`/`.availability`/`.adapter`) resolves automatically when
+the domain has exactly one registered dataset; otherwise it raises listing
+the choices — pass the id explicitly (`client.dataset(domain, id)`) to bind
+one. Any route without a dedicated method is callable by its guessable name
+— `wiki.revisions(limit=10)` → `GET /wikimedia/revisions` (underscores map
+to dashes; kwargs become query params; `.endpoints` shows what exists):
 
 ```python
 wiki = client.dataset("wikimedia", "ngrams")

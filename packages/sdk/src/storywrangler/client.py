@@ -23,8 +23,10 @@ Usage::
         ngram_size=1, granularity="daily",
     )
 
-    # Single-dataset domains resolve without an id
-    tw = client.dataset("twitter")
+    # Domain-scoped: displaying the client lists the endpoints (GET /{domain})
+    wiki = client.dataset("wikimedia")
+    wiki                    # renders the endpoint list + registered datasets
+    wiki.term_series(...)   # data endpoints work; metadata needs a dataset id
 
     # Any domain route is callable by its guessable name (dynamic mirror)
     wiki.revisions(limit=10)
@@ -456,36 +458,63 @@ class DatasetClient(_SubClient):
 
     def __init__(
         self, session: requests.Session, base_url: str, timeout: int,
-        domain: str, dataset_id: str,
+        domain: str, dataset_id: Optional[str] = None,
     ) -> None:
         super().__init__(session, base_url, timeout)
         self.domain = domain
         self.dataset_id = dataset_id
         self._meta: Optional[Dict[str, Any]] = None
+        self._meta_cache: Dict[str, Dict[str, Any]] = {}
         self._adapter: Optional[List[Dict[str, Any]]] = None
-        self._endpoints: Optional[Dict[str, str]] = None
+        self._domain_info: Optional[Dict[str, Any]] = None
         self._instrument = InstrumentClient(session, base_url, timeout)
         self._registry = RegistryClient(session, base_url, timeout)
 
-    def _ensure_meta(self) -> Dict[str, Any]:
-        if self._meta is None:
-            resp = self._get(f"/registry/{self.domain}/{self.dataset_id}")
+    def _domain_root(self) -> Dict[str, Any]:
+        """GET /{domain} — the domain's endpoints and registered datasets (cached)."""
+        if self._domain_info is None:
+            self._domain_info = self._get_json(f"/{self.domain}")
+        return self._domain_info
+
+    def _resolve_dataset_id(self) -> str:
+        """The bound dataset id, resolving it for single-dataset domains.
+
+        Raises a teaching error when the domain has several datasets and none
+        was passed — dataset-specific surfaces need an explicit choice.
+        """
+        if self.dataset_id is None:
+            datasets = self._domain_root().get("datasets", [])
+            if len(datasets) == 1:
+                self.dataset_id = datasets[0]
+            else:
+                raise ValueError(
+                    f"This is dataset-specific and domain '{self.domain}' has "
+                    f"{len(datasets)} registered datasets — use "
+                    f"client.dataset('{self.domain}', <id>) with id in {datasets}."
+                )
+        return self.dataset_id
+
+    def _fetch_meta(self, dataset_id: str) -> Dict[str, Any]:
+        """Registry metadata for one dataset in this domain (cached per id)."""
+        if dataset_id not in self._meta_cache:
+            resp = self._get(f"/registry/{self.domain}/{dataset_id}")
             if resp.status_code == 404:
                 # Fail fast with choices instead of a bare HTTP 404.
                 try:
-                    listing = self._get_json("/registry/")
-                    ids = sorted(
-                        d["dataset_id"] for d in listing.get("datasets", [])
-                        if d["domain"] == self.domain
-                    )
+                    ids = self._domain_root().get("datasets", [])
                 except Exception:
                     ids = []
                 hint = f"registered: {ids}" if ids else "no datasets registered in this domain"
                 raise ValueError(
-                    f"Unknown dataset '{self.dataset_id}' in domain '{self.domain}' — {hint}."
+                    f"Unknown dataset '{dataset_id}' in domain '{self.domain}' — {hint}."
                 )
             resp.raise_for_status()
-            self._meta = _wrap(resp.json())
+            self._meta_cache[dataset_id] = _wrap(resp.json())
+        return self._meta_cache[dataset_id]
+
+    def _ensure_meta(self) -> Dict[str, Any]:
+        if self._meta is None:
+            self._meta = self._fetch_meta(self._resolve_dataset_id())
         return self._meta
 
     def _check_route(self, path: str) -> None:
@@ -509,8 +538,9 @@ class DatasetClient(_SubClient):
     def refresh(self) -> "DatasetClient":
         """Clear cached metadata so the next access re-fetches from the registry."""
         self._meta = None
+        self._meta_cache = {}
         self._adapter = None
-        self._endpoints = None
+        self._domain_info = None
         return self
 
     @property
@@ -527,7 +557,10 @@ class DatasetClient(_SubClient):
             {'ngram_size': {'default': 1, 'valid': [1, 2]},
              'granularity': {'default': 'daily', 'valid': ['daily', 'weekly', 'monthly']}}
         """
-        meta = self._ensure_meta()
+        return self._filters_from_meta(self._ensure_meta())
+
+    @staticmethod
+    def _filters_from_meta(meta: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
         level_order: List[Dict[str, Any]] = meta.get("level_order") or []
         filter_values: Dict[str, list] = meta.get("filter_values") or {}
         if level_order:
@@ -570,41 +603,56 @@ class DatasetClient(_SubClient):
         return self._adapter
 
     @property
-    def endpoints(self) -> Dict[str, str]:
-        """Routes served under this dataset's domain, from the live OpenAPI spec.
+    def endpoints(self) -> Dict[str, Dict[str, Any]]:
+        """The domain's routes, from GET /{domain} (cached).
 
-        Returns ``{path: summary}``, e.g.::
+        Returns ``{path: {"summary": ..., "dataset": ...}}`` where ``dataset``
+        is the registered dataset the route serves (its ``x-dataset``
+        declaration), e.g.::
 
-            {'/wikimedia/term-series': 'Term Series',
-             '/wikimedia/top-ngrams': 'Get Top Ngrams', ...}
+            {'/wikimedia/term-series': {'summary': 'Term Series', 'dataset': 'ngrams'}, ...}
 
         Note: routes are per-domain, and the platform instruments
         (``/storywrangler/allotax``, ``/storywrangler/rtd``) work for every
         dataset — reach them via :meth:`allotax` and :meth:`rtd`.
         """
-        if self._endpoints is None:
-            spec = self._get_json("/openapi.json")
-            prefix = f"/{self.domain}/"
-            self._endpoints = {
-                path: next(iter(ops.values())).get("summary", "")
-                for path, ops in spec.get("paths", {}).items()
-                if path.startswith(prefix)
-            }
-        return self._endpoints
+        return self._domain_root().get("endpoints", {})
+
+    @property
+    def datasets(self) -> List[str]:
+        """Dataset ids registered under this domain, from GET /{domain}."""
+        return self._domain_root().get("datasets", [])
 
     @property
     def description(self) -> Optional[str]:
         """Dataset description."""
         return self._ensure_meta().get("description")
 
-    def _validate_filters(self, filter_dims: Dict[str, Any]) -> None:
+    def _validate_filters(self, filter_dims: Dict[str, Any], path: Optional[str] = None) -> None:
         """Validate filter kwargs against registry metadata.
 
-        Raises ValueError with actionable messages when:
+        Validates against the dataset the route declares (its ``x-dataset``
+        annotation) when *path* is given and annotated; otherwise against the
+        bound dataset. Raises ValueError with actionable messages when:
         - A filter name is not a known dimension for this dataset.
         - A filter value is not in the set of valid values.
         """
-        known = self.filters  # triggers metadata fetch if needed
+        meta = None
+        label = f"{self.domain}/{self.dataset_id}"
+        if path is not None:
+            try:
+                route_ds = (self.endpoints.get(path) or {}).get("dataset")
+                if route_ds:
+                    meta = self._fetch_meta(route_ds)
+                    label = f"{self.domain}/{route_ds}"
+            except Exception:
+                meta = None
+        if meta is None:
+            if self.dataset_id is None:
+                # Domain mode with an unannotated route — let the server decide.
+                return
+            meta = self._ensure_meta()
+        known = self._filters_from_meta(meta)
         if not known:
             return  # no metadata yet — skip validation, let server decide
 
@@ -614,7 +662,7 @@ class DatasetClient(_SubClient):
             if base_key not in known:
                 available = ", ".join(sorted(known))
                 raise ValueError(
-                    f"Unknown filter '{key}' for {self.domain}/{self.dataset_id}. "
+                    f"Unknown filter '{key}' for {label}. "
                     f"Available filters: [{available}]. "
                     f"Use .filters to see valid values."
                 )
@@ -626,7 +674,7 @@ class DatasetClient(_SubClient):
                     valid_str = ", ".join(str(v) for v in sorted(valid, key=str))
                     raise ValueError(
                         f"Invalid value '{val}' for filter '{key}' "
-                        f"on {self.domain}/{self.dataset_id}. "
+                        f"on {label}. "
                         f"Valid values: [{valid_str}]. "
                         f"Use .filters to see defaults."
                     )
@@ -663,6 +711,7 @@ class DatasetClient(_SubClient):
             ValueError: If a filter name is unknown or a value is invalid.
                 Use ``.filters`` to discover available dimensions.
         """
+        self._resolve_dataset_id()
         self._validate_filters(filter_dims)
         return self._instrument.allotax(
             self.domain, self.dataset_id,
@@ -694,6 +743,7 @@ class DatasetClient(_SubClient):
             ValueError: If a filter name is unknown or a value is invalid.
                 Use ``.filters`` to discover available dimensions.
         """
+        self._resolve_dataset_id()
         self._validate_filters(filters)
         return self._instrument.rtd(
             self.domain, self.dataset_id,
@@ -724,7 +774,6 @@ class DatasetClient(_SubClient):
                 n=1`` for wikimedia, ``sex="M"`` for babynames). Use ``.filters``
                 to discover them.
         """
-        self._validate_filters(filter_dims)
         params = {
             k: v for k, v in
             {"dates": dates, "dates2": dates2, "locations": locations, "limit": limit}.items()
@@ -733,6 +782,7 @@ class DatasetClient(_SubClient):
         params.update(filter_dims)
         path = f"/{self.domain}/top-ngrams"
         self._check_route(path)
+        self._validate_filters(filter_dims, path=path)
         return self._get_json(path, params)
 
     def term_series(
@@ -757,7 +807,6 @@ class DatasetClient(_SubClient):
             sparkline_dataset: Override the sparkline source (wikimedia only).
             **filter_dims: Dataset-specific filters (e.g. ``granularity="daily"``).
         """
-        self._validate_filters(filter_dims)
         params: Dict[str, Any] = {"type": type}
         params.update({
             k: v for k, v in
@@ -768,6 +817,7 @@ class DatasetClient(_SubClient):
         params.update(filter_dims)
         path = f"/{self.domain}/term-series"
         self._check_route(path)
+        self._validate_filters(filter_dims, path=path)
         return self._get_json(path, params)
 
     def term_series_batch(
@@ -788,7 +838,6 @@ class DatasetClient(_SubClient):
             types: Terms to look up — a list or a comma-separated string.
             (remaining args as in :meth:`term_series`)
         """
-        self._validate_filters(filter_dims)
         if isinstance(types, (list, tuple)):
             types = ",".join(types)
         params: Dict[str, Any] = {"types": types}
@@ -802,6 +851,7 @@ class DatasetClient(_SubClient):
         params.update(filter_dims)
         path = f"/{self.domain}/term-series/batch"
         self._check_route(path)
+        self._validate_filters(filter_dims, path=path)
         return self._get_json(path, params)
 
     def __getattr__(self, name: str):
@@ -838,7 +888,24 @@ class DatasetClient(_SubClient):
         return self._registry.validate_sources(self.domain, self.dataset_id)
 
     def __repr__(self) -> str:
-        return f"DatasetClient('{self.domain}/{self.dataset_id}')"
+        if self.dataset_id is not None:
+            return f"DatasetClient('{self.domain}/{self.dataset_id}')"
+        # Domain mode: displaying the object answers "what can I call here?"
+        # (mirrors GET /{domain}). Best-effort — falls back when offline.
+        try:
+            info = self._domain_root()
+        except Exception:
+            return f"DatasetClient(domain='{self.domain}')"
+        lines = [f"Domain '{self.domain}' — endpoints:"]
+        for path, ep in sorted(info.get("endpoints", {}).items()):
+            ds = ep.get("dataset")
+            served = f"  [serves: {ds}]" if ds else ""
+            lines.append(f"  {path:44} {ep.get('summary', '')}{served}")
+        datasets = info.get("datasets", [])
+        lines.append(
+            f"datasets: {datasets} — client.dataset('{self.domain}', <id>) for metadata"
+        )
+        return "\n".join(lines)
 
 
 class Storywrangler:
@@ -895,45 +962,25 @@ class Storywrangler:
         return self.get("/version")
 
     def dataset(self, domain: str, dataset_id: Optional[str] = None) -> DatasetClient:
-        """Return a dataset-scoped client with filter discovery and instrument methods.
+        """Return a domain- or dataset-scoped client (mirrors GET /{domain}).
 
-        When *dataset_id* is omitted and the domain has exactly one registered
-        dataset, it is resolved automatically; multi-dataset domains raise with
-        the list of choices.
+        With *dataset_id* the client is dataset-scoped: metadata properties
+        (``.meta``/``.filters``/``.availability``/``.adapter``) read that
+        registry entry. Without it the client is domain-scoped: displaying it
+        lists the domain's endpoints (``GET /{domain}``), data endpoints are
+        callable as methods, and dataset-specific metadata resolves only when
+        the domain has exactly one registered dataset — otherwise it raises
+        listing the choices.
 
         Example::
 
-            tw = client.dataset("twitter")            # single-dataset domain
-            wiki = client.dataset("wikimedia", "ngrams")
+            wiki = client.dataset("wikimedia")        # domain-scoped
+            wiki                                       # shows the endpoint list
+            wiki.term_series("hello", entity="wikidata:Q30", window=30)
+            wiki = client.dataset("wikimedia", "ngrams")   # dataset-scoped
             wiki.filters   # see available filter dimensions
             wiki.allotax(entity="wikidata:Q30", dates="2026-05-01", ngram_size=1)
         """
-        if dataset_id is None:
-            listing = self.registry.list()
-            in_domain = [
-                d for d in listing.get("datasets", []) if d["domain"] == domain
-            ]
-            if not in_domain:
-                raise ValueError(f"No datasets registered under domain '{domain}'.")
-            ids = sorted(d["dataset_id"] for d in in_domain)
-            # The dataset that declares an endpoint contract is the one the
-            # generic data methods serve; the rest are plumbing (sparklines,
-            # precomputed indexes) or dissemination datasets.
-            typed = sorted(
-                d["dataset_id"] for d in in_domain
-                if (d.get("endpoint_schema") or {}).get("type")
-            )
-            if len(ids) == 1:
-                dataset_id = ids[0]
-            elif len(typed) == 1:
-                dataset_id = typed[0]
-            else:
-                choices = typed or ids
-                raise ValueError(
-                    f"Domain '{domain}' has {len(ids)} datasets and no single "
-                    f"primary — pass one explicitly: client.dataset('{domain}', <id>) "
-                    f"with id in {choices}"
-                )
         return DatasetClient(self._session, self._base_url, self._timeout, domain, dataset_id)
 
     @classmethod
