@@ -469,8 +469,42 @@ class DatasetClient(_SubClient):
 
     def _ensure_meta(self) -> Dict[str, Any]:
         if self._meta is None:
-            self._meta = self._get_json(f"/registry/{self.domain}/{self.dataset_id}")
+            resp = self._get(f"/registry/{self.domain}/{self.dataset_id}")
+            if resp.status_code == 404:
+                # Fail fast with choices instead of a bare HTTP 404.
+                try:
+                    listing = self._get_json("/registry/")
+                    ids = sorted(
+                        d["dataset_id"] for d in listing.get("datasets", [])
+                        if d["domain"] == self.domain
+                    )
+                except Exception:
+                    ids = []
+                hint = f"registered: {ids}" if ids else "no datasets registered in this domain"
+                raise ValueError(
+                    f"Unknown dataset '{self.dataset_id}' in domain '{self.domain}' — {hint}."
+                )
+            resp.raise_for_status()
+            self._meta = _wrap(resp.json())
         return self._meta
+
+    def _check_route(self, path: str) -> None:
+        """Raise before sending when the domain doesn't serve *path*.
+
+        Generic data methods exist on every DatasetClient, but not every
+        domain serves every route — this turns a bare 404 into an actionable
+        error. Best-effort: skipped when the OpenAPI spec can't be fetched.
+        """
+        try:
+            known = self.endpoints
+        except Exception:
+            return
+        if known and path not in known:
+            available = ", ".join(sorted(known))
+            raise ValueError(
+                f"'{self.domain}' has no {path} endpoint. Available: {available}. "
+                f"Use .endpoints to discover routes."
+            )
 
     def refresh(self) -> "DatasetClient":
         """Clear cached metadata so the next access re-fetches from the registry."""
@@ -697,7 +731,9 @@ class DatasetClient(_SubClient):
             if v is not None
         }
         params.update(filter_dims)
-        return self._get_json(f"/{self.domain}/top-ngrams", params)
+        path = f"/{self.domain}/top-ngrams"
+        self._check_route(path)
+        return self._get_json(path, params)
 
     def term_series(
         self,
@@ -730,7 +766,9 @@ class DatasetClient(_SubClient):
             if v is not None
         })
         params.update(filter_dims)
-        return self._get_json(f"/{self.domain}/term-series", params)
+        path = f"/{self.domain}/term-series"
+        self._check_route(path)
+        return self._get_json(path, params)
 
     def term_series_batch(
         self,
@@ -762,7 +800,9 @@ class DatasetClient(_SubClient):
             if v is not None
         })
         params.update(filter_dims)
-        return self._get_json(f"/{self.domain}/term-series/batch", params)
+        path = f"/{self.domain}/term-series/batch"
+        self._check_route(path)
+        return self._get_json(path, params)
 
     def __getattr__(self, name: str):
         """Unknown attributes become domain-route calls (route mirror).
@@ -779,6 +819,7 @@ class DatasetClient(_SubClient):
         path = f"/{self.domain}/{name.replace('_', '-')}"
 
         def _call(**params):
+            self._check_route(path)
             return self._get_json(
                 path, {k: v for k, v in params.items() if v is not None} or None
             )
