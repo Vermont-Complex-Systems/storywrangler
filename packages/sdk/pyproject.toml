@@ -1,6 +1,6 @@
 [project]
 name = "storywrangler"
-version = "0.0.8"
+version = "0.0.9"
 description = "Dataset registration client, entity validation, and project scaffolding for Storywrangler"
 requires-python = ">=3.11"
 readme = "README.md"
