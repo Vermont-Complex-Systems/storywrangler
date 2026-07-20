@@ -9,17 +9,19 @@ Currently includes:
 """
 
 import math
-from importlib.metadata import PackageNotFoundError, version as pkg_version
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from storywrangler_schemas.coercion import coerce_scalar
+from ..core.allotax_utils import sanitize_floats as _sanitize_floats, allotax_version as _allotax_version
 from ..core.database import get_session
 from ..core.duckdb_client import get_duckdb_client, run_blocking
+from ..core.mongo_client import run_blocking_mongo
+from ..core.mongo_query import load_instrument_system
+from ..core.duckdb_query import handle_query_error, load_system
 from ..core.query_utils import (
-    get_partition_defaults, get_queryable_dims, handle_query_error,
-    latest_from_manifest, load_system, parse_dates, resolve_count_column,
-    resolve_entity,
+    get_partition_defaults, get_queryable_dims, latest_from_manifest,
+    parse_dates, resolve_count_column, resolve_entity,
 )
 from ..core.registry_utils import get_latest_entry
 from . import openapi_docs as docs
@@ -58,32 +60,6 @@ def _validate_and_coerce_filters(filter_dicts: list, filter_values: dict) -> Non
                         detail=f"{dim} must be one of {sorted(map(str, valid))}",
                     )
                 vals_dict[dim] = coerced
-
-
-def _sanitize_floats(obj):
-    """Replace NaN → null, ±Infinity → string, so json.dumps won't choke."""
-    if isinstance(obj, float):
-        if math.isnan(obj):
-            return None
-        if math.isinf(obj):
-            return "Infinity" if obj > 0 else "-Infinity"
-        return obj
-    if isinstance(obj, dict):
-        return {k: _sanitize_floats(v) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [_sanitize_floats(v) for v in obj]
-    return obj
-
-
-def _allotax_version() -> str:
-    try:
-        return pkg_version("allotax")
-    except PackageNotFoundError:
-        try:
-            import allotax
-            return getattr(allotax, "__version__", "unknown")
-        except ImportError:
-            return "not installed"
 
 
 @router.get(
@@ -155,6 +131,21 @@ async def allotaxonometer(
     # Validate and coerce filter values against introspected distinct values.
     _validate_and_coerce_filters([filter_vals1, filter_vals2], fv)
 
+    # mongodb pass-through datasets load systems via the router-registered
+    # hook (host-form data_location keeps db/collection routing in the bespoke
+    # router). Single dates only: range aggregation is parquet territory.
+    is_mongo = dataset_obj.data_format == "mongodb"
+    if is_mongo:
+        for label, val in (("dates", dates), ("dates2", dates2)):
+            if not val or "," in val:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"{label} must be a single YYYY-MM-DD date for mongodb datasets — "
+                           "range aggregation is not supported on the pass-through path.",
+                )
+        # System 2 inherits system 1's routing/filters unless overridden (?lang2=...)
+        filter_vals2 = {**filter_vals1, **filter_vals2}
+
     count_col = resolve_count_column(dataset_obj, weight)
 
     dr1 = parse_dates(dates)
@@ -181,10 +172,18 @@ async def allotaxonometer(
         )
 
     def _sync():
-        with handle_query_error(f"{domain}/{dataset}"):
-            with get_duckdb_client().timed_connect() as conn:
-                sys1 = load_system(conn, dataset_obj, local_id1, dr1, filter_vals1, ngram_limit, count_col=count_col)
-                sys2 = load_system(conn, dataset_obj, local_id2, dr2, filter_vals2, ngram_limit, count_col=count_col)
+        if is_mongo:
+            sys1 = load_instrument_system(dataset_obj, domain, filter_vals1, dates, ngram_limit, count_col)
+            sys2 = load_instrument_system(dataset_obj, domain, filter_vals2, dates2, ngram_limit, count_col)
+            if not sys1["types"]:
+                raise HTTPException(status_code=404, detail=f"No data for system 1 ({filter_vals1}, date={dates})")
+            if not sys2["types"]:
+                raise HTTPException(status_code=404, detail=f"No data for system 2 ({filter_vals2}, date={dates2})")
+        else:
+            with handle_query_error(f"{domain}/{dataset}"):
+                with get_duckdb_client().timed_connect() as conn:
+                    sys1 = load_system(conn, dataset_obj, local_id1, dr1, filter_vals1, ngram_limit, count_col=count_col)
+                    sys2 = load_system(conn, dataset_obj, local_id2, dr2, filter_vals2, ngram_limit, count_col=count_col)
 
         try:
             if alphas:
@@ -213,7 +212,7 @@ async def allotaxonometer(
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Allotax computation failed: {str(e)}")
 
-    return await run_blocking(_sync)
+    return await (run_blocking_mongo(_sync) if is_mongo else run_blocking(_sync))
 
 
 @router.get("/rtd")
@@ -284,6 +283,18 @@ async def rank_turbulence_divergence(
 
     _validate_and_coerce_filters([filter_vals, filter_vals2], fv)
 
+    is_mongo = dataset_obj.data_format == "mongodb"
+    if is_mongo:
+        for label, val in (("dates", dates), ("dates2", dates2)):
+            if not val or "," in val:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"{label} is required and must be a single YYYY-MM-DD date for "
+                           "mongodb datasets — range aggregation is not supported on the "
+                           "pass-through path.",
+                )
+        filter_vals2 = {**filter_vals, **filter_vals2}
+
     # Same entity for both systems (date-vs-date comparison)
     if not filter_vals2:
         filter_vals2 = dict(filter_vals)
@@ -312,11 +323,15 @@ async def rank_turbulence_divergence(
         latest_date = latest_from_manifest(dataset_obj, local_id, filter_vals.get("granularity"))
 
     def _sync():
-        with timed("query", "DuckDB data load"):
-            with handle_query_error(f"{domain}/{dataset}"):
-                with get_duckdb_client().timed_connect() as conn:
-                    target = load_system(conn, dataset_obj, local_id, dr1, filter_vals, ngram_limit, count_col=count_col)
-                    ref = load_system(conn, dataset_obj, local_id, dr2, filter_vals2, ngram_limit, count_col=count_col)
+        with timed("query", "data load"):
+            if is_mongo:
+                target = load_instrument_system(dataset_obj, domain, filter_vals, dates, ngram_limit, count_col)
+                ref = load_instrument_system(dataset_obj, domain, filter_vals2, dates2, ngram_limit, count_col)
+            else:
+                with handle_query_error(f"{domain}/{dataset}"):
+                    with get_duckdb_client().timed_connect() as conn:
+                        target = load_system(conn, dataset_obj, local_id, dr1, filter_vals, ngram_limit, count_col=count_col)
+                        ref = load_system(conn, dataset_obj, local_id, dr2, filter_vals2, ngram_limit, count_col=count_col)
 
         if not target["types"]:
             raise HTTPException(status_code=404, detail=f"No data for target date {dates}")
@@ -368,4 +383,4 @@ async def rank_turbulence_divergence(
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"RTD computation failed: {str(e)}")
 
-    return await run_blocking(_sync)
+    return await (run_blocking_mongo(_sync) if is_mongo else run_blocking(_sync))

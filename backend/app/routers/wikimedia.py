@@ -11,10 +11,8 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from ..core.database import get_session
 from ..core.duckdb_client import get_duckdb_client, run_blocking
-from ..core.query_utils import (
-    build_hive_path, handle_query_error, is_data_missing,
-    resolve_entity,
-)
+from ..core.duckdb_query import build_hive_path, handle_query_error, is_data_missing
+from ..core.query_utils import resolve_entity
 from ..core.registry_utils import get_latest_entry
 from ..core.term_series import (
     bucket_files, build_date_filter, fetch_sparkline_rows, latest_series_date,
@@ -84,28 +82,30 @@ def _fetch_top_articles(
 
 @router.get(
     "/top-ngrams",
-    openapi_extra=docs.WIKIMEDIA_GET_TOP_NGRAMS,
+    openapi_extra={**docs.WIKIMEDIA_GET_TOP_NGRAMS, "x-dataset": "ngrams"},
 )
 async def get_top_ngrams(
     dates: str = Query(default="2024-11-01,2024-11-07"),
     dates2: Optional[str] = Query(default=None),
-    locations: str = Query(default="wikidata:Q30", description="Entity ID (e.g. 'wikidata:Q30') or local ID (e.g. 'en')"),
+    entity: str = Query(default="wikidata:Q30", description="Entity ID (e.g. 'wikidata:Q30') or local ID (e.g. 'en')."),
     granularity: str = Query(default="daily"),
-    n: int = Query(default=1, description="N-gram size (1 = unigrams, 2 = bigrams). Only used when endpoint_schema.ngram_sizes is set."),
+    ngram_size: Optional[int] = Query(default=None, description="N-gram size (1 = unigrams, 2 = bigrams) — the registered column name."),
+    n: int = Query(default=1, description="Deprecated alias for ngram_size."),
     limit: int = Query(default=100),
     db: AsyncSession = Depends(get_session),
 ):
     """Get top Wikipedia n-grams."""
+    n = ngram_size if ngram_size is not None else n
     dataset_obj = await get_latest_entry(db, "wikimedia", "ngrams")
     if not dataset_obj:
         raise HTTPException(status_code=404, detail="'wikimedia/ngrams' dataset not found")
 
     extra = validated_dims(dataset_obj, {"granularity": granularity, "ngram_size": n})
-    em = await resolve_entity(db, "wikimedia", "ngrams", locations)
+    em = await resolve_entity(db, "wikimedia", "ngrams", entity)
 
     return await run_top_ngrams(
         dataset_obj, "wikimedia/ngrams", em.local_id, dates, dates2, extra, limit,
-        metadata={"granularity": granularity, "location": locations},
+        metadata={"granularity": granularity, "location": entity},
     )
 
 
@@ -113,7 +113,7 @@ async def get_top_ngrams(
 
 @router.get(
     "/revisions",
-    openapi_extra=docs.WIKIMEDIA_LIST_REVISION_ARTICLES,
+    openapi_extra={**docs.WIKIMEDIA_LIST_REVISION_ARTICLES, "x-dataset": "revisions"},
 )
 async def list_revision_articles(
     min_revisions: int = Query(default=1, description="Minimum revision count filter"),
@@ -139,7 +139,7 @@ async def list_revision_articles(
 
 @router.get(
     "/revisions/{identifier}",
-    openapi_extra=docs.WIKIMEDIA_GET_REVISION_DELTAS,
+    openapi_extra={**docs.WIKIMEDIA_GET_REVISION_DELTAS, "x-dataset": "revisions"},
 )
 async def get_revision_deltas(
     identifier: str,
@@ -233,7 +233,7 @@ async def get_revision_deltas(
 
 @router.get(
     "/term-series",
-    openapi_extra=docs.WIKIMEDIA_TERM_SERIES,
+    openapi_extra={**docs.WIKIMEDIA_TERM_SERIES, "x-dataset": "ngrams"},
 )
 async def term_series(
     entity: str = Query(..., description="Global entity ID, e.g. 'wikidata:Q30'"),
@@ -241,7 +241,8 @@ async def term_series(
     date: Optional[str] = Query(None, description="End date (YYYY-MM-DD). Defaults to latest available."),
     window: int = Query(0, description="Number of days to look back from date. 0 = full history."),
     granularity: str = Query("daily", description="Hive granularity: daily | weekly | monthly"),
-    n: int = Query(1, description="N-gram size (1 = unigrams, 2 = bigrams)"),
+    ngram_size: Optional[int] = Query(None, description="N-gram size (1 = unigrams, 2 = bigrams) — the registered column name."),
+    n: int = Query(1, description="Deprecated alias for ngram_size."),
     include_articles: bool = Query(True, description="Include top_articles in response (set false for sparkline-only, ~2x faster)"),
     sparkline_dataset: str = Query("sparklines", description="Registry dataset_id for the sparkline precomputed data (default: 'sparklines')."),
     db: AsyncSession = Depends(get_session),
@@ -254,6 +255,7 @@ async def term_series(
     **Slow fallback** (~3-5s): daily partition scan for arbitrary terms not in the precomputed vocabulary.
     Set `include_articles=false` for sparkline-only responses (~20ms, no top_articles field).
     """
+    n = ngram_size if ngram_size is not None else n
     # Resolve entity via ngrams dataset (shared entity mappings)
     with timed("resolve", "Entity resolution"):
         ngrams_obj = await get_latest_entry(db, "wikimedia", "ngrams")
@@ -347,7 +349,7 @@ async def term_series(
 
 @router.get(
     "/term-series/batch",
-    openapi_extra=docs.WIKIMEDIA_TERM_SERIES_BATCH,
+    openapi_extra={**docs.WIKIMEDIA_TERM_SERIES_BATCH, "x-dataset": "ngrams"},
 )
 async def term_series_batch(
     entity: str = Query(..., description="Global entity ID, e.g. 'wikidata:Q30'"),
@@ -355,7 +357,8 @@ async def term_series_batch(
     date: Optional[str] = Query(None, description="End date (YYYY-MM-DD). Defaults to latest available."),
     window: int = Query(0, description="Number of days to look back from date. 0 = full history."),
     granularity: str = Query("daily", description="Hive granularity: daily | weekly | monthly"),
-    n: int = Query(1, description="N-gram size (1 = unigrams, 2 = bigrams)"),
+    ngram_size: Optional[int] = Query(None, description="N-gram size (1 = unigrams, 2 = bigrams) — the registered column name."),
+    n: int = Query(1, description="Deprecated alias for ngram_size."),
     include_articles: bool = Query(True, description="Include top_articles in response (set false for sparkline-only, ~2x faster)"),
     articles_dates: Optional[str] = Query(None, description="Comma-separated dates to fetch articles for (e.g. '2025-06-05,2026-01-21'). When set, top_articles are only included for these dates instead of the full window. Sparkline data is unaffected."),
     sparkline_dataset: str = Query("sparklines", description="Registry dataset_id for the sparkline precomputed data (default: 'sparklines')."),
@@ -371,6 +374,7 @@ async def term_series_batch(
     Set `include_articles=false` for sparkline-only responses (~2x faster).
     Use `articles_dates` to restrict top_articles to specific dates (e.g. the two allotax comparison dates).
     """
+    n = ngram_size if ngram_size is not None else n
     ngrams_obj = await get_latest_entry(db, "wikimedia", "ngrams")
     if not ngrams_obj:
         raise HTTPException(status_code=404, detail="'wikimedia/ngrams' dataset not found")
@@ -507,13 +511,14 @@ async def term_series_batch(
 
 # ── precomputed-rtd ───────────────────────────────────────────────────────────
 
-@router.get("/precomputed-rtd")
+@router.get("/precomputed-rtd", openapi_extra={"x-dataset": "precomputed_rtd"})
 async def precomputed_rtd(
     entity: str = Query(..., description="Global entity ID, e.g. 'wikidata:Q30'"),
     date: str = Query(..., description="Reference date (YYYY-MM-DD)"),
     date_delta: int = Query(1, description="Days between the two compared systems"),
     granularity: str = Query("daily", description="Granularity: daily | weekly | monthly"),
-    n: int = Query(1, description="N-gram size (1 = unigrams, 2 = bigrams)"),
+    ngram_size: Optional[int] = Query(None, description="N-gram size (1 = unigrams, 2 = bigrams) — the registered column name."),
+    n: int = Query(1, description="Deprecated alias for ngram_size."),
     alpha: float = Query(0.17, description="RTD alpha parameter"),
     limit: int = Query(200, description="Top N terms by absolute divergence"),
     db: AsyncSession = Depends(get_session),
@@ -523,6 +528,7 @@ async def precomputed_rtd(
     Returns the top divergent terms between two consecutive time periods,
     sorted by absolute divergence descending.
     """
+    n = ngram_size if ngram_size is not None else n
     with timed("registry", "RTD registry lookup"):
         rtd_obj = await get_latest_entry(db, "wikimedia", "precomputed_rtd")
         if not rtd_obj:
@@ -577,7 +583,7 @@ async def precomputed_rtd(
 
 # ── semantic-timeseries ───────────────────────────────────────────────────────
 
-@router.get("/semantic-timeseries")
+@router.get("/semantic-timeseries", openapi_extra={"x-dataset": "semantic-timeseries"})
 async def semantic_timeseries(
     country: str = Query("United States", description="Country name as stored in the data (e.g. 'United States'), or 'All' for the global pageview-weighted corpus"),
     db: AsyncSession = Depends(get_session),
@@ -620,7 +626,7 @@ async def semantic_timeseries(
 
 # ── semantic-ngrams ───────────────────────────────────────────────────────────
 
-@router.get("/semantic-ngrams")
+@router.get("/semantic-ngrams", openapi_extra={"x-dataset": "semantic-ngrams"})
 async def semantic_ngrams(
     country: str = Query("United States", description="Country name as stored in the data (e.g. 'United States'), or 'All' for the global pageview-weighted corpus"),
     date: str = Query(..., description="Date (YYYY-MM-DD)"),

@@ -14,9 +14,8 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from ..core.database import get_session
 from ..core.duckdb_client import get_duckdb_client, run_blocking
-from ..core.query_utils import (
-    handle_query_error, is_data_missing, latest_from_manifest, resolve_count_column,
-)
+from ..core.duckdb_query import handle_query_error, is_data_missing
+from ..core.query_utils import latest_from_manifest, resolve_count_column
 from ..core.registry_utils import get_latest_entry
 from ..core.term_series import (
     build_date_filter, ngrams_context, run_top_ngrams, series_entry, validated_dims,
@@ -73,7 +72,7 @@ def _year_pruning(date_params: list) -> tuple:
 
 @router.get(
     "/top-ngrams",
-    openapi_extra=docs.REDDIT_GET_TOP_NGRAMS,
+    openapi_extra={**docs.REDDIT_GET_TOP_NGRAMS, "x-dataset": "ngrams"},
 )
 async def get_top_ngrams(
     dates: str = Query(default="2022-12-01,2022-12-07"),
@@ -103,7 +102,7 @@ async def get_top_ngrams(
 
 @router.get(
     "/term-series",
-    openapi_extra=docs.REDDIT_TERM_SERIES,
+    openapi_extra={**docs.REDDIT_TERM_SERIES, "x-dataset": "ngrams"},
 )
 async def term_series(
     type: str = Query(..., description="The n-gram term to look up. Case-sensitive."),
@@ -169,7 +168,7 @@ async def term_series(
 
 # ── term-series/batch ────────────────────────────────────────────────────────
 
-@router.get("/term-series/batch")
+@router.get("/term-series/batch", openapi_extra={"x-dataset": "ngrams"})
 async def term_series_batch(
     types: str = Query(..., description="Comma-separated n-gram terms, e.g. 'trump,covid,the'. Case-sensitive."),
     date: Optional[str] = Query(None, description="End date (YYYY-MM-DD). Defaults to latest available."),
