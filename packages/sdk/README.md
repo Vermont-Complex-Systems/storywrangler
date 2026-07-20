@@ -80,7 +80,7 @@ follow the URL, so you can guess them without docs:
 | Route | SDK call |
 |---|---|
 | `POST /registry/register` | `client.registry.register(payload)` |
-| `GET /registry/` | `client.registry.list()` |
+| `GET /registry/` | `client.registry.list()` — displaying `client.registry` renders this list; `.list().df()` for a table |
 | `GET /registry/domains` | `client.registry.domains()` |
 | `GET /registry/{domain}/{id}` | `client.registry.get(domain, id, full=, version=)` |
 | `GET /registry/{domain}/{id}/adapter` | `client.registry.adapter(domain, id)` |

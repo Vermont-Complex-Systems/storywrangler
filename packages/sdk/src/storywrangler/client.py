@@ -220,6 +220,23 @@ class RegistryClient(_SubClient):
         """List all registered datasets."""
         return _wrap(self._get("/registry/").json())
 
+    def __repr__(self) -> str:
+        # Displaying the client shows what its root route serves (the catalog),
+        # same rule as the domain client. Best-effort — falls back when offline.
+        try:
+            datasets = self.list().get("datasets", [])
+        except Exception:
+            return "RegistryClient()"
+        lines = [f"Registry — {len(datasets)} datasets:"]
+        for ds in datasets:
+            ident = f"{ds.get('domain')}/{ds.get('dataset_id')}"
+            desc = (ds.get("description") or "").split("\n")[0]
+            if len(desc) > 60:
+                desc = desc[:57] + "..."
+            lines.append(f"  {ident:36} {ds.get('version', ''):8} {desc}")
+        lines.append("use .list().df() for a table, .get(domain, id) for one dataset")
+        return "\n".join(lines)
+
     def domains(self) -> Dict[str, Any]:
         """List accepted domain names for dataset registration."""
         return self._get_json("/registry/domains")
