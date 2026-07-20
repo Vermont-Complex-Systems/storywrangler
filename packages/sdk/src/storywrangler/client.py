@@ -910,18 +910,30 @@ class Storywrangler:
         """
         if dataset_id is None:
             listing = self.registry.list()
-            ids = sorted(
-                d["dataset_id"] for d in listing.get("datasets", [])
-                if d["domain"] == domain
-            )
-            if not ids:
+            in_domain = [
+                d for d in listing.get("datasets", []) if d["domain"] == domain
+            ]
+            if not in_domain:
                 raise ValueError(f"No datasets registered under domain '{domain}'.")
-            if len(ids) > 1:
+            ids = sorted(d["dataset_id"] for d in in_domain)
+            # The dataset that declares an endpoint contract is the one the
+            # generic data methods serve; the rest are plumbing (sparklines,
+            # precomputed indexes) or dissemination datasets.
+            typed = sorted(
+                d["dataset_id"] for d in in_domain
+                if (d.get("endpoint_schema") or {}).get("type")
+            )
+            if len(ids) == 1:
+                dataset_id = ids[0]
+            elif len(typed) == 1:
+                dataset_id = typed[0]
+            else:
+                choices = typed or ids
                 raise ValueError(
-                    f"Domain '{domain}' has {len(ids)} datasets — pass one explicitly: "
-                    f"client.dataset('{domain}', <id>) with id in {ids}"
+                    f"Domain '{domain}' has {len(ids)} datasets and no single "
+                    f"primary — pass one explicitly: client.dataset('{domain}', <id>) "
+                    f"with id in {choices}"
                 )
-            dataset_id = ids[0]
         return DatasetClient(self._session, self._base_url, self._timeout, domain, dataset_id)
 
     @classmethod
