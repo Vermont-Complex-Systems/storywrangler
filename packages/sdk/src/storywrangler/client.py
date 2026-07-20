@@ -89,7 +89,7 @@ class DataResponse(dict):
         def records(val):
             return isinstance(val, list) and (not val or isinstance(val[0], dict))
 
-        for key in ("data", "series"):
+        for key in ("data", "series", "results"):
             val = self.get(key)
             if records(val):
                 return pd.DataFrame(val)

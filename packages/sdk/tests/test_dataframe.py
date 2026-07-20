@@ -29,12 +29,13 @@ class TestDataResponse:
         assert list(df.columns) == ["date", "counts", "rank", "freq"]
 
     def test_batch_series_dict(self):
-        """term-series/batch shape: {'series': {term: [...]}}"""
+        """term-series/batch shape: {'results': {term: [...]}} (the live key)"""
         r = DataResponse({
-            "series": {
+            "results": {
                 "hello": [{"date": "2026-05-01", "counts": 1}],
                 "world": [{"date": "2026-05-01", "counts": 2}],
             },
+            "latest_available_date": "2026-05-01",
         })
         df = r.df()
         assert set(df["type"]) == {"hello", "world"}

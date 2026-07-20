@@ -25,6 +25,7 @@ py-allotax = { git = "https://github.com/compstorylab/py-allotax.git", rev = "al
 dev-dependencies = [
     "ipython>=9.13.0",
     "ipykernel>=6.29",
+    "matplotlib>=3.8",
     "pandas>=2.0",
     "pytest>=8.0.0",
     "ruff>=0.1.0",
