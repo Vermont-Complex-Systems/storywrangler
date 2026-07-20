@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.database import get_session
 from ..core.duckdb_client import get_duckdb_client, run_blocking
-from ..core.query_utils import handle_query_error
+from ..core.duckdb_query import handle_query_error
 from ..core.registry_utils import get_latest_entry
 
 router = APIRouter()

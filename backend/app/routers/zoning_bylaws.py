@@ -8,7 +8,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from ..core.database import get_session
 from ..core.duckdb_client import get_duckdb_client, run_blocking
-from ..core.query_utils import handle_query_error, load_system, resolve_entity
+from ..core.duckdb_query import handle_query_error, load_system
+from ..core.query_utils import resolve_entity
 from ..core.registry_utils import get_latest_entry
 from . import openapi_docs as docs
 

@@ -21,11 +21,11 @@ from typing import List, Optional
 from fastapi import HTTPException
 
 from .duckdb_client import get_duckdb_client, run_blocking
-from .query_utils import (
+from .duckdb_query import (
     assign_bucket, build_hive_path, entity_base_path, get_bucket_config,
-    get_queryable_dims, handle_query_error, is_data_missing, latest_from_manifest,
-    load_system, parse_dates, resolve_bucket_count,
+    handle_query_error, is_data_missing, load_system, resolve_bucket_count,
 )
+from .query_utils import get_queryable_dims, latest_from_manifest, parse_dates
 
 log = logging.getLogger(__name__)
 
