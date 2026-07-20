@@ -23,7 +23,14 @@ Usage::
         ngram_size=1, granularity="daily",
     )
 
-    # Bespoke routes without a dedicated method
+    # Single-dataset domains resolve without an id
+    tw = client.dataset("twitter")
+
+    # Any domain route is callable by its guessable name (dynamic mirror)
+    wiki.revisions(limit=10)
+    wiki.semantic_ngrams(...)
+
+    # Routes outside a domain client
     client.get("/open-academic-analytics/authors")
 
     # Flat API (still available)
@@ -757,6 +764,30 @@ class DatasetClient(_SubClient):
         params.update(filter_dims)
         return self._get_json(f"/{self.domain}/term-series/batch", params)
 
+    def __getattr__(self, name: str):
+        """Unknown attributes become domain-route calls (route mirror).
+
+        ``ds.semantic_ngrams(k=2)`` → ``GET /{domain}/semantic-ngrams?k=2`` —
+        every route under the domain is callable by its guessable name, even
+        before the SDK grows a dedicated method for it. Explicit methods
+        (``term_series``, ``top_ngrams``, ...) take precedence and add filter
+        validation; dynamic calls are pass-through (kwargs become query
+        params, None values dropped). Use ``.endpoints`` to see what exists.
+        """
+        if name.startswith("_"):
+            raise AttributeError(name)
+        path = f"/{self.domain}/{name.replace('_', '-')}"
+
+        def _call(**params):
+            return self._get_json(
+                path, {k: v for k, v in params.items() if v is not None} or None
+            )
+
+        _call.__name__ = name
+        _call.__qualname__ = f"DatasetClient.{name}"
+        _call.__doc__ = f"GET {path} — dynamic route mirror; kwargs become query params."
+        return _call
+
     def versions(self) -> Dict[str, Any]:
         """List all registered versions of this dataset, newest first."""
         return self._registry.versions(self.domain, self.dataset_id)
@@ -822,15 +853,34 @@ class Storywrangler:
         """Component versions of the running API (api, schemas, duckdb, allotax)."""
         return self.get("/version")
 
-    def dataset(self, domain: str, dataset_id: str) -> DatasetClient:
+    def dataset(self, domain: str, dataset_id: Optional[str] = None) -> DatasetClient:
         """Return a dataset-scoped client with filter discovery and instrument methods.
+
+        When *dataset_id* is omitted and the domain has exactly one registered
+        dataset, it is resolved automatically; multi-dataset domains raise with
+        the list of choices.
 
         Example::
 
+            tw = client.dataset("twitter")            # single-dataset domain
             wiki = client.dataset("wikimedia", "ngrams")
             wiki.filters   # see available filter dimensions
             wiki.allotax(entity="wikidata:Q30", dates="2026-05-01", ngram_size=1)
         """
+        if dataset_id is None:
+            listing = self.registry.list()
+            ids = sorted(
+                d["dataset_id"] for d in listing.get("datasets", [])
+                if d["domain"] == domain
+            )
+            if not ids:
+                raise ValueError(f"No datasets registered under domain '{domain}'.")
+            if len(ids) > 1:
+                raise ValueError(
+                    f"Domain '{domain}' has {len(ids)} datasets — pass one explicitly: "
+                    f"client.dataset('{domain}', <id>) with id in {ids}"
+                )
+            dataset_id = ids[0]
         return DatasetClient(self._session, self._base_url, self._timeout, domain, dataset_id)
 
     @classmethod

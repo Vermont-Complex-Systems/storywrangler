@@ -77,3 +77,27 @@ class TestWrap:
         assert isinstance(_wrap({"a": 1}), DataResponse)
         assert isinstance(_wrap([1, 2]), RecordList)
         assert _wrap("plain") == "plain"
+
+
+class TestDynamicRoutes:
+    def _ds(self):
+        import requests
+        from storywrangler.client import DatasetClient
+        return DatasetClient(requests.Session(), "http://x", 1, "wikimedia", "ngrams")
+
+    def test_unknown_attr_becomes_route_call(self):
+        fn = self._ds().semantic_ngrams
+        assert callable(fn)
+        assert "/wikimedia/semantic-ngrams" in fn.__doc__
+
+    def test_underscores_map_to_dashes(self):
+        assert "/wikimedia/precomputed-rtd" in self._ds().precomputed_rtd.__doc__
+
+    def test_private_names_still_raise(self):
+        import pytest as _pytest
+        with _pytest.raises(AttributeError):
+            self._ds()._no_such_thing
+
+    def test_explicit_methods_win(self):
+        ds = self._ds()
+        assert ds.term_series.__doc__ != f"GET /wikimedia/term-series — dynamic route mirror; kwargs become query params."

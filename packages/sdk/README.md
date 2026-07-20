@@ -113,7 +113,12 @@ an SDK method (bespoke routes may map to the `client.get()` escape hatch).
 ### Dataset-scoped client
 
 `client.dataset(domain, id)` binds a dataset and adds cached discovery
-properties on top of the raw routes:
+properties on top of the raw routes. The id is optional when the domain has
+exactly one dataset (`client.dataset("twitter")`); multi-dataset domains
+raise with the list of choices. Any domain route without a dedicated method
+is still callable by its guessable name — `wiki.revisions(limit=10)` →
+`GET /wikimedia/revisions` (underscores map to dashes; kwargs become query
+params; use `.endpoints` to discover what exists):
 
 ```python
 wiki = client.dataset("wikimedia", "ngrams")
