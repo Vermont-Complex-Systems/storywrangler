@@ -775,6 +775,7 @@ class DatasetClient(_SubClient):
         *,
         dates: str | None = None,
         dates2: str | None = None,
+        entity: str | None = None,
         locations: str | None = None,
         limit: int | None = None,
         **filter_dims,
@@ -784,16 +785,19 @@ class DatasetClient(_SubClient):
         Args:
             dates: Date or range for system 1 ('2024-10-01' or '2024-10-01,2024-10-31').
             dates2: Optional second range for temporal comparison.
-            locations: Entity ID (e.g. 'wikidata:Q30') or local ID, where the
-                domain supports entity resolution.
+            entity: Entity ID (e.g. 'wikidata:Q30') or local ID, where the
+                dataset declares an entity_mapping — same convention as
+                term_series and the instruments.
+            locations: Deprecated alias for ``entity``.
             limit: Max rows to return.
             **filter_dims: Dataset-specific filters (e.g. ``granularity="daily",
-                n=1`` for wikimedia, ``sex="M"`` for babynames). Use ``.filters``
-                to discover them.
+                ngram_size=1`` for wikimedia, ``sex="M"`` for babynames). Use
+                ``.filters`` to discover them.
         """
         params = {
             k: v for k, v in
-            {"dates": dates, "dates2": dates2, "locations": locations, "limit": limit}.items()
+            {"dates": dates, "dates2": dates2, "entity": entity,
+             "locations": locations, "limit": limit}.items()
             if v is not None
         }
         params.update(filter_dims)
