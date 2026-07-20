@@ -176,8 +176,6 @@ class TestRouteCoverage:
         "/twitter/top-ngrams": ("DatasetClient", "top_ngrams"),
         "/twitter/term-series": ("DatasetClient", "term_series"),
         "/twitter/term-series/batch": ("DatasetClient", "term_series_batch"),
-        "/twitter/allotax": ("DatasetClient", "allotax"),
-        "/twitter/rtd": ("DatasetClient", "rtd"),
         # Platform
         "/version": ("Storywrangler", "version"),
         "/health/status": ("HealthClient", "status"),
