@@ -776,7 +776,6 @@ class DatasetClient(_SubClient):
         dates: str | None = None,
         dates2: str | None = None,
         entity: str | None = None,
-        locations: str | None = None,
         limit: int | None = None,
         **filter_dims,
     ) -> Dict[str, Any]:
@@ -788,7 +787,6 @@ class DatasetClient(_SubClient):
             entity: Entity ID (e.g. 'wikidata:Q30') or local ID, where the
                 dataset declares an entity_mapping — same convention as
                 term_series and the instruments.
-            locations: Deprecated alias for ``entity``.
             limit: Max rows to return.
             **filter_dims: Dataset-specific filters (e.g. ``granularity="daily",
                 ngram_size=1`` for wikimedia, ``sex="M"`` for babynames). Use
@@ -796,8 +794,7 @@ class DatasetClient(_SubClient):
         """
         params = {
             k: v for k, v in
-            {"dates": dates, "dates2": dates2, "entity": entity,
-             "locations": locations, "limit": limit}.items()
+            {"dates": dates, "dates2": dates2, "entity": entity, "limit": limit}.items()
             if v is not None
         }
         params.update(filter_dims)

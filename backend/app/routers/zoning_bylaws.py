@@ -20,18 +20,16 @@ router = APIRouter()
     openapi_extra={**docs.ZONING_BYLAWS_GET_ZONING_BYLAWS_NGRAMS, "x-dataset": "ngrams"},
 )
 async def get_zoning_bylaws_ngrams(
-    entity: Optional[str] = Query(default=None, description="Town name or Wikidata entity ID — canonical param for declared entity_mapping."),
-    locations: str = Query(default="Arlington", description="Deprecated alias for entity."),
+    entity: str = Query(default="Arlington", description="Town name (e.g. 'Arlington') or Wikidata entity ID (e.g. 'wikidata:Q675558')."),
     limit: int = Query(default=100),
     db: AsyncSession = Depends(get_session),
 ):
     """Get top words from a town's zoning bylaw."""
-    locations = entity if entity is not None else locations
     dataset_obj = await get_latest_entry(db, "vt-zoning-atlas", "ngrams")
     if not dataset_obj:
         raise HTTPException(status_code=404, detail="'vt-zoning-atlas/ngrams' dataset not found")
 
-    em = await resolve_entity(db, "vt-zoning-atlas", "ngrams", locations)
+    em = await resolve_entity(db, "vt-zoning-atlas", "ngrams", entity)
 
     def _query():
         with handle_query_error("vt-zoning-atlas/ngrams"):
@@ -40,7 +38,7 @@ async def get_zoning_bylaws_ngrams(
                 formatted = [{"types": t, "counts": c} for t, c in zip(sys1["types"], sys1["counts"])]
                 return {
                     "data": formatted,
-                    "metadata": {"location": locations},
+                    "metadata": {"location": entity},
                 }
 
     return await run_blocking(_query)
