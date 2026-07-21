@@ -90,16 +90,19 @@ class DataResponse(dict):
             return isinstance(val, list) and (not val or isinstance(val[0], dict))
 
         for key in ("data", "series", "results"):
+            if key not in self:
+                continue
             val = self.get(key)
-            if records(val):
-                return pd.DataFrame(val)
             if isinstance(val, dict):  # batch shape: term → rows
                 frames = [
                     pd.DataFrame(rows).assign(type=term)
                     for term, rows in val.items() if records(rows)
                 ]
-                if frames:
-                    return pd.concat(frames, ignore_index=True)
+                # A present-but-empty batch (no term matched) is an empty
+                # table, not a missing payload — return an empty frame.
+                return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+            if records(val):
+                return pd.DataFrame(val)
 
         tables = {k: v for k, v in self.items() if records(v) and v}
         if len(tables) == 1:
@@ -908,6 +911,20 @@ class DatasetClient(_SubClient):
         if name.startswith("_"):
             raise AttributeError(name)
         path = f"/{self.domain}/{name.replace('_', '-')}"
+
+        # When the domain's routes are discoverable, an unknown name is a real
+        # AttributeError — so hasattr() and getattr(default) behave, and typos
+        # fail at access. When discovery is unavailable (offline / old server),
+        # stay permissive so the route mirror still works.
+        try:
+            known = self.endpoints
+        except Exception:
+            known = None
+        if known and path not in known:
+            raise AttributeError(
+                f"'{self.domain}' domain has no endpoint '{name}' "
+                f"(→ {path}). Use .endpoints to see available routes."
+            )
 
         def _call(**params):
             self._check_route(path)

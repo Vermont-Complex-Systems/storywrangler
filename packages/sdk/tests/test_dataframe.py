@@ -60,6 +60,14 @@ class TestDataResponse:
         with pytest.raises(ValueError, match="No tabular payload"):
             DataResponse({"detail": "not found"}).df()
 
+    def test_empty_batch_returns_empty_frame(self):
+        """A present-but-empty batch (no term matched) → empty frame, not error."""
+        df = DataResponse({"results": {}, "latest_available_date": "2022-12-31"}).df()
+        assert len(df) == 0
+
+    def test_empty_data_returns_empty_frame(self):
+        assert len(DataResponse({"data": [], "metadata": {}}).df()) == 0
+
     def test_still_a_dict(self):
         r = DataResponse({"data": [], "metadata": {"x": 1}})
         assert r["metadata"]["x"] == 1
@@ -98,6 +106,12 @@ class TestDynamicRoutes:
         import pytest as _pytest
         with _pytest.raises(AttributeError):
             self._ds()._no_such_thing
+
+    def test_permissive_when_discovery_unreachable(self):
+        """Offline (no domain root) → route mirror stays available, no crash."""
+        # points at a dead port; .endpoints raises → __getattr__ falls permissive
+        fn = self._ds().anything_at_all
+        assert callable(fn)
 
     def test_explicit_methods_win(self):
         ds = self._ds()
