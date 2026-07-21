@@ -297,6 +297,12 @@ async def top_ngrams(
 
     metadata = {"lang": lang, "ngram_size": ngram_size, "weight": count_col}
     if second is not None:
+        if dates == dates2:
+            # Same date collides into one JSON key and drops system 1.
+            raise HTTPException(
+                status_code=400,
+                detail="dates and dates2 must differ to compare two systems.",
+            )
         return {dates: first, dates2: second, "metadata": metadata}
     return {"data": first, "metadata": metadata}
 

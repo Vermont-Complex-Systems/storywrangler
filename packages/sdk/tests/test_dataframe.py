@@ -68,6 +68,15 @@ class TestDataResponse:
     def test_empty_data_returns_empty_frame(self):
         assert len(DataResponse({"data": [], "metadata": {}}).df()) == 0
 
+    def test_dual_date_one_empty_keeps_system(self):
+        """One empty side in a dual-date comparison still yields a system column."""
+        pd_ = pytest.importorskip("pandas")
+        df = DataResponse({"2020-01-01": [{"types": "a", "counts": 1}],
+                           "2020-01-02": [], "metadata": {}}).df()
+        assert "system" in df.columns
+        assert set(df["system"]) == {"2020-01-01", "2020-01-02"} or "2020-01-01" in set(df["system"])
+
+
     def test_still_a_dict(self):
         r = DataResponse({"data": [], "metadata": {"x": 1}})
         assert r["metadata"]["x"] == 1

@@ -104,7 +104,9 @@ class DataResponse(dict):
             if records(val):
                 return pd.DataFrame(val)
 
-        tables = {k: v for k, v in self.items() if records(v) and v}
+        # Keep present-but-empty record lists: a dual-date comparison where one
+        # side has no rows must still carry the 'system' column for both sides.
+        tables = {k: v for k, v in self.items() if records(v)}
         if len(tables) == 1:
             return pd.DataFrame(next(iter(tables.values())))
         if len(tables) > 1:  # e.g. dual-system top-ngrams keyed by date range
@@ -240,7 +242,7 @@ class RegistryClient(_SubClient):
 
     def list(self) -> Dict[str, Any]:
         """List all registered datasets."""
-        return _wrap(self._get("/registry/").json())
+        return self._get_json("/registry/")
 
     def __repr__(self) -> str:
         # Displaying the client shows what its root route serves (the catalog),
@@ -275,7 +277,7 @@ class RegistryClient(_SubClient):
         params: Dict[str, Any] = {"full": full}
         if version is not None:
             params["version"] = version
-        return _wrap(self._get(f"/registry/{domain}/{dataset_id}", params=params).json())
+        return self._get_json(f"/registry/{domain}/{dataset_id}", params)
 
     def adapter(self, domain: str, dataset_id: str) -> List[Dict[str, Any]]:
         """Entity mapping rows for a dataset (local_id ↔ entity_id ↔ entity_name).
@@ -633,7 +635,8 @@ class DatasetClient(_SubClient):
         values stored on disk.
         """
         if self._adapter is None:
-            resp = self._get(f"/registry/{self.domain}/{self.dataset_id}/adapter")
+            dataset_id = self._resolve_dataset_id()  # raises the choose-a-dataset error in domain mode
+            resp = self._get(f"/registry/{self.domain}/{dataset_id}/adapter")
             if resp.status_code == 404:
                 self._adapter = RecordList()
             else:

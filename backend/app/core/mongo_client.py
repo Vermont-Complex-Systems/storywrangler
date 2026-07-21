@@ -268,7 +268,13 @@ def mongo_introspect(dataset) -> Dict[str, Any]:
                     dataset.data_location, dim, len(values), _MAX_FILTER_VALUES,
                 )
                 continue
-            filter_values[dim] = sorted(v for v in values if v is not None)
+            vals = [v for v in values if v is not None]
+            try:
+                filter_values[dim] = sorted(vals)
+            except TypeError:
+                # Mixed BSON types (e.g. int 1 and str "1") — order by string
+                # form rather than let sorted() break the never-raises contract.
+                filter_values[dim] = sorted(vals, key=str)
         except PyMongoError as e:
             log.warning("mongo_introspect: distinct(%s) failed: %s", dim, e)
     if filter_values:

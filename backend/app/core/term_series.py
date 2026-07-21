@@ -193,6 +193,15 @@ async def run_top_ngrams(
     *count_col* selects a measure from the registered count-column menu
     (resolve via resolve_count_column); None uses the dataset default.
     """
+    if dates2 and parse_dates(dates) == parse_dates(dates2):
+        # Identical ranges collide into one JSON key and silently drop system 1
+        # — reject rather than return half the comparison with HTTP 200.
+        raise HTTPException(
+            status_code=400,
+            detail="dates and dates2 resolve to the same range; "
+                   "use different dates to compare two systems.",
+        )
+
     def _query():
         with handle_query_error(label):
             with get_duckdb_client().timed_connect() as conn:
