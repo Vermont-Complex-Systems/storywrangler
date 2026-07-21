@@ -307,7 +307,10 @@ def _derive_bucket_config(
     Returns a full config dict ready for query-time use::
 
         {"column": "ngram_bucket", "default_count": 1,
-         "overrides": {"United States": {"1": 16, "2": 32}}}
+         "overrides": {"1/United States": 16, "2/United States": 32}}
+
+    Override keys are the expanded level values above the bucket level
+    (entity and partition dims), joined in level_order order.
 
     Returns None if no hash_bucket level exists in level_order.
     """
@@ -323,31 +326,28 @@ def _derive_bucket_config(
         return None
 
     # Walk tree to the hash_bucket level, expanding entity + partition levels
-    entity_col = next(
-        (lv["column"] for lv in level_order if lv["type"] == "entity"), None
-    )
-    partition_cols = [
-        lv["column"] for lv in level_order[:bucket_idx]
-        if lv["type"] in ("partition", "time_partition")
-    ]
-
     work = _walk_levels(
         root, level_order[:bucket_idx],
         lambda lv: "expand" if lv["type"] in ("partition", "entity", "time_partition") else "pin",
     )
 
-    # Count bucket directories at each path
-    counts: Dict[tuple, int] = {}
+    # Count bucket directories per expanded combo. The override key is the
+    # full path of expanded level values above the bucket level, joined in
+    # level_order order — same rule as bucket_override_key() in
+    # duckdb_query.py, and valid with or without an entity level.
+    key_cols = [
+        lv["column"] for lv in level_order[:bucket_idx]
+        if lv["type"] in ("entity", "partition", "time_partition")
+    ]
+    counts: Dict[str, int] = {}
     for path, ctx, _bound in work:
         try:
             entries = os.listdir(path)
         except OSError:
             continue
         n_buckets = sum(1 for e in entries if e.startswith(f"{bucket_col}="))
-        entity = ctx.get(entity_col) if entity_col else None
-        # Use first partition dim as the override inner key
-        dim_val = str(ctx[partition_cols[0]]) if partition_cols else None
-        counts[(entity, dim_val)] = n_buckets
+        key = "/".join(str(ctx[c]) for c in key_cols if c in ctx)
+        counts[key] = n_buckets
 
     if not counts:
         return None
@@ -359,14 +359,11 @@ def _derive_bucket_config(
     if default_count < 1:
         default_count = 1
 
-    # Build overrides for entity × dim combinations that differ from default
-    overrides: Dict[str, Dict[str, int]] = {}
-    for (entity, dim_val), n in counts.items():
-        if n != default_count and entity is not None:
-            if dim_val is not None:
-                overrides.setdefault(entity, {})[dim_val] = n
-            else:
-                overrides.setdefault(entity, {})["_"] = n
+    # Overrides for combos that differ from the default count
+    overrides: Dict[str, int] = {}
+    for key, n in counts.items():
+        if n != default_count:
+            overrides[key] = n
 
     config: Dict[str, Any] = {"column": bucket_col, "default_count": default_count}
     if overrides:

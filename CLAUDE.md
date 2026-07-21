@@ -140,7 +140,7 @@ Neither field includes the entity column — that is handled by `entity_mapping.
 **Stored format** — auto-derived at registration by `_derive_bucket_config()`:
 
 ```python
-{"column": "ngram_bucket", "default_count": 1, "overrides": {"United States": {"1": 16, "2": 32}}}
+{"column": "ngram_bucket", "default_count": 1, "overrides": {"1/United States": 16, "2/United States": 32}}
 ```
 
 The submitter declares only which hive partition column holds the bucket ID.
@@ -167,12 +167,15 @@ The query layer computes the bucket at request time via `assign_bucket()`:
 - Seed 0 (the default `hash_seed`) matches DuckDB/DuckLake's `murmur3_32()` default.
 - Bucket count is per-dataset registration (e.g. US gets 32, smaller countries get 16).
 - `default_count` is the fallback when no override matches.
-- `overrides` is a nested dict: `entity → {partition_dim_value → count}`.
-  Resolution: `overrides[entity][str(dim_value)]` → `default_count`.
+- `overrides` is a flat dict keyed by the expanded level values above the
+  bucket level (entity and partition dims), joined in level_order order —
+  valid with or without an entity level (e.g. reddit's `"1/en"` for n/lang).
+  Resolution: `bucket_override_key()` builds the request's key,
+  `overrides[key]` → `default_count`.
 - Hash buckets are routing-only, not query axes.
 - Helpers in `core/duckdb_query.py`: `assign_bucket()` (imported from
   `storywrangler_schemas.hashing`), `get_bucket_config()`,
-  `resolve_bucket_count()` — generic, usable by any router.
+  `bucket_override_key()`, `resolve_bucket_count()` — generic, usable by any router.
 
 ### `entity_mapping.local_id_column` — dual role (documented, not a bug)
 

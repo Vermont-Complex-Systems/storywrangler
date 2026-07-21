@@ -22,8 +22,9 @@ from fastapi import HTTPException
 
 from .duckdb_client import get_duckdb_client, run_blocking
 from .duckdb_query import (
-    assign_bucket, build_hive_path, entity_base_path, get_bucket_config,
-    handle_query_error, is_data_missing, load_system, resolve_bucket_count,
+    assign_bucket, bucket_override_key, build_hive_path, entity_base_path,
+    get_bucket_config, handle_query_error, is_data_missing, load_system,
+    resolve_bucket_count,
 )
 from .query_utils import get_queryable_dims, latest_from_manifest, parse_dates
 
@@ -117,21 +118,25 @@ def log_fast_path_miss(label: str, exc: Exception) -> None:
         )
 
 
-def bucket_files(dataset_obj, terms, local_id, n: int) -> List[str]:
+def bucket_files(dataset_obj, terms, *, entity_value=None, filter_vals=None) -> List[str]:
     """Glob paths of the hash-bucket directories that can contain *terms*.
 
-    Each bucket is globbed with ``/*.parquet`` — never a pinned filename:
-    DuckLake-backed buckets hold several uniquely-named
+    Generic over the dataset's level layout: *filter_vals* holds the
+    partition-level values ({"ngram_size": 1} for wikimedia, {"n": 1,
+    "lang": "en"} for reddit), *entity_value* the entity level when one
+    exists. Each bucket is globbed with ``/*.parquet`` — never a pinned
+    filename: DuckLake-backed buckets hold several uniquely-named
     ``ducklake-<uuid>.parquet`` files whose set changes on every compaction.
     """
     hb = get_bucket_config(dataset_obj)
-    n_buckets = resolve_bucket_count(hb, local_id, n)
+    key = bucket_override_key(dataset_obj, entity_value=entity_value, filter_vals=filter_vals)
+    n_buckets = resolve_bucket_count(hb, key)
     buckets = {assign_bucket(t, n_buckets) for t in terms}
     return [
         build_hive_path(
             dataset_obj,
-            filter_vals={"ngram_size": n},
-            entity_value=local_id,
+            filter_vals=filter_vals,
+            entity_value=entity_value,
             bucket_value=b,
             glob_suffix="/*.parquet",
         )
@@ -149,7 +154,7 @@ def fetch_sparkline_rows(
     ngram, date — or [] with a classified log line on failure (missing
     sparkline files are expected; anything else is a warning).
     """
-    files = bucket_files(sparkline_obj, terms, local_id, n)
+    files = bucket_files(sparkline_obj, terms, entity_value=local_id, filter_vals={"ngram_size": n})
     file_list = ", ".join(f"'{f}'" for f in files)
     placeholders = ", ".join(["?"] * len(terms))
     try:

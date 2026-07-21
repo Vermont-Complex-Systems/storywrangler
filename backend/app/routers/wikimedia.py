@@ -42,7 +42,7 @@ def _fetch_top_articles(
     if not top_articles_obj or not terms:
         return {}
     terms = sorted(terms)
-    files = bucket_files(top_articles_obj, terms, local_id, n)
+    files = bucket_files(top_articles_obj, terms, entity_value=local_id, filter_vals={"ngram_size": n})
     file_list = ", ".join(f"'{f}'" for f in files)
     placeholders = ", ".join(["?"] * len(terms))
     try:

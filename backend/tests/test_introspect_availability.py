@@ -587,11 +587,12 @@ class TestDeriveBucketConfig:
         assert config["column"] == "bucket"
         # default_count is the mode — 4 appears 2 times (CA×1, CA×2)
         assert config["default_count"] == 4
-        assert "US" in config["overrides"]
-        assert config["overrides"]["US"]["1"] == 8
-        assert config["overrides"]["US"]["2"] == 16
-        # CA matches default, so no override entry
-        assert "CA" not in config["overrides"]
+        # Override keys are the expanded level values joined in level_order
+        # order (partition then entity here: ngram_size/country).
+        assert config["overrides"]["1/US"] == 8
+        assert config["overrides"]["2/US"] == 16
+        # CA matches default, so no override entries
+        assert not any(k.endswith("/CA") for k in config["overrides"])
 
     def test_no_hash_bucket_level(self, tmp_path):
         """No hash_bucket type in level_order → returns None."""

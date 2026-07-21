@@ -53,20 +53,41 @@ def get_bucket_config(dataset_obj) -> dict:
     return (dataset_obj.transform or {}).get("hash_bucket") or {}
 
 
-def resolve_bucket_count(hb: dict, entity: Optional[str] = None, dim_value: Any = None) -> int:
-    """Look up bucket count for a specific entity + partition dimension value.
+def bucket_override_key(dataset_obj, *, entity_value=None, filter_vals=None) -> Optional[str]:
+    """Override-lookup key for a request: the expanded level values above the
+    bucket level, joined in level_order order.
 
-    Resolution order: ``overrides[entity][str(dim_value)]`` → ``default_count``.
-    Returns 1 (no sharding) if hash_bucket is not configured.
+    Must mirror the key built by ``_derive_bucket_config`` at registration.
+    Returns None (→ default_count) when a needed level value is missing.
+    """
+    level_order = getattr(dataset_obj, "level_order", None) or []
+    vals = []
+    for lv in level_order:
+        if lv["type"] == "hash_bucket":
+            break
+        if lv["type"] == "entity":
+            if entity_value is None:
+                return None
+            vals.append(str(entity_value))
+        elif lv["type"] in ("partition", "time_partition"):
+            v = (filter_vals or {}).get(lv["column"])
+            if v is None:
+                return None
+            vals.append(str(v))
+    return "/".join(vals)
+
+
+def resolve_bucket_count(hb: dict, key: Optional[str] = None) -> int:
+    """Bucket count for one combo: ``overrides[key]`` → ``default_count``.
+
+    *key* comes from ``bucket_override_key()``. Returns 1 (no sharding) if
+    hash_bucket is not configured.
     """
     default = hb.get("default_count", 1)
     overrides = hb.get("overrides")
-    if not overrides or entity is None:
+    if not overrides or key is None:
         return default
-    entity_overrides = overrides.get(str(entity))
-    if not entity_overrides or dim_value is None:
-        return default
-    return entity_overrides.get(str(dim_value), default)
+    return overrides.get(key, default)
 
 
 # ── Time-partition derivation ──────────────────────────────────────────────
