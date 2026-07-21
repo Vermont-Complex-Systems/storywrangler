@@ -654,12 +654,16 @@ async def list_valid_domains():
 @router.get("/", openapi_extra=_ex({"datasets": [_EXAMPLE_DATASET], "total": 1}))
 async def list_registered_datasets(db: AsyncSession = Depends(get_session)):
     """List all registered datasets (latest version per dataset)."""
-    # DISTINCT ON (domain, dataset_id) ordered by created_at DESC gives the
-    # most recently registered version for each dataset identity.
+    # DISTINCT ON (domain, dataset_id) with the 'latest' slot ordered first —
+    # a newer semver snapshot must not shadow the mutable slot (see
+    # get_latest_entry for the same rule).
     result = await db.execute(
         select(RegistryEntry)
         .distinct(RegistryEntry.domain, RegistryEntry.dataset_id)
-        .order_by(RegistryEntry.domain, RegistryEntry.dataset_id, RegistryEntry.created_at.desc())
+        .order_by(
+            RegistryEntry.domain, RegistryEntry.dataset_id,
+            (RegistryEntry.version != "latest"), RegistryEntry.created_at.desc(),
+        )
     )
     datasets = result.scalars().all()
     return {
@@ -771,6 +775,8 @@ async def get_dataset_info(
         return _entry_response(ds, manifest=manifest_full)
 
     # Non-full: lightweight query — skips filter_values and partition_index.
+    # Same version precedence as get_latest_entry: the 'latest' slot serves
+    # unless a version is pinned; snapshots must not shadow it.
     where = [RegistryEntry.domain == domain, RegistryEntry.dataset_id == dataset_id]
     if version:
         where.append(RegistryEntry.version == version)
@@ -778,7 +784,7 @@ async def get_dataset_info(
         select(RegistryEntry)
         .options(load_only(*_SUMMARY_COLUMNS))
         .where(*where)
-        .order_by(RegistryEntry.created_at.desc())
+        .order_by((RegistryEntry.version != "latest"), RegistryEntry.created_at.desc())
         .limit(1)
     )
     ds = result.scalar_one_or_none()
