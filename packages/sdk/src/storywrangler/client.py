@@ -776,6 +776,7 @@ class DatasetClient(_SubClient):
         dates: str | None = None,
         dates2: str | None = None,
         entity: str | None = None,
+        weight: str | None = None,
         limit: int | None = None,
         **filter_dims,
     ) -> Dict[str, Any]:
@@ -794,7 +795,8 @@ class DatasetClient(_SubClient):
         """
         params = {
             k: v for k, v in
-            {"dates": dates, "dates2": dates2, "entity": entity, "limit": limit}.items()
+            {"dates": dates, "dates2": dates2, "entity": entity,
+             "weight": weight, "limit": limit}.items()
             if v is not None
         }
         params.update(filter_dims)
@@ -810,6 +812,7 @@ class DatasetClient(_SubClient):
         entity: str | None = None,
         date: str | None = None,
         window: int | None = None,
+        weight: str | None = None,
         include_articles: bool | None = None,
         sparkline_dataset: str | None = None,
         **filter_dims,
@@ -828,7 +831,7 @@ class DatasetClient(_SubClient):
         params: Dict[str, Any] = {"type": type}
         params.update({
             k: v for k, v in
-            {"entity": entity, "date": date, "window": window,
+            {"entity": entity, "date": date, "window": window, "weight": weight,
              "include_articles": include_articles, "sparkline_dataset": sparkline_dataset}.items()
             if v is not None
         })
@@ -845,6 +848,7 @@ class DatasetClient(_SubClient):
         entity: str | None = None,
         date: str | None = None,
         window: int | None = None,
+        weight: str | None = None,
         include_articles: bool | None = None,
         articles_dates: str | None = None,
         sparkline_dataset: str | None = None,
@@ -861,7 +865,7 @@ class DatasetClient(_SubClient):
         params: Dict[str, Any] = {"types": types}
         params.update({
             k: v for k, v in
-            {"entity": entity, "date": date, "window": window,
+            {"entity": entity, "date": date, "window": window, "weight": weight,
              "include_articles": include_articles, "articles_dates": articles_dates,
              "sparkline_dataset": sparkline_dataset}.items()
             if v is not None
