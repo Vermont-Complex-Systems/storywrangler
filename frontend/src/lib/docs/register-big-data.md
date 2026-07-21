@@ -78,7 +78,11 @@ sparklines/                          ← data_location
     ngram_bucket=15/data.parquet       ← 16 buckets for the US
 ```
 
-You only declare the column name — the server auto-derives bucket counts per entity:
+The hash *is* the index. The tempting alternative for term-first lookups is sorting terms into range files with an index sidecar mapping term ranges to filenames. That design costs an extra read per query to consult the index, and the sidecar sits inside the data tree where every glob picks it up as data. With a hash bucket the routing table is a function instead of a file: the pipeline computes `bucket = hash(term) % count` when writing, the query layer computes the same expression when reading, and they agree on where every term lives without storing or consulting any lookup structure.
+
+> **Why murmur3?** The hash must be fast, stable across every writer and reader, and available in every language a pipeline might use. `assign_bucket()` uses murmur3-32 with seed 0 and the sign bit cleared, matching DuckDB and DuckLake's built-in `murmur3_32()` — so buckets written by a DuckLake pipeline, a plain parquet writer, and the query layer all land identically. The implementation lives in one place (`storywrangler_schemas.hashing`, re-exported by the SDK as `storywrangler.hashing`); never reimplement it in a pipeline.
+
+You only declare the column name — the server auto-derives bucket counts by counting the bucket directories on disk, per partition combination:
 
 ```json
 {
@@ -124,6 +128,21 @@ FROM read_parquet('sparklines/country=United%20States/ngram_bucket=7/data.parque
 WHERE ngram = 'hello world'
 ORDER BY date
 ```
+
+Bucket counts can differ per combination — shard big partitions harder (United States at 32 while small countries keep 16; a large language at 64 while tiny ones need 1). Registration counts the bucket directories in every combination and stores a default plus overrides, keyed by the combination's level values in tree order:
+
+```json
+{"column": "ngram_bucket", "default_count": 16, "overrides": {"1/United States": 32}}
+```
+
+This works with or without an entity level — a dataset partitioned only by `n=` and `lang=` gets keys like `"1/en"`.
+
+### Gotchas
+
+- **Never reimplement the hash.** A pipeline that buckets with a different function or seed produces a tree that registers cleanly and misroutes every term — indistinguishable from "no data" at query time. Always `assign_bucket()`.
+- **Re-shard and re-register are a pair.** The query layer resolves the modulus from the counts recorded at registration. If a rebuild changes any combination's bucket count and the dataset is not re-registered, terms silently route to the wrong bucket.
+- **Nothing but data in bucket directories.** Anything named `*.parquet` under a bucket level is read as data — index files, manifests, and markers must live outside the tree or use a different extension.
+- **Sort rows by term within each bucket.** The bucket bounds which file is read; the in-file sort lets parquet row groups prune within it, which is what keeps large buckets fast.
 
 ## Case studies
 
