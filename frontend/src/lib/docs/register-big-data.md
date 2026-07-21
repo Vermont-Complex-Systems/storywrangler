@@ -135,7 +135,24 @@ Bucket counts can differ per combination — shard big partitions harder (United
 {"column": "ngram_bucket", "default_count": 16, "overrides": {"1/United States": 32}}
 ```
 
-This works with or without an entity level — a dataset partitioned only by `n=` and `lang=` gets keys like `"1/en"`.
+This works with or without an entity level — a dataset partitioned only by `n=` and `lang=` gets keys like `"1/en"`:
+
+```
+ngrams_ts/                           ← data_location
+  n=1/
+    lang=en/
+      ngram_bucket=0/data.parquet
+      ...
+      ngram_bucket=63/data.parquet     ← 64 buckets for English
+    lang=gn/
+      ngram_bucket=0/data.parquet      ← 1 bucket is enough for Guaraní
+  n=2/
+    ...
+```
+
+```json
+{"column": "ngram_bucket", "default_count": 1, "overrides": {"1/en": 64, "2/en": 64}}
+```
 
 ### Gotchas
 
