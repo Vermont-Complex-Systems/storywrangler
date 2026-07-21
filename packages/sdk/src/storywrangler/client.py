@@ -130,6 +130,25 @@ def _wrap(payload):
     return payload
 
 
+def _raise_with_detail(resp) -> None:
+    """raise_for_status, but keep the server's error detail in the message.
+
+    The API's 4xx/5xx bodies carry actionable messages ("weight must be one
+    of [...]"); a bare '400 Client Error' would discard the teaching half.
+    """
+    try:
+        resp.raise_for_status()
+    except requests.HTTPError as e:
+        detail = None
+        try:
+            detail = resp.json().get("detail")
+        except Exception:
+            pass
+        if detail:
+            raise requests.HTTPError(f"{e} — {detail}", response=resp) from None
+        raise
+
+
 def _instrument_params(
     domain: str, dataset: str, alpha, ngram_limit: int, wordshift_limit: int,
     **optional,
@@ -161,7 +180,7 @@ class _SubClient:
 
     def _get_json(self, path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         resp = self._get(path, params=params)
-        resp.raise_for_status()
+        _raise_with_detail(resp)
         return _wrap(resp.json())
 
     def _post(self, path: str, **kwargs) -> requests.Response:
@@ -266,7 +285,7 @@ class RegistryClient(_SubClient):
         Raises ``requests.HTTPError`` (404) if the dataset has no entity mappings.
         """
         resp = self._get(f"/registry/{domain}/{dataset_id}/adapter")
-        resp.raise_for_status()
+        _raise_with_detail(resp)
         return _wrap(resp.json())
 
     def versions(self, domain: str, dataset_id: str) -> Dict[str, Any]:
@@ -291,7 +310,7 @@ class RegistryClient(_SubClient):
             for e in entities
         ]
         resp = self._post(f"/admin/registry/{domain}/{dataset_id}/entities", json=rows)
-        resp.raise_for_status()
+        _raise_with_detail(resp)
         return resp.json()
 
     def delete(self, domain: str, dataset_id: str) -> Dict[str, Any]:
@@ -300,7 +319,7 @@ class RegistryClient(_SubClient):
         re-registered at any time.
         """
         resp = self._delete(f"/admin/registry/{domain}/{dataset_id}")
-        resp.raise_for_status()
+        _raise_with_detail(resp)
         return resp.json()
 
 
@@ -433,7 +452,7 @@ class UsersClient(_SubClient):
     def list(self) -> List[Dict[str, Any]]:
         """List all user accounts (admin only)."""
         resp = self._get("/admin/auth/users")
-        resp.raise_for_status()
+        _raise_with_detail(resp)
         return _wrap(resp.json())
 
     def create(
@@ -444,13 +463,13 @@ class UsersClient(_SubClient):
             "/admin/auth/users",
             json={"username": username, "email": email, "password": password, "role": role},
         )
-        resp.raise_for_status()
+        _raise_with_detail(resp)
         return resp.json()
 
     def set_role(self, user_id: int, role: str) -> Dict[str, Any]:
         """Promote or demote a user to 'admin' or 'user' (admin only)."""
         resp = self._put(f"/admin/auth/users/{user_id}/role", params={"role": role})
-        resp.raise_for_status()
+        _raise_with_detail(resp)
         return resp.json()
 
 
@@ -525,7 +544,7 @@ class DatasetClient(_SubClient):
                 raise ValueError(
                     f"Unknown dataset '{dataset_id}' in domain '{self.domain}' — {hint}."
                 )
-            resp.raise_for_status()
+            _raise_with_detail(resp)
             self._meta_cache[dataset_id] = _wrap(resp.json())
         return self._meta_cache[dataset_id]
 
@@ -615,7 +634,7 @@ class DatasetClient(_SubClient):
             if resp.status_code == 404:
                 self._adapter = RecordList()
             else:
-                resp.raise_for_status()
+                _raise_with_detail(resp)
                 self._adapter = _wrap(resp.json())
         return self._adapter
 
@@ -976,7 +995,7 @@ class Storywrangler:
         resp = self._session.get(
             f"{self._base_url}{path}", params=params or None, timeout=self._timeout,
         )
-        resp.raise_for_status()
+        _raise_with_detail(resp)
         return _wrap(resp.json())
 
     def version(self) -> Dict[str, Any]:
@@ -1020,6 +1039,6 @@ class Storywrangler:
             json={"username": username, "password": password},
             verify=verify,
         )
-        resp.raise_for_status()
+        _raise_with_detail(resp)
         api_key = resp.json()["api_key"]
         return cls(base_url=base_url, api_key=api_key)
