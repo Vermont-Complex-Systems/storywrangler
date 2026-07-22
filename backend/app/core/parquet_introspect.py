@@ -307,7 +307,10 @@ def _derive_bucket_config(
     Returns a full config dict ready for query-time use::
 
         {"column": "ngram_bucket", "default_count": 1,
-         "overrides": {"United States": {"1": 16, "2": 32}}}
+         "overrides": {"1/United States": 16, "2/United States": 32}}
+
+    Override keys are the expanded level values above the bucket level
+    (entity and partition dims), joined in level_order order.
 
     Returns None if no hash_bucket level exists in level_order.
     """
@@ -323,31 +326,28 @@ def _derive_bucket_config(
         return None
 
     # Walk tree to the hash_bucket level, expanding entity + partition levels
-    entity_col = next(
-        (lv["column"] for lv in level_order if lv["type"] == "entity"), None
-    )
-    partition_cols = [
-        lv["column"] for lv in level_order[:bucket_idx]
-        if lv["type"] in ("partition", "time_partition")
-    ]
-
     work = _walk_levels(
         root, level_order[:bucket_idx],
         lambda lv: "expand" if lv["type"] in ("partition", "entity", "time_partition") else "pin",
     )
 
-    # Count bucket directories at each path
-    counts: Dict[tuple, int] = {}
+    # Count bucket directories per expanded combo. The override key is the
+    # full path of expanded level values above the bucket level, joined in
+    # level_order order — same rule as bucket_override_key() in
+    # duckdb_query.py, and valid with or without an entity level.
+    key_cols = [
+        lv["column"] for lv in level_order[:bucket_idx]
+        if lv["type"] in ("entity", "partition", "time_partition")
+    ]
+    counts: Dict[str, int] = {}
     for path, ctx, _bound in work:
         try:
             entries = os.listdir(path)
         except OSError:
             continue
         n_buckets = sum(1 for e in entries if e.startswith(f"{bucket_col}="))
-        entity = ctx.get(entity_col) if entity_col else None
-        # Use first partition dim as the override inner key
-        dim_val = str(ctx[partition_cols[0]]) if partition_cols else None
-        counts[(entity, dim_val)] = n_buckets
+        key = "/".join(str(ctx[c]) for c in key_cols if c in ctx)
+        counts[key] = n_buckets
 
     if not counts:
         return None
@@ -359,14 +359,11 @@ def _derive_bucket_config(
     if default_count < 1:
         default_count = 1
 
-    # Build overrides for entity × dim combinations that differ from default
-    overrides: Dict[str, Dict[str, int]] = {}
-    for (entity, dim_val), n in counts.items():
-        if n != default_count and entity is not None:
-            if dim_val is not None:
-                overrides.setdefault(entity, {})[dim_val] = n
-            else:
-                overrides.setdefault(entity, {})["_"] = n
+    # Overrides for combos that differ from the default count
+    overrides: Dict[str, int] = {}
+    for key, n in counts.items():
+        if n != default_count:
+            overrides[key] = n
 
     config: Dict[str, Any] = {"column": bucket_col, "default_count": default_count}
     if overrides:
@@ -420,9 +417,6 @@ def _targeted_availability(
       every year×month directory.
     * **hash_bucket** levels are pinned to their first value (all buckets
       share the same date range).
-
-    For reddit (~100 langs × 3 n-values = 300 combos × 2 reads), this
-    reads ~600 leaf directories — manageable on NFS.
     """
     entity_col = (
         dataset.entity_mapping.local_id_column
@@ -535,6 +529,14 @@ def _targeted_availability(
         else:
             availability = bounds
 
+    # Found partition leaves but derived no bounds → every leaf read failed
+    # (the data is unreachable, e.g. an NFS blip). Raise rather than return an
+    # empty index the caller would silently accept.
+    if work and not availability:
+        raise RuntimeError(
+            f"availability walk found {len(work)} partition leaves under {root} "
+            "but could not read date bounds from any — data unreachable?"
+        )
     return availability
 
 
@@ -666,7 +668,7 @@ def _path_expr(dataset) -> Optional[str]:
 
     For parquet_hive without level_order, falls back to ``**/*.parquet`` glob.
     This is only hit during introspection — query-time code uses
-    ``build_hive_path()`` from query_utils.py which requires level_order.
+    ``build_hive_path()`` from duckdb_query.py which requires level_order.
     """
     fmt = dataset.data_format
     loc = dataset.data_location
@@ -805,7 +807,10 @@ def introspect(
                 if availability:
                     result["availability"] = availability
             except Exception as e:
-                log.debug("Hive availability walk failed: %s", e)
+                # Don't swallow silently — the caller refuses to register a
+                # hive+time dataset without availability, and needs the reason.
+                log.warning("Hive availability walk failed for %s: %s", loc, e)
+                result["introspect_error"] = f"availability walk failed: {e}"
         elif has_level_order:
             # DuckDB MIN/MAX with targeted directory reads.
             # Instead of scanning ALL files via **/*.parquet, iterate over
@@ -828,30 +833,62 @@ def introspect(
                     "manifest.availability not derived — re-register to retry"
                 )
             except Exception as e:
-                log.debug("Targeted availability introspection failed: %s", e)
+                log.warning("Targeted availability introspection failed for %s: %s", loc, e)
+                result["introspect_error"] = f"availability introspection failed: {e}"
         else:
-            # Fallback for non-hive datasets: single DuckDB MIN/MAX query.
+            # Fallback for non-hive datasets: DuckDB MIN/MAX, grouped by the
+            # entity column when one is declared (entity-first format, matching
+            # the hive walk); dataset-level otherwise.
+            em = getattr(dataset, "entity_mapping", None)
+            entity_col = getattr(em, "local_id_column", None) if em else None
+            type_col = (getattr(ep, "type_column", None) or "types") if count_types else None
             try:
-                sql = (
-                    f"SELECT MIN({time_col})::TEXT, MAX({time_col})::TEXT "
-                    f"FROM {path_expr}"
-                )
-                rows = conn.execute(sql).fetchall()
-                if rows and rows[0][0] is not None:
-                    result["availability"] = {"min": rows[0][0], "max": rows[0][1]}
-                    if count_types:
-                        # Dataset-level vocabulary size (flat parquet has no
-                        # per-combo leaves). Best-effort — bounds survive a
-                        # failed count.
-                        type_col = getattr(ep, "type_column", None) or "types"
-                        try:
-                            n = conn.execute(
-                                f"SELECT COUNT(DISTINCT {type_col}) FROM {path_expr}"
-                            ).fetchone()[0]
-                            if n:
-                                result["availability"]["types"] = n
-                        except Exception as e:
-                            log.debug("Type count failed: %s", e)
+                if entity_col:
+                    rows = conn.execute(
+                        f"SELECT {entity_col}, MIN({time_col})::TEXT, MAX({time_col})::TEXT "
+                        f"FROM {path_expr} WHERE {entity_col} IS NOT NULL "
+                        f"GROUP BY {entity_col} ORDER BY {entity_col}"
+                    ).fetchall()
+                    if rows:
+                        result["availability"] = {
+                            ent: {"min": mn, "max": mx} for ent, mn, mx in rows
+                        }
+                        if type_col:
+                            # Per-entity vocabulary size at that entity's latest
+                            # time value. Best-effort — bounds survive a failed count.
+                            try:
+                                counts = conn.execute(
+                                    f"SELECT {entity_col}, COUNT(DISTINCT {type_col}) "
+                                    f"FROM {path_expr} t "
+                                    f"WHERE {time_col} = ("
+                                    f"  SELECT MAX({time_col}) FROM {path_expr} "
+                                    f"  WHERE {entity_col} = t.{entity_col}) "
+                                    f"GROUP BY {entity_col}"
+                                ).fetchall()
+                                for ent, n in counts:
+                                    if n and ent in result["availability"]:
+                                        result["availability"][ent]["types"] = n
+                            except Exception as e:
+                                log.debug("Per-entity type count failed: %s", e)
+                else:
+                    rows = conn.execute(
+                        f"SELECT MIN({time_col})::TEXT, MAX({time_col})::TEXT "
+                        f"FROM {path_expr}"
+                    ).fetchall()
+                    if rows and rows[0][0] is not None:
+                        result["availability"] = {"min": rows[0][0], "max": rows[0][1]}
+                        if type_col:
+                            # Dataset-level vocabulary size (flat parquet has no
+                            # per-combo leaves). Best-effort — bounds survive a
+                            # failed count.
+                            try:
+                                n = conn.execute(
+                                    f"SELECT COUNT(DISTINCT {type_col}) FROM {path_expr}"
+                                ).fetchone()[0]
+                                if n:
+                                    result["availability"]["types"] = n
+                            except Exception as e:
+                                log.debug("Type count failed: %s", e)
             except Exception as e:
                 log.debug("Availability introspection failed: %s", e)
 

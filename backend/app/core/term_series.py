@@ -21,11 +21,12 @@ from typing import List, Optional
 from fastapi import HTTPException
 
 from .duckdb_client import get_duckdb_client, run_blocking
-from .query_utils import (
-    assign_bucket, build_hive_path, entity_base_path, get_bucket_config,
-    get_queryable_dims, handle_query_error, is_data_missing, latest_from_manifest,
-    load_system, parse_dates, resolve_bucket_count,
+from .duckdb_query import (
+    assign_bucket, bucket_override_key, build_hive_path, entity_base_path,
+    get_bucket_config, handle_query_error, is_data_missing, load_system,
+    resolve_bucket_count,
 )
+from .query_utils import get_queryable_dims, latest_from_manifest, parse_dates
 
 log = logging.getLogger(__name__)
 
@@ -117,21 +118,25 @@ def log_fast_path_miss(label: str, exc: Exception) -> None:
         )
 
 
-def bucket_files(dataset_obj, terms, local_id, n: int) -> List[str]:
+def bucket_files(dataset_obj, terms, *, entity_value=None, filter_vals=None) -> List[str]:
     """Glob paths of the hash-bucket directories that can contain *terms*.
 
-    Each bucket is globbed with ``/*.parquet`` — never a pinned filename:
-    DuckLake-backed buckets hold several uniquely-named
+    Generic over the dataset's level layout: *filter_vals* holds the
+    partition-level values ({"ngram_size": 1} for wikimedia, {"n": 1,
+    "lang": "en"} for reddit), *entity_value* the entity level when one
+    exists. Each bucket is globbed with ``/*.parquet`` — never a pinned
+    filename: DuckLake-backed buckets hold several uniquely-named
     ``ducklake-<uuid>.parquet`` files whose set changes on every compaction.
     """
     hb = get_bucket_config(dataset_obj)
-    n_buckets = resolve_bucket_count(hb, local_id, n)
+    key = bucket_override_key(dataset_obj, entity_value=entity_value, filter_vals=filter_vals)
+    n_buckets = resolve_bucket_count(hb, key)
     buckets = {assign_bucket(t, n_buckets) for t in terms}
     return [
         build_hive_path(
             dataset_obj,
-            filter_vals={"ngram_size": n},
-            entity_value=local_id,
+            filter_vals=filter_vals,
+            entity_value=entity_value,
             bucket_value=b,
             glob_suffix="/*.parquet",
         )
@@ -149,7 +154,7 @@ def fetch_sparkline_rows(
     ngram, date — or [] with a classified log line on failure (missing
     sparkline files are expected; anything else is a warning).
     """
-    files = bucket_files(sparkline_obj, terms, local_id, n)
+    files = bucket_files(sparkline_obj, terms, entity_value=local_id, filter_vals={"ngram_size": n})
     file_list = ", ".join(f"'{f}'" for f in files)
     placeholders = ", ".join(["?"] * len(terms))
     try:
@@ -178,23 +183,35 @@ async def run_top_ngrams(
     limit: int,
     metadata: dict,
     range_sep: str = "_",
+    count_col: Optional[str] = None,
 ) -> dict:
     """Shared top-ngrams endpoint body, executed off the event loop.
 
     Loads one types-counts system (or two for a temporal comparison keyed
     by date range) and formats the response. *range_sep* joins start/end
     in the comparison keys (wikimedia/reddit use "_", babynames "-").
+    *count_col* selects a measure from the registered count-column menu
+    (resolve via resolve_count_column); None uses the dataset default.
     """
+    if dates2 and parse_dates(dates) == parse_dates(dates2):
+        # Identical ranges collide into one JSON key and silently drop system 1
+        # — reject rather than return half the comparison with HTTP 200.
+        raise HTTPException(
+            status_code=400,
+            detail="dates and dates2 resolve to the same range; "
+                   "use different dates to compare two systems.",
+        )
+
     def _query():
         with handle_query_error(label):
             with get_duckdb_client().timed_connect() as conn:
                 dr1 = parse_dates(dates)
-                sys1 = load_system(conn, dataset_obj, local_id, dr1, filter_vals, limit)
+                sys1 = load_system(conn, dataset_obj, local_id, dr1, filter_vals, limit, count_col=count_col)
                 formatted1 = [{"types": t, "counts": c} for t, c in zip(sys1["types"], sys1["counts"])]
 
                 if dates2:
                     dr2 = parse_dates(dates2)
-                    sys2 = load_system(conn, dataset_obj, local_id, dr2, filter_vals, limit)
+                    sys2 = load_system(conn, dataset_obj, local_id, dr2, filter_vals, limit, count_col=count_col)
                     formatted2 = [{"types": t, "counts": c} for t, c in zip(sys2["types"], sys2["counts"])]
                     key1 = dr1[0] if dr1[0] == dr1[1] else f"{dr1[0]}{range_sep}{dr1[1]}"
                     key2 = dr2[0] if dr2[0] == dr2[1] else f"{dr2[0]}{range_sep}{dr2[1]}"

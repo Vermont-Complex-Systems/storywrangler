@@ -16,14 +16,14 @@ router = APIRouter()
 
 
 @router.get(
-    "/ngrams",
-    openapi_extra=docs.BABYNAMES_GET_BABYNAMES_TOP_NGRAMS,
+    "/top-ngrams",
+    openapi_extra={**docs.BABYNAMES_GET_BABYNAMES_TOP_NGRAMS, "x-dataset": "ngrams"},
 )
 async def get_babynames_top_ngrams(
     dates: str = Query(default="1991,1993", description="Year range for system 1. Single value '1991' or range '1991,1993'"),
     dates2: Optional[str] = Query(default=None, description="Optional second year range for temporal comparison"),
-    locations: str = Query(default="wikidata:Q30", description="Entity ID (e.g. 'wikidata:Q30') or local ID (e.g. 'united_states')"),
-    sex: Optional[str] = Query(default="M", description="Sex filter: M | F | None to omit"),
+    entity: str = Query(default="wikidata:Q30", description="Entity ID (e.g. 'wikidata:Q30') or local ID (e.g. 'united_states')."),
+    sex: Optional[str] = Query(default=None, description="Sex filter (M | F). Omitted = aggregate over both, per the filter-dimension convention."),
     limit: int = Query(default=100),
     db: AsyncSession = Depends(get_session),
 ):
@@ -33,11 +33,11 @@ async def get_babynames_top_ngrams(
     if not dataset_obj:
         raise HTTPException(status_code=404, detail="'babynames/ngrams' dataset not found")
 
-    em = await resolve_entity(db, "babynames", "ngrams", locations)
+    em = await resolve_entity(db, "babynames", "ngrams", entity)
 
     return await run_top_ngrams(
         dataset_obj, "babynames/ngrams", em.local_id, dates, dates2,
         {"sex": sex} if sex else {}, limit,
-        metadata={"location": locations, "sex": sex},
+        metadata={"location": entity, "sex": sex},
         range_sep="-",
     )

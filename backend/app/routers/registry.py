@@ -7,7 +7,7 @@ import re
 from typing import Any, Dict, List, Optional
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import load_only
 from sqlmodel import select
@@ -16,6 +16,8 @@ from storywrangler_schemas.registry import DatasetCreate, EntityRow
 
 from ..core.database import get_session
 from ..core.duckdb_client import get_admin_duckdb_client
+from ..core.mongo_client import mongo_introspect, run_blocking_mongo
+from ..core.openapi_menus import refresh_weight_menus
 from ..core.parquet_introspect import (
     _derive_bucket_config,
     _discover_levels,
@@ -104,7 +106,12 @@ def _validate_column_identifiers(dataset: DatasetCreate) -> None:
     declared: Dict[str, Any] = {}
     if dataset.endpoint_schema:
         declared["endpoint_schema.type_column"] = dataset.endpoint_schema.type_column
-        declared["endpoint_schema.count_column"] = dataset.endpoint_schema.count_column
+        cc = dataset.endpoint_schema.count_column
+        if isinstance(cc, list):
+            for col in cc:
+                declared[f"endpoint_schema.count_column[{col!r}]"] = col
+        else:
+            declared["endpoint_schema.count_column"] = cc
     if dataset.transform:
         declared["transform.time_dimension"] = dataset.transform.time_dimension
         for fd in dataset.transform.filter_dimensions or []:
@@ -162,11 +169,14 @@ def _validate_types_counts(dataset: DatasetCreate, derived: Dict[str, Any]) -> N
         )
 
     # 2. If we could read the schema, verify the declared columns exist.
+    # count_column may be a list (selectable measure menu) — every entry
+    # must exist, since any of them can reach SUM() via ?weight=.
     data_schema = derived.get("data_schema") or {}
     if data_schema:
-        type_col  = ep.type_column  or "types"
-        count_col = ep.count_column or "counts"
-        expected = [type_col, count_col]
+        type_col   = ep.type_column  or "types"
+        count_cols = ep.count_column or "counts"
+        count_cols = count_cols if isinstance(count_cols, list) else [count_cols]
+        expected = [type_col, *count_cols]
         if dataset.transform and dataset.transform.time_dimension:
             expected.append(dataset.transform.time_dimension)
         missing = [c for c in expected if c not in data_schema]
@@ -215,9 +225,10 @@ def _validate_time_series(dataset: DatasetCreate, derived: Dict[str, Any]) -> No
     data_schema = derived.get("data_schema") or {}
     if data_schema:
         time_col    = dataset.transform.time_dimension
-        count_col   = ep.count_column or "count"
+        count_cols  = ep.count_column or "count"
+        count_cols  = count_cols if isinstance(count_cols, list) else [count_cols]
         filter_cols = list(dataset.transform.filter_dimensions or [])
-        expected    = [time_col, count_col] + filter_cols
+        expected    = [time_col, *count_cols] + filter_cols
         missing     = [c for c in expected if c not in data_schema]
         if missing:
             raise HTTPException(
@@ -332,6 +343,7 @@ def _coerce_derived(derived: Dict[str, Any]) -> None:
 )
 async def register_dataset(
     dataset: DatasetCreate,
+    request: Request,
     response: Response,
     _: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
@@ -387,30 +399,71 @@ async def register_dataset(
                 if bucket_config:
                     derived["bucket_config"] = bucket_config
 
-    # 2. Introspect parquet files (read-only) — schema, filter_values, availability.
-    #    When the submitter provides data_schema, glob-based schema introspection
-    #    is skipped (allows registration during schema transitions).
-    try:
-        with get_admin_duckdb_client().timed_connect() as conn:
-            derived.update(
-                introspect(conn, dataset, provided_schema=dataset.data_schema,
-                           level_order=derived.get("level_order"))
+    # 2. Introspect the storage backend (read-only) — schema, filter_values,
+    #    availability. When the submitter provides data_schema, schema
+    #    introspection is skipped (allows registration during schema transitions).
+    #    mongodb datasets are pass-through: no DuckDB — best-effort pymongo
+    #    probes (sampled data_schema, distinct() filter_values, min/max
+    #    availability), same never-raises contract as parquet introspection.
+    if dataset.data_format == "mongodb":
+        derived.update(await run_blocking_mongo(lambda: mongo_introspect(dataset)))
+        if "data_schema" not in derived:
+            reason = derived.get("introspect_error", "")
+            hint = f" MongoDB error: {reason}" if reason else ""
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"Collection '{dataset.data_location}' is not accessible.{hint} "
+                    "Ensure MONGODB_URI is configured on the server and the "
+                    "database/collection exist, or provide data_schema in the "
+                    "registration payload to declare the authoritative schema."
+                ),
             )
-    except Exception as e:
-        log.warning("Parquet introspection failed for %s/%s: %s", dataset.domain, dataset.dataset_id, e)
-        derived["introspect_error"] = str(e)
+    else:
+        try:
+            with get_admin_duckdb_client().timed_connect() as conn:
+                derived.update(
+                    introspect(conn, dataset, provided_schema=dataset.data_schema,
+                               level_order=derived.get("level_order"))
+                )
+        except Exception as e:
+            log.warning("Parquet introspection failed for %s/%s: %s", dataset.domain, dataset.dataset_id, e)
+            derived["introspect_error"] = str(e)
 
-    if "data_schema" not in derived:
+        if "data_schema" not in derived:
+            reason = derived.get("introspect_error", "")
+            hint = f" DuckDB error: {reason}" if reason else ""
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"Data not accessible at '{dataset.data_location}'.{hint} "
+                    "Ensure the path exists and is available to the API before registering. "
+                    "If your files have inconsistent schemas (e.g. after a column was added or "
+                    "removed), provide data_schema in the registration payload to declare the "
+                    "authoritative schema and skip glob-based introspection."
+                ),
+            )
+
+    # 2b. Refuse to register data we can't serve. A parquet_hive dataset with a
+    #     time dimension resolves its "latest date" (and coverage) from
+    #     manifest.availability; an empty result means the data was unreachable
+    #     at registration (e.g. an NFS blip) — fail loudly instead of storing a
+    #     silent null that 404s at query time.
+    if (
+        dataset.data_format == "parquet_hive"
+        and dataset.transform and dataset.transform.time_dimension
+        and derived.get("level_order")
+        and not derived.get("availability")
+    ):
         reason = derived.get("introspect_error", "")
-        hint = f" DuckDB error: {reason}" if reason else ""
+        hint = f" ({reason})" if reason else ""
         raise HTTPException(
             status_code=422,
             detail=(
-                f"Data not accessible at '{dataset.data_location}'.{hint} "
-                "Ensure the path exists and is available to the API before registering. "
-                "If your files have inconsistent schemas (e.g. after a column was added or "
-                "removed), provide data_schema in the registration payload to declare the "
-                "authoritative schema and skip glob-based introspection."
+                f"Could not derive manifest.availability for "
+                f"'{dataset.domain}/{dataset.dataset_id}'.{hint} The data may be unreachable "
+                "(e.g. NFS). Refusing to register a dataset whose latest date can't be "
+                "resolved — retry when the data is reachable."
             ),
         )
 
@@ -510,6 +563,12 @@ async def register_dataset(
     # Refresh to avoid MissingGreenlet on lazy-loaded attributes after commit.
     await db.refresh(entry)
 
+    # Keep the OpenAPI weight enums in step with the registry: rebuild the
+    # menu snapshot and drop FastAPI's cached spec so the next /openapi.json
+    # request re-renders with this registration's count_column menu.
+    await refresh_weight_menus(db)
+    request.app.openapi_schema = None
+
     # Build full response after all fields (including derived) are persisted.
     msg: Dict[str, Any] = {
         "message": f"RegistryEntry '{dataset.dataset_id}' {action} successfully",
@@ -539,6 +598,48 @@ async def upsert_dataset_entities(
     return {"domain": domain, "dataset_id": dataset_id, "entities_upserted": count}
 
 
+@admin_router.delete("/{domain}/{dataset_id}")
+async def delete_dataset(
+    domain: str,
+    dataset_id: str,
+    _: None = Depends(get_admin_user),
+    db: AsyncSession = Depends(get_session),
+):
+    """Retire a dataset: remove all registry versions and its entity mappings.
+
+    Data on disk is untouched — a retired dataset can be re-registered at any time.
+    """
+    result = await db.execute(
+        select(RegistryEntry).where(
+            RegistryEntry.domain == domain, RegistryEntry.dataset_id == dataset_id
+        )
+    )
+    entries = result.scalars().all()
+    if not entries:
+        raise HTTPException(status_code=404, detail=f"RegistryEntry '{domain}/{dataset_id}' not found")
+
+    em_result = await db.execute(
+        select(EntityMapping).where(
+            EntityMapping.domain == domain, EntityMapping.dataset_id == dataset_id
+        )
+    )
+    entity_rows = em_result.scalars().all()
+
+    for row in entity_rows:
+        await db.delete(row)
+    for entry in entries:
+        await db.delete(entry)
+    await db.commit()
+    log.info("Retired dataset '%s/%s' (%d versions, %d entity rows)",
+             domain, dataset_id, len(entries), len(entity_rows))
+    return {
+        "domain": domain,
+        "dataset_id": dataset_id,
+        "versions_deleted": len(entries),
+        "entities_deleted": len(entity_rows),
+    }
+
+
 # ── Public endpoints ───────────────────────────────────────────────────────────
 
 @router.get(
@@ -553,12 +654,16 @@ async def list_valid_domains():
 @router.get("/", openapi_extra=_ex({"datasets": [_EXAMPLE_DATASET], "total": 1}))
 async def list_registered_datasets(db: AsyncSession = Depends(get_session)):
     """List all registered datasets (latest version per dataset)."""
-    # DISTINCT ON (domain, dataset_id) ordered by created_at DESC gives the
-    # most recently registered version for each dataset identity.
+    # DISTINCT ON (domain, dataset_id) with the 'latest' slot ordered first —
+    # a newer semver snapshot must not shadow the mutable slot (see
+    # get_latest_entry for the same rule).
     result = await db.execute(
         select(RegistryEntry)
         .distinct(RegistryEntry.domain, RegistryEntry.dataset_id)
-        .order_by(RegistryEntry.domain, RegistryEntry.dataset_id, RegistryEntry.created_at.desc())
+        .order_by(
+            RegistryEntry.domain, RegistryEntry.dataset_id,
+            (RegistryEntry.version != "latest"), RegistryEntry.created_at.desc(),
+        )
     )
     datasets = result.scalars().all()
     return {
@@ -670,6 +775,8 @@ async def get_dataset_info(
         return _entry_response(ds, manifest=manifest_full)
 
     # Non-full: lightweight query — skips filter_values and partition_index.
+    # Same version precedence as get_latest_entry: the 'latest' slot serves
+    # unless a version is pinned; snapshots must not shadow it.
     where = [RegistryEntry.domain == domain, RegistryEntry.dataset_id == dataset_id]
     if version:
         where.append(RegistryEntry.version == version)
@@ -677,7 +784,7 @@ async def get_dataset_info(
         select(RegistryEntry)
         .options(load_only(*_SUMMARY_COLUMNS))
         .where(*where)
-        .order_by(RegistryEntry.created_at.desc())
+        .order_by((RegistryEntry.version != "latest"), RegistryEntry.created_at.desc())
         .limit(1)
     )
     ds = result.scalar_one_or_none()

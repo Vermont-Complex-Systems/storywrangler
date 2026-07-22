@@ -71,7 +71,7 @@ def main() -> None:
     d1, d2 = "2024-11-06", "2025-09-10"
     allo = get(
         f"/wikimedia/top-ngrams?dates={d1}&dates2={d2}"
-        f"&locations={ENTITY}&granularity=daily&n=1&limit=2000"
+        f"&entity={ENTITY}&granularity=daily&n=1&limit=2000"
     )
     allotax = {
         "title": [f"Wikipedia (US) · {d1}", f"Wikipedia (US) · {d2}"],

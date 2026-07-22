@@ -334,6 +334,58 @@ class TestAvailabilityNoTimeDimension:
         assert "availability" not in result
 
 
+class TestAvailabilityUnreadableInFileTime:
+    """Fail loud, never store a silent null.
+
+    reddit shape: n/lang partitions with year/month time_partitions and the
+    `date` column INSIDE the files. When the leaves can't be read (an NFS blip,
+    reproduced here with empty leaves) the availability walk finds partitions
+    but derives no bounds. It must raise rather than return an empty index the
+    caller would silently accept — so introspect surfaces the reason and omits
+    availability, and the registration guard then rejects the dataset with 422.
+
+    Regression: a swallowed read failure used to store availability=null and
+    report registration success, 404-ing every no-date query afterwards.
+    """
+
+    LEVEL_ORDER = [
+        {"column": "n", "type": "filter", "default_value": "1"},
+        {"column": "lang", "type": "filter", "default_value": "en"},
+        {"column": "year", "type": "time_partition", "default_value": "2020"},
+        {"column": "month", "type": "time_partition", "default_value": "1"},
+    ]
+
+    def _tree_with_empty_leaves(self, tmp_path):
+        """Valid hive structure (so level_order derives) but no parquet in the
+        leaves — stands in for data DuckDB cannot read."""
+        root = tmp_path / "reddit"
+        for year, month in (("2020", "1"), ("2021", "12")):
+            (root / "n=1" / "lang=en" / f"year={year}" / f"month={month}").mkdir(parents=True)
+        return str(root)
+
+    def test_surfaces_error_and_omits_availability(self, conn, tmp_path):
+        ds = _ns(
+            data_location=self._tree_with_empty_leaves(tmp_path),
+            data_format="parquet_hive",
+            transform=_ns(
+                time_dimension="date",  # inside the files, not a hive level
+                filter_dimensions=["lang", "n"],
+                time_partitions=["year", "month"],
+                hash_bucket=None,
+            ),
+            entity_mapping=None,
+        )
+        # provided_schema skips the (would-fail) schema DESCRIBE so the
+        # availability walk is what's under test.
+        result = introspect(
+            conn, ds,
+            provided_schema={"ngram": "VARCHAR", "count": "BIGINT", "date": "DATE"},
+            level_order=self.LEVEL_ORDER,
+        )
+        assert "availability" not in result           # never a silent null
+        assert "availability" in result.get("introspect_error", "")  # reason surfaced
+
+
 class TestAvailabilityTypeCounts:
     """types-counts datasets gain a `types` (vocabulary size) key per leaf.
 
@@ -535,11 +587,12 @@ class TestDeriveBucketConfig:
         assert config["column"] == "bucket"
         # default_count is the mode — 4 appears 2 times (CA×1, CA×2)
         assert config["default_count"] == 4
-        assert "US" in config["overrides"]
-        assert config["overrides"]["US"]["1"] == 8
-        assert config["overrides"]["US"]["2"] == 16
-        # CA matches default, so no override entry
-        assert "CA" not in config["overrides"]
+        # Override keys are the expanded level values joined in level_order
+        # order (partition then entity here: ngram_size/country).
+        assert config["overrides"]["1/US"] == 8
+        assert config["overrides"]["2/US"] == 16
+        # CA matches default, so no override entries
+        assert not any(k.endswith("/CA") for k in config["overrides"])
 
     def test_no_hash_bucket_level(self, tmp_path):
         """No hash_bucket type in level_order → returns None."""

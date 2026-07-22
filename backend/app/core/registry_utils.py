@@ -16,10 +16,13 @@ async def get_latest_entry(
     dataset_id: str,
     version: Optional[str] = None,
 ) -> Optional[RegistryEntry]:
-    """Fetch a registry entry, defaulting to the most recently created version.
+    """Fetch a registry entry, defaulting to the mutable 'latest' slot.
 
-    When version is None, returns the entry with the latest created_at timestamp
-    (which is the 'latest' mutable slot if one exists, or the most recent snapshot).
+    When version is None, the 'latest' slot serves if it exists; datasets that
+    only publish immutable snapshots fall back to the most recently created
+    one. Ordering by created_at alone is wrong here: cutting a semver snapshot
+    creates a *newer* row, which must not shadow the mutable slot (upserts
+    update latest's contents but never its created_at).
     When version is specified, returns that exact version or None.
     """
     q = select(RegistryEntry).where(
@@ -29,6 +32,8 @@ async def get_latest_entry(
     if version:
         q = q.where(RegistryEntry.version == version)
     else:
-        q = q.order_by(RegistryEntry.created_at.desc()).limit(1)
+        q = q.order_by(
+            (RegistryEntry.version != "latest"), RegistryEntry.created_at.desc()
+        ).limit(1)
     result = await db.execute(q)
     return result.scalar_one_or_none()

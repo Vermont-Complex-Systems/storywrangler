@@ -9,16 +9,23 @@ Currently includes:
 """
 
 import math
-from importlib.metadata import PackageNotFoundError, version as pkg_version
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from storywrangler_schemas.coercion import coerce_scalar
+from ..core.allotax_utils import (
+    sanitize_floats as _sanitize_floats,
+    allotax_version as _allotax_version,
+    wordshift_version as _wordshift_version,
+)
 from ..core.database import get_session
 from ..core.duckdb_client import get_duckdb_client, run_blocking
+from ..core.mongo_client import run_blocking_mongo
+from ..core.mongo_query import load_instrument_system
+from ..core.duckdb_query import handle_query_error, load_system
 from ..core.query_utils import (
-    get_partition_defaults, get_queryable_dims,
-    handle_query_error, latest_from_manifest, load_system, parse_dates, resolve_entity,
+    get_partition_defaults, get_queryable_dims, latest_from_manifest,
+    parse_dates, resolve_count_column, resolve_entity,
 )
 from ..core.registry_utils import get_latest_entry
 from . import openapi_docs as docs
@@ -59,30 +66,26 @@ def _validate_and_coerce_filters(filter_dicts: list, filter_values: dict) -> Non
                 vals_dict[dim] = coerced
 
 
-def _sanitize_floats(obj):
-    """Replace NaN → null, ±Infinity → string, so json.dumps won't choke."""
-    if isinstance(obj, float):
-        if math.isnan(obj):
-            return None
-        if math.isinf(obj):
-            return "Infinity" if obj > 0 else "-Infinity"
-        return obj
-    if isinstance(obj, dict):
-        return {k: _sanitize_floats(v) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [_sanitize_floats(v) for v in obj]
-    return obj
+def _parse_reference_value(rv: Optional[str]):
+    """Coerce the ``reference_value`` query param into what wordshift accepts.
 
-
-def _allotax_version() -> str:
+    Query params arrive as strings, but the wordshift binding wants ``None``,
+    the literal string ``"average"``, or a real Python float (a numeric *string*
+    is rejected). Maps: absent/blank → ``None`` (system-1 weighted mean),
+    ``"average"`` → ``"average"``, a numeric string → ``float``.
+    """
+    if rv is None or rv.strip() == "":
+        return None
+    if rv.strip().lower() == "average":
+        return "average"
     try:
-        return pkg_version("allotax")
-    except PackageNotFoundError:
-        try:
-            import allotax
-            return getattr(allotax, "__version__", "unknown")
-        except ImportError:
-            return "not installed"
+        return float(rv)
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid reference_value: {rv!r}. Use 'average' or a number "
+                   "(e.g. 5.0 for labMT's neutral midpoint).",
+        )
 
 
 @router.get(
@@ -99,6 +102,7 @@ async def allotaxonometer(
     dates2: Optional[str] = Query(None, description="Date/year range for system 2. Omit to load all time."),
     alpha: str = Query("1.0", description="RTD alpha parameter (number or 'inf')"),
     alphas: Optional[str] = Query(None, description="Comma-separated alphas for multi-alpha mode, e.g. '0.5,1.0,inf'"),
+    weight: Optional[str] = Query(None, description="Count measure for both systems — one of the dataset's endpoint_schema.count_column entries. Defaults to the first registered measure."),
     ngram_limit: int = Query(10000, description="Max types to load per system before computing"),
     wordshift_limit: int = Query(200, description="Truncate wordshift output to top N entries"),
     db: AsyncSession = Depends(get_session),
@@ -153,6 +157,23 @@ async def allotaxonometer(
     # Validate and coerce filter values against introspected distinct values.
     _validate_and_coerce_filters([filter_vals1, filter_vals2], fv)
 
+    # mongodb pass-through datasets load systems via the router-registered
+    # hook (host-form data_location keeps db/collection routing in the bespoke
+    # router). Single dates only: range aggregation is parquet territory.
+    is_mongo = dataset_obj.data_format == "mongodb"
+    if is_mongo:
+        for label, val in (("dates", dates), ("dates2", dates2)):
+            if not val or "," in val:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"{label} must be a single YYYY-MM-DD date for mongodb datasets — "
+                           "range aggregation is not supported on the pass-through path.",
+                )
+        # System 2 inherits system 1's routing/filters unless overridden (?lang2=...)
+        filter_vals2 = {**filter_vals1, **filter_vals2}
+
+    count_col = resolve_count_column(dataset_obj, weight)
+
     dr1 = parse_dates(dates)
     dr2 = parse_dates(dates2)
 
@@ -177,10 +198,18 @@ async def allotaxonometer(
         )
 
     def _sync():
-        with handle_query_error(f"{domain}/{dataset}"):
-            with get_duckdb_client().timed_connect() as conn:
-                sys1 = load_system(conn, dataset_obj, local_id1, dr1, filter_vals1, ngram_limit)
-                sys2 = load_system(conn, dataset_obj, local_id2, dr2, filter_vals2, ngram_limit)
+        if is_mongo:
+            sys1 = load_instrument_system(dataset_obj, domain, filter_vals1, dates, ngram_limit, count_col)
+            sys2 = load_instrument_system(dataset_obj, domain, filter_vals2, dates2, ngram_limit, count_col)
+            if not sys1["types"]:
+                raise HTTPException(status_code=404, detail=f"No data for system 1 ({filter_vals1}, date={dates})")
+            if not sys2["types"]:
+                raise HTTPException(status_code=404, detail=f"No data for system 2 ({filter_vals2}, date={dates2})")
+        else:
+            with handle_query_error(f"{domain}/{dataset}"):
+                with get_duckdb_client().timed_connect() as conn:
+                    sys1 = load_system(conn, dataset_obj, local_id1, dr1, filter_vals1, ngram_limit, count_col=count_col)
+                    sys2 = load_system(conn, dataset_obj, local_id2, dr2, filter_vals2, ngram_limit, count_col=count_col)
 
         try:
             if alphas:
@@ -199,6 +228,7 @@ async def allotaxonometer(
                 "meta": {
                     "system1": {"entity": entity, "dates": dates, "filters": filter_vals1, "types": len(sys1["types"])},
                     "system2": {"entity": entity2, "dates": dates2, "filters": filter_vals2, "types": len(sys2["types"])},
+                    "weight": count_col,
                     "domain": domain,
                     "dataset": dataset,
                     "dataset_version": dataset_obj.version,
@@ -208,7 +238,7 @@ async def allotaxonometer(
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Allotax computation failed: {str(e)}")
 
-    return await run_blocking(_sync)
+    return await (run_blocking_mongo(_sync) if is_mongo else run_blocking(_sync))
 
 
 @router.get("/rtd")
@@ -221,6 +251,7 @@ async def rank_turbulence_divergence(
     dates2: Optional[str] = Query(None, description="Reference date, e.g. '2026-02-10'"),
     alpha: str = Query("0.25", description="RTD alpha parameter (number or 'inf')"),
     alphas: Optional[str] = Query(None, description="Comma-separated alphas for multi-alpha mode, e.g. '0.25,1.0,inf'"),
+    weight: Optional[str] = Query(None, description="Count measure for both systems — one of the dataset's endpoint_schema.count_column entries. Defaults to the first registered measure."),
     ngram_limit: int = Query(10000, description="Max types to load per system (0 = no limit)"),
     wordshift_limit: int = Query(10000, description="Max wordshift entries to return (0 = no limit)"),
     db: AsyncSession = Depends(get_session),
@@ -278,9 +309,23 @@ async def rank_turbulence_divergence(
 
     _validate_and_coerce_filters([filter_vals, filter_vals2], fv)
 
+    is_mongo = dataset_obj.data_format == "mongodb"
+    if is_mongo:
+        for label, val in (("dates", dates), ("dates2", dates2)):
+            if not val or "," in val:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"{label} is required and must be a single YYYY-MM-DD date for "
+                           "mongodb datasets — range aggregation is not supported on the "
+                           "pass-through path.",
+                )
+        filter_vals2 = {**filter_vals, **filter_vals2}
+
     # Same entity for both systems (date-vs-date comparison)
     if not filter_vals2:
         filter_vals2 = dict(filter_vals)
+
+    count_col = resolve_count_column(dataset_obj, weight)
 
     dr1 = parse_dates(dates)
     dr2 = parse_dates(dates2)
@@ -304,11 +349,15 @@ async def rank_turbulence_divergence(
         latest_date = latest_from_manifest(dataset_obj, local_id, filter_vals.get("granularity"))
 
     def _sync():
-        with timed("query", "DuckDB data load"):
-            with handle_query_error(f"{domain}/{dataset}"):
-                with get_duckdb_client().timed_connect() as conn:
-                    target = load_system(conn, dataset_obj, local_id, dr1, filter_vals, ngram_limit)
-                    ref = load_system(conn, dataset_obj, local_id, dr2, filter_vals2, ngram_limit)
+        with timed("query", "data load"):
+            if is_mongo:
+                target = load_instrument_system(dataset_obj, domain, filter_vals, dates, ngram_limit, count_col)
+                ref = load_instrument_system(dataset_obj, domain, filter_vals2, dates2, ngram_limit, count_col)
+            else:
+                with handle_query_error(f"{domain}/{dataset}"):
+                    with get_duckdb_client().timed_connect() as conn:
+                        target = load_system(conn, dataset_obj, local_id, dr1, filter_vals, ngram_limit, count_col=count_col)
+                        ref = load_system(conn, dataset_obj, local_id, dr2, filter_vals2, ngram_limit, count_col=count_col)
 
         if not target["types"]:
             raise HTTPException(status_code=404, detail=f"No data for target date {dates}")
@@ -360,4 +409,160 @@ async def rank_turbulence_divergence(
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"RTD computation failed: {str(e)}")
 
-    return await run_blocking(_sync)
+    return await (run_blocking_mongo(_sync) if is_mongo else run_blocking(_sync))
+
+
+@router.get("/wordshift")
+async def weighted_avg_wordshift(
+    request: Request,
+    domain: str = Query("wikimedia", description="Domain owning the dataset"),
+    dataset: str = Query("ngrams", description="Dataset ID within the domain"),
+    entity: Optional[str] = Query(None, description="Global entity ID for system 1, e.g. 'wikidata:Q30' (United States). Optional — omit for datasets using filter_dimensions as the comparison axis."),
+    entity2: Optional[str] = Query(None, description="Global entity ID for system 2, e.g. 'wikidata:Q145' (United Kingdom). Omit to reuse system 1's entity (e.g. date-vs-date)."),
+    dates: Optional[str] = Query(None, description="Date/year range for system 1. Single value '2024-10-01' or range '2024-10-01,2024-10-31'. Omit to load all time."),
+    dates2: Optional[str] = Query(None, description="Date/year range for system 2. Omit to load all time."),
+    lexicon: str = Query("labMT_English", description="labMT language lexicon: labMT_English, labMT_French, labMT_German, labMT_Spanish, labMT_Portuguese, labMT_Russian, labMT_Chinese, labMT_Hindi, labMT_Indonesian, labMT_Korean (short names like 'English' also accepted)."),
+    reference_value: Optional[str] = Query(None, description="Score partition point: omit for system 1's frequency-weighted mean (the baseline), 'average' (equivalent), or a number like 5.0 (labMT's neutral midpoint)."),
+    weight: Optional[str] = Query(None, description="Count measure for both systems — one of the dataset's endpoint_schema.count_column entries. Defaults to the first registered measure."),
+    ngram_limit: int = Query(10000, description="Max types to load per system before computing (0 = no limit)"),
+    wordshift_limit: int = Query(200, description="Truncate per-word output to the top N by |shift| (0 = all). Component sums are always computed over the full vocabulary."),
+    db: AsyncSession = Depends(get_session),
+):
+    """Weighted-average sentiment word shift between two type-frequency systems.
+
+    Scores each system's vocabulary with a bundled labMT happiness lexicon and
+    returns each word's signed contribution to the change in average sentiment,
+    plus the six component sums needed to render a shift graph. This is the
+    sentiment analogue of `/rtd`: same data-loading path, a different instrument.
+
+    **System 1 is the baseline; system 2 is read as a shift away from it.** The
+    two systems may differ on any axis (like `/allotax`):
+
+    - **entity vs entity** — e.g. US Wikipedia vs UK Wikipedia
+    - **dates vs dates** — e.g. October vs November (omit `entity2` to reuse the entity)
+    - **filter-only** — e.g. `?sex=M&sex2=F`
+
+    Positive `shift_score` = the word pushed system 2's average sentiment up
+    relative to system 1. `s_avg_1`/`s_avg_2` are the two weighted-mean scores.
+
+    > **Lexicon** — wikipedia ngrams are English (enwiki), so `labMT_English`
+    > is correct for every entity. Override `lexicon` only for corpora in
+    > another language.
+
+    > **Filter dimensions** — look up available filters via
+    > `GET /registry/{domain}/{dataset_id}` (`transform.filter_dimensions`) and
+    > pass them with the `dim` / `dim2` suffix convention.
+    """
+    dataset_obj = await get_latest_entry(db, domain, dataset)
+    if not dataset_obj:
+        raise HTTPException(status_code=404, detail=f"Dataset '{domain}/{dataset}' not found")
+
+    ep = dataset_obj.endpoint_schema
+    if not ep or ep.get("type") != "types-counts":
+        raise HTTPException(
+            status_code=400,
+            detail="Dataset does not support the types-counts endpoint. Register with endpoint_schema.type='types-counts'.",
+        )
+
+    ref_val = _parse_reference_value(reference_value)
+
+    fv = dataset_obj.filter_values or {}
+    all_dims = get_queryable_dims(dataset_obj)
+    defaults = get_partition_defaults(dataset_obj)
+
+    # ?dim=val → system 1, ?dim2=val → system 2 (same convention as /allotax).
+    qp = request.query_params
+    filter_vals1 = {dim: qp[dim]       for dim in all_dims if dim in qp}
+    filter_vals2 = {dim: qp[f"{dim}2"] for dim in all_dims if f"{dim}2" in qp}
+
+    _apply_defaults(filter_vals1, defaults)
+    _apply_defaults(filter_vals2, defaults)
+
+    _validate_and_coerce_filters([filter_vals1, filter_vals2], fv)
+
+    is_mongo = dataset_obj.data_format == "mongodb"
+    if is_mongo:
+        for label, val in (("dates", dates), ("dates2", dates2)):
+            if not val or "," in val:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"{label} must be a single YYYY-MM-DD date for mongodb datasets — "
+                           "range aggregation is not supported on the pass-through path.",
+                )
+        # System 2 inherits system 1's routing/filters unless overridden (?lang2=...)
+        filter_vals2 = {**filter_vals1, **filter_vals2}
+
+    count_col = resolve_count_column(dataset_obj, weight)
+
+    dr1 = parse_dates(dates)
+    dr2 = parse_dates(dates2)
+
+    has_entity_mapping = bool((dataset_obj.entity_mapping or {}).get("local_id_column"))
+    if has_entity_mapping and entity:
+        local_id1 = (await resolve_entity(db, domain, dataset, entity)).local_id
+    else:
+        local_id1 = None
+    if has_entity_mapping and entity2:
+        local_id2 = (await resolve_entity(db, domain, dataset, entity2)).local_id
+    else:
+        # reuse system 1's entity so the hive path pins the correct partition
+        # for both systems (date-vs-date / filter-only mode).
+        local_id2 = local_id1
+
+    try:
+        import wordshift
+    except ImportError:
+        raise HTTPException(
+            status_code=503,
+            detail="wordshift module not available. Install via: pip install wordshift",
+        )
+
+    # Validate the lexicon up front (cheap) so a bad name fails before the load.
+    try:
+        wordshift.weighted_avg_shift({}, {}, lexicon=lexicon)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"Unknown lexicon {lexicon!r}: {e}")
+
+    def _sync():
+        if is_mongo:
+            sys1 = load_instrument_system(dataset_obj, domain, filter_vals1, dates, ngram_limit, count_col)
+            sys2 = load_instrument_system(dataset_obj, domain, filter_vals2, dates2, ngram_limit, count_col)
+        else:
+            with handle_query_error(f"{domain}/{dataset}"):
+                with get_duckdb_client().timed_connect() as conn:
+                    sys1 = load_system(conn, dataset_obj, local_id1, dr1, filter_vals1, ngram_limit, count_col=count_col)
+                    sys2 = load_system(conn, dataset_obj, local_id2, dr2, filter_vals2, ngram_limit, count_col=count_col)
+
+        if not sys1["types"]:
+            raise HTTPException(status_code=404, detail=f"No data for system 1 ({filter_vals1}, dates={dates})")
+        if not sys2["types"]:
+            raise HTTPException(status_code=404, detail=f"No data for system 2 ({filter_vals2}, dates={dates2})")
+
+        # load_system returns parallel {types, counts}; wordshift wants {word: freq}.
+        t2f1 = dict(zip(sys1["types"], sys1["counts"]))
+        t2f2 = dict(zip(sys2["types"], sys2["counts"]))
+
+        try:
+            result = wordshift.weighted_avg_shift(
+                t2f1, t2f2, lexicon=lexicon, reference_value=ref_val, top_n=wordshift_limit,
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=f"wordshift rejected input: {e}")
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"wordshift computation failed: {str(e)}")
+
+        return _sanitize_floats({
+            **result,
+            "meta": {
+                "system1": {"entity": entity, "dates": dates, "filters": filter_vals1, "types": len(sys1["types"])},
+                "system2": {"entity": entity2, "dates": dates2, "filters": filter_vals2, "types": len(sys2["types"])},
+                "lexicon": lexicon,
+                "weight": count_col,
+                "domain": domain,
+                "dataset": dataset,
+                "dataset_version": dataset_obj.version,
+                "wordshift_version": _wordshift_version(),
+            },
+        })
+
+    return await (run_blocking_mongo(_sync) if is_mongo else run_blocking(_sync))

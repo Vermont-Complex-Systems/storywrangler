@@ -14,10 +14,12 @@ from app.core.auth import get_password_hash
 from app.core.config import settings
 from app.core.database import async_session_factory, init_db
 from app.core.exceptions import DataNotAvailableError, QueryError, QueryTimeoutError
+from app.core.mongo_client import close_mongo, ping_mongo
+from app.core.openapi_menus import install_dynamic_openapi, refresh_weight_menus
 from app.core.timing import get_timings, init_timings
 from app.models.auth import User
 from app.core.health_check import health_check_loop
-from app.routers import auth, babynames, health, open_academic_analytics, reddit, registry, scisciDB, storywrangler, wikimedia, zoning_bylaws
+from app.routers import auth, babynames, domain_root, health, open_academic_analytics, reddit, registry, scisciDB, storywrangler, twitter, wikimedia, zoning_bylaws
 from storywrangler_mcp.server import mcp as mcp_server
 
 log = logging.getLogger(__name__)
@@ -75,6 +77,13 @@ async def lifespan(_app: FastAPI):
     _warn_default_credentials()
     await init_db()
     await seed_admin()
+    # Optional — logs and continues when MONGODB_URI is unset or Mongo is down;
+    # only mongodb pass-through datasets need it.
+    await ping_mongo()
+    # Snapshot registered count-column menus so the OpenAPI spec can enumerate
+    # weight values straight from the registry (see core/openapi_menus.py).
+    async with async_session_factory() as db:
+        await refresh_weight_menus(db)
     health_task = asyncio.create_task(health_check_loop())
     async with mcp_server.session_manager.run():
         yield
@@ -83,6 +92,7 @@ async def lifespan(_app: FastAPI):
         await health_task
     except asyncio.CancelledError:
         pass
+    close_mongo()
 
 
 app = FastAPI(
@@ -91,6 +101,7 @@ app = FastAPI(
     description="Text analysis platform API",
     lifespan=lifespan,
 )
+install_dynamic_openapi(app)
 
 app.add_middleware(
     CORSMiddleware,
@@ -188,10 +199,13 @@ DOMAIN_ROUTERS = {
     "wikimedia": wikimedia.router,
     "open-academic-analytics": open_academic_analytics.router,
     "scisciDB": scisciDB.router,
+    "twitter": twitter.router,
     "vt-zoning-atlas": zoning_bylaws.router,
 }
 for _domain, _router in DOMAIN_ROUTERS.items():
     app.include_router(_router, prefix=f"/{_domain}", tags=[_domain])
+    # GET /{domain} — generic root listing the domain's endpoints + datasets.
+    app.add_api_route(f"/{_domain}", domain_root.make_endpoint(_domain), tags=[_domain])
 registry.VALID_DOMAINS = set(DOMAIN_ROUTERS)
 
 app.include_router(health.router, prefix="/health", tags=["health"])
@@ -214,7 +228,7 @@ async def platform_version():
 
     Useful for debugging, reproducibility, and pinning API clients to a known
     software stack. The `schemas` version records the registration contract in
-    effect; `duckdb` and `allotax` versions govern query results.
+    effect; `duckdb`, `allotax`, and `wordshift` versions govern query results.
     """
     import duckdb
 
@@ -232,9 +246,19 @@ async def platform_version():
         except ImportError:
             allotax_ver = "not installed"
 
+    try:
+        wordshift_ver = pkg_version("wordshift")
+    except PackageNotFoundError:
+        try:
+            import wordshift
+            wordshift_ver = getattr(wordshift, "__version__", "unknown")
+        except ImportError:
+            wordshift_ver = "not installed"
+
     return {
         "api": app.version,
         "schemas": schemas_ver,
         "duckdb": duckdb.__version__,
         "allotax": allotax_ver,
+        "wordshift": wordshift_ver,
     }

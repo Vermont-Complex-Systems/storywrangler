@@ -4,16 +4,42 @@ Decisions made during development. Read this before suggesting schema or query c
 
 ---
 
-## Data formats: parquet only
+## Data formats: parquet first-class, mongodb pass-through
 
-Storywrangler accepts exactly two storage formats from submitters:
+Storywrangler accepts three storage formats from submitters:
 
 - `parquet` — single file or flat directory
 - `parquet_hive` — hive-partitioned directory tree (all partition levels use `col=val` naming)
+- `mongodb` — pass-through: served from a live MongoDB collection (guest format, see below)
 
 **Why not ducklake or duckdb:** Both were dropped because at query time they resolved
 to `read_parquet()` anyway. DuckLake catalogs were bypassed; duckdb with `table_files`
 was just parquet under a path convention. No legacy formats are tolerated.
+
+**Why mongodb is different:** it does *not* resolve to `read_parquet()` — it is a
+genuinely different backend, admitted for corpora where migration is not worth it
+(twitter ngrams). It is a pass-through format, not a first-class one:
+
+- `data_location` is a non-secret locator — a literal `<database>/<collection>`
+  (sampled at registration), a Mongo host (e.g. `wranglerdb01a.uvm.edu:27017`,
+  signalling where the data lives while a bespoke router owns db/collection
+  routing), or a `{placeholder}` routing template. Host/template forms need an
+  explicit `data_schema`. Credentials never appear here — the connection URI is
+  server config (`MONGODB_URI`). twitter uses the host form; its layout
+  (n-gram size → database, language → collection) is hardcoded in the router.
+- No level_order, no hash buckets, no `load_system()` — served by a bespoke router
+  (`routers/twitter.py`) via `core/mongo_client.py`.
+- Registration skips DuckDB introspection; `mongo_introspect()` does best-effort
+  pymongo probes instead (sampled `data_schema`, `distinct()` → `filter_values`,
+  min/max → `manifest.availability` as flat `{"min", "max"}`).
+- Schema-level guards (in `DatasetCreate.validate_mongodb_constraints`): location
+  must be `db/collection`, `hash_bucket` rejected.
+- **Scope guardrail:** mongo queries are equality filters + time range + sort/limit
+  only — never aggregation pipelines. The moment an endpoint needs an aggregation,
+  that slice of the data wants to be parquet. This is what keeps the pass-through
+  from re-growing into the old half-Mongo half-parquet bifurcation.
+- Timeouts use Mongo's native `maxTimeMS` (`ExecutionTimeout` → 504); blocking
+  pymongo work runs on a dedicated executor (`run_blocking_mongo`), not DuckDB's.
 
 ---
 
@@ -67,6 +93,14 @@ Each top-level field answers a distinct question. Do not conflate them.
 Only three fields: endpoint type and the column names for types and counts.
 No time dimension, no filter dimensions, no granularities, no ngram_sizes here.
 
+`count_column` may be a **list** of selectable measure columns (first = default)
+when the data carries several alternative measures of the same count — e.g.
+reddit's content type × weighting columns. Endpoints expose the choice as a
+`?weight=` query param; `resolve_count_column()` in `core/query_utils.py`
+validates it against the registered list (which doubles as the SQL-injection
+allowlist) and `load_system(count_col=...)` applies it. Stored rank columns
+are canonical (pipeline-side) and do not switch with the weight.
+
 ### `transform` — query slice axes
 
 For `parquet_hive`, most of the transform is auto-discovered from the hive directory
@@ -106,7 +140,7 @@ Neither field includes the entity column — that is handled by `entity_mapping.
 **Stored format** — auto-derived at registration by `_derive_bucket_config()`:
 
 ```python
-{"column": "ngram_bucket", "default_count": 1, "overrides": {"United States": {"1": 16, "2": 32}}}
+{"column": "ngram_bucket", "default_count": 1, "overrides": {"1/United States": 16, "2/United States": 32}}
 ```
 
 The submitter declares only which hive partition column holds the bucket ID.
@@ -133,12 +167,15 @@ The query layer computes the bucket at request time via `assign_bucket()`:
 - Seed 0 (the default `hash_seed`) matches DuckDB/DuckLake's `murmur3_32()` default.
 - Bucket count is per-dataset registration (e.g. US gets 32, smaller countries get 16).
 - `default_count` is the fallback when no override matches.
-- `overrides` is a nested dict: `entity → {partition_dim_value → count}`.
-  Resolution: `overrides[entity][str(dim_value)]` → `default_count`.
+- `overrides` is a flat dict keyed by the expanded level values above the
+  bucket level (entity and partition dims), joined in level_order order —
+  valid with or without an entity level (e.g. reddit's `"1/en"` for n/lang).
+  Resolution: `bucket_override_key()` builds the request's key,
+  `overrides[key]` → `default_count`.
 - Hash buckets are routing-only, not query axes.
-- Helpers in `core/query_utils.py`: `assign_bucket()` (imported from
+- Helpers in `core/duckdb_query.py`: `assign_bucket()` (imported from
   `storywrangler_schemas.hashing`), `get_bucket_config()`,
-  `resolve_bucket_count()` — generic, usable by any router.
+  `bucket_override_key()`, `resolve_bucket_count()` — generic, usable by any router.
 
 ### `entity_mapping.local_id_column` — dual role (documented, not a bug)
 
@@ -179,7 +216,7 @@ on `GET ?full=true`.
 
 ## Query layer: `load_system()` is format-agnostic
 
-`load_system()` in `core/query_utils.py` uses identical WHERE-based logic for both
+`load_system()` in `core/duckdb_query.py` (the parquet/DuckDB query engine; format-agnostic helpers stay in `core/query_utils.py`) uses identical WHERE-based logic for both
 formats. The only difference is the FROM expression:
 
 ```python

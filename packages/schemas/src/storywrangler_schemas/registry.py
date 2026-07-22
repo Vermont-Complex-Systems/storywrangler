@@ -245,12 +245,16 @@ class EndpointSchemaConfig(BaseModel):
             "Defaults to 'types'. Declare only when different."
         ),
     )
-    count_column: Optional[str] = Field(
+    count_column: Optional[Union[str, List[str]]] = Field(
         None,
         description=(
             "Column holding the numeric measure to aggregate. "
             "Defaults to 'counts' for types-counts, 'count' for time-series. "
-            "Declare only when different from the default."
+            "Declare only when different from the default. A list declares a "
+            "menu of selectable measures — the first is the default; callers "
+            "pick others per request via the endpoint's `weight` parameter "
+            "(e.g. reddit's comments/submissions/all × score/controversy/"
+            "unweighted columns)."
         ),
     )
 
@@ -410,15 +414,25 @@ class DatasetCreate(BaseModel):
             "you need to pin exactly the live files at submit time.\n\n"
             "For `parquet_hive`, provide the **root** of the hive partition tree — the directory "
             "directly above the first `col=val/` level (e.g. `/data/ngrams/` where subdirectories "
-            "are `ngram_size=1/granularity=daily/…`). Do not point to a subdirectory."
+            "are `ngram_size=1/granularity=daily/…`). Do not point to a subdirectory.\n\n"
+            "For `mongodb`, provide a non-secret locator — one of: `<database>/<collection>` "
+            "(e.g. `1grams/en`, which the server samples to introspect); a Mongo host "
+            "(e.g. `wranglerdb01a.uvm.edu:27017`) that signals where the data lives while a "
+            "bespoke router owns the db/collection routing; or a `{placeholder}` routing "
+            "template. Host and template forms require an explicit `data_schema` (no single "
+            "collection to sample). The server's `MONGODB_URI` supplies the connection and "
+            "credentials — never put credentials in the registry."
         ),
     )
 
-    data_format: Literal["parquet", "parquet_hive"] = Field(
+    data_format: Literal["parquet", "parquet_hive", "mongodb"] = Field(
         ...,
         description=(
-            "Storage format. One of `parquet` (single file or directory) or "
-            "`parquet_hive` (directory-partitioned by entity/time). "
+            "Storage format. One of `parquet` (single file or directory), "
+            "`parquet_hive` (directory-partitioned by entity/time), or `mongodb` "
+            "(pass-through: served from a live MongoDB collection — no hive "
+            "introspection, level_order, or hash buckets; queries are equality "
+            "filters + time range only). "
             "See [format reference](/docs/specification#storage-formats)."
         ),
     )
@@ -468,6 +482,47 @@ class DatasetCreate(BaseModel):
             "registration contract was in effect when this entry was created."
         ),
     )
+
+    @model_validator(mode="after")
+    def validate_mongodb_constraints(self) -> "DatasetCreate":
+        """mongodb is a pass-through format: no hive machinery, no creds in the registry.
+
+        data_location is a non-secret locator the router interprets. Three forms:
+          - literal '<database>/<collection>' — the server samples it to introspect;
+          - a Mongo host (e.g. 'wranglerdb01a.uvm.edu:27017') — a bespoke router owns
+            the db/collection routing; needs an explicit data_schema;
+          - a '{placeholder}' routing template — likewise needs data_schema.
+        A connection URI or credentials must never appear here — those come from
+        the server's MONGODB_URI.
+        """
+        if self.data_format != "mongodb":
+            return self
+        loc = self.data_location
+        if not isinstance(loc, str) or not loc.strip():
+            raise ValueError(
+                "mongodb data_location must be a non-empty string: a host, "
+                "'<database>/<collection>', or a '{placeholder}' routing template."
+            )
+        if "://" in loc or "@" in loc:
+            raise ValueError(
+                "mongodb data_location must not contain a connection URI or credentials — "
+                "those come from the server's MONGODB_URI, never the registry. Use a host, "
+                "'<database>/<collection>', or a '{placeholder}' routing template."
+            )
+        segments = [s for s in loc.strip("/").split("/") if s]
+        is_concrete_collection = len(segments) == 2 and "{" not in loc
+        if not is_concrete_collection and not self.data_schema:
+            raise ValueError(
+                "this mongodb data_location is a host or routing template, not a literal "
+                "'<database>/<collection>', so the server cannot sample a collection to "
+                "introspect — provide an explicit data_schema."
+            )
+        if self.transform and self.transform.hash_bucket is not None:
+            raise ValueError(
+                "transform.hash_bucket applies only to parquet_hive datasets "
+                "(hash buckets route to partition directories, which mongodb does not have)."
+            )
+        return self
 
     @model_validator(mode="after")
     def validate_endpoint_schema_type(self) -> "DatasetCreate":

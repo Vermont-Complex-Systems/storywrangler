@@ -16,8 +16,12 @@ const bundledLanguages = {
 	typescript: () => import('@shikijs/langs/typescript')
 };
 
-/** The languages configured for the highlighter */
-export type SupportedLanguage = keyof typeof bundledLanguages;
+/**
+ * The languages configured for the highlighter.
+ * 'text' is shiki's built-in plain-text language — no grammar to load,
+ * renders unhighlighted. Used as the fallback for unknown fence languages.
+ */
+export type SupportedLanguage = keyof typeof bundledLanguages | 'text';
 
 let _highlighter: HighlighterCore | null = null;
 
@@ -48,7 +52,7 @@ const _coreReady = initHighlighter();
 export async function getHighlighter(lang: SupportedLanguage): Promise<HighlighterCore | null> {
 	const hl = await _coreReady;
 	if (!hl) return null;
-	if (!hl.getLoadedLanguages().includes(lang)) {
+	if (lang !== 'text' && !hl.getLoadedLanguages().includes(lang)) {
 		const loader = bundledLanguages[lang];
 		if (loader) await hl.loadLanguage(await loader());
 	}

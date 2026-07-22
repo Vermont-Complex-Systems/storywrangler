@@ -72,6 +72,97 @@ client.registry.register({
 })
 ```
 
+## Client API Map
+
+The SDK mirrors API routes one-to-one (Label Studio style) — method names
+follow the URL, so you can guess them without docs:
+
+| Route | SDK call |
+|---|---|
+| `POST /registry/register` | `client.registry.register(payload)` |
+| `GET /registry/` | `client.registry.list()` — displaying `client.registry` renders this list; `.list().df()` for a table |
+| `GET /registry/domains` | `client.registry.domains()` |
+| `GET /registry/{domain}/{id}` | `client.registry.get(domain, id, full=, version=)` |
+| `GET /registry/{domain}/{id}/adapter` | `client.registry.adapter(domain, id)` |
+| `GET /registry/{domain}/{id}/versions` | `client.registry.versions(domain, id)` |
+| `GET /registry/{domain}/{id}/validate-sources` | `client.registry.validate_sources(domain, id)` |
+| `POST /admin/registry/{domain}/{id}/entities` | `client.registry.upsert_entities(domain, id, rows)` |
+| `DELETE /admin/registry/{domain}/{id}` | `client.registry.delete(domain, id)` |
+| `POST /auth/login` | `Storywrangler.login(username, password)` |
+| `GET /auth/me` | `client.users.whoami()` |
+| `GET /admin/auth/users` | `client.users.list()` |
+| `POST /admin/auth/users` | `client.users.create(username, email, password, role=)` |
+| `PUT /admin/auth/users/{id}/role` | `client.users.set_role(user_id, role)` |
+| `GET /storywrangler/allotax` | `client.instrument.allotax(...)` |
+| `GET /storywrangler/rtd` | `client.instrument.rtd(...)` |
+| `GET /storywrangler/wordshift` | `client.instrument.wordshift(...)` |
+| `GET /{domain}` | `client.dataset(domain)` — repr lists endpoints; `.endpoints` / `.datasets` |
+| `GET /{domain}/top-ngrams` | `client.dataset(domain, id).top_ngrams(...)` |
+| `GET /{domain}/term-series` | `client.dataset(domain, id).term_series(type, ...)` |
+| `GET /{domain}/term-series/batch` | `client.dataset(domain, id).term_series_batch(types, ...)` |
+| `GET /health/status` | `client.health.status()` |
+| `GET /health/status/history` | `client.health.history()` |
+| `GET /health/status/{domain}/{id}` | `client.health.dataset(domain, id)` |
+| `GET /version` | `client.version()` |
+| anything else | `client.get(path, **params)` — raw escape hatch |
+
+Reading data requires **no API key** — `Storywrangler()` works without one.
+A key is only needed for registration and admin routes.
+
+`tests/test_api_drift.py` enforces this: a new API route fails CI until it has
+an SDK method (bespoke routes may map to the `client.get()` escape hatch).
+
+### Domain- and dataset-scoped clients
+
+`client.dataset(domain)` is domain-scoped: displaying it lists the domain's
+endpoints (mirroring `GET /{domain}`), data endpoints are callable as
+methods, and filter kwargs are validated against the dataset each route
+declares it serves (its `x-dataset` annotation). Dataset-specific metadata
+(`.meta`/`.filters`/`.availability`/`.adapter`) resolves automatically when
+the domain has exactly one registered dataset; otherwise it raises listing
+the choices — pass the id explicitly (`client.dataset(domain, id)`) to bind
+one. Any route without a dedicated method is callable by its guessable name
+— `wiki.revisions(limit=10)` → `GET /wikimedia/revisions` (underscores map
+to dashes; kwargs become query params; `.endpoints` shows what exists):
+
+```python
+wiki = client.dataset("wikimedia", "ngrams")
+wiki.filters       # filter dimensions with defaults and valid values
+wiki.availability  # date ranges per entity
+wiki.adapter       # entity mapping rows: local_id ↔ entity_id ↔ entity_name
+wiki.endpoints     # routes served under this domain, from the live OpenAPI spec
+wiki.versions()    # version history
+
+wiki.top_ngrams(dates="2026-05-01", granularity="daily", ngram_size=1)
+wiki.term_series("hello", entity="wikidata:Q30", window=30)
+wiki.term_series_batch(["hello", "world"], entity="wikidata:Q30")
+wiki.allotax(entity="wikidata:Q30", dates="2026-05-01", ngram_size=1)
+```
+
+Use `.adapter` to translate between global entity IDs and the values stored on
+disk:
+
+```python
+wiki.adapter[0]
+# {'local_id': 'United States', 'entity_id': 'wikidata:Q30',
+#  'entity_name': 'United States', 'entity_ids': ['iso:US', ...]}
+```
+
+### DataFrames
+
+Every response is a plain dict/list, plus a `.df()` accessor that converts the
+tabular payload to pandas (install the extra: `pip install 'storywrangler[pandas]'`):
+
+```python
+wiki.term_series("hello", entity="wikidata:Q30", window=30).df()
+#          date  counts   rank          freq
+# 0  2026-06-13  109678  64247  4.700000e-07
+# ...
+
+wiki.adapter.df()                      # entity mapping as a table
+wiki.term_series_batch(["a", "b"]).df()  # long format with a `type` column
+```
+
 ## Registration Schema
 
 The registration payload (`DatasetCreate`) is defined in [Specification §3.7](https://github.com/vermont-complex-systems/Storywrangler-Specification/blob/main/versions/0.0.3.md#37-dataset-registration-schema).
@@ -183,6 +274,21 @@ result = client.instrument.rtd(
 ```
 
 For the underlying computation without the platform, use the [`allotax`](https://pypi.org/project/allotax/) package directly.
+
+### Word shift
+
+Weighted-average sentiment word shift between two systems, scored with a bundled labMT lexicon. The sentiment analogue of RTD (no `alpha`):
+
+```python
+result = client.instrument.wordshift(
+    entity="wikidata:Q30",
+    dates="2026-02-10", dates2="2026-02-17",
+    lexicon="labMT_English",
+)
+# result keys: entries, component_sums, s_avg_1, s_avg_2, reference_value, meta
+```
+
+System 1 is the baseline; system 2 is read as a shift away from it. Omit `entity2` for a date-vs-date shift, or set it to compare two entities. For the underlying computation without the platform, use the [`wordshift`](https://pypi.org/project/wordshift/) package directly.
 
 ## Hash Bucket Assignment
 

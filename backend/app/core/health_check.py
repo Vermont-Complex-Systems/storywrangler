@@ -14,7 +14,8 @@ from sqlmodel import select, delete
 from ..core.database import async_session_factory
 from ..core.duckdb_client import get_admin_duckdb_client
 from ..core.parquet_introspect import _pinned_path_expr
-from ..core.query_utils import _path_expr, _is_data_missing
+from ..core.duckdb_query import _path_expr, _is_data_missing
+from ..core.mongo_query import resolve_collection
 from ..models.health import HealthCheck
 from ..models.registry import RegistryEntry
 
@@ -36,6 +37,9 @@ def probe_dataset(dataset_obj: RegistryEntry) -> dict:
 
     Returns ``{"status": str, "latency_ms": float, "error": str | None}``.
     """
+    if dataset_obj.data_format == "mongodb":
+        return _probe_mongo(dataset_obj)
+
     try:
         level_order = getattr(dataset_obj, "level_order", None)
         if level_order and dataset_obj.data_format == "parquet_hive":
@@ -68,6 +72,21 @@ def probe_dataset(dataset_obj: RegistryEntry) -> dict:
             "latency_ms": latency_ms,
             "error": str(exc)[:500],
         }
+
+
+def _probe_mongo(dataset_obj: RegistryEntry) -> dict:
+    """Lightweight Mongo probe: resolve routing with defaults, read one doc."""
+    start = time.perf_counter()
+    try:
+        coll = resolve_collection(dataset_obj, dataset_obj.domain, {})
+        coll.find_one({}, {"_id": True}, max_time_ms=5000)
+        latency_ms = (time.perf_counter() - start) * 1000
+        if latency_ms > DEGRADED_THRESHOLD_MS:
+            return {"status": "degraded", "latency_ms": latency_ms, "error": None}
+        return {"status": "healthy", "latency_ms": latency_ms, "error": None}
+    except Exception as exc:
+        latency_ms = (time.perf_counter() - start) * 1000
+        return {"status": "unhealthy", "latency_ms": latency_ms, "error": str(exc)[:500]}
 
 
 async def run_all_checks():
