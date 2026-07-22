@@ -414,6 +414,65 @@ class InstrumentClient(_SubClient):
         params.update(filters)
         return self._get_json("/storywrangler/rtd", params)
 
+    def wordshift(
+        self,
+        domain: str = "wikimedia",
+        dataset: str = "ngrams",
+        *,
+        entity: str | None = None,
+        entity2: str | None = None,
+        dates: str | None = None,
+        dates2: str | None = None,
+        lexicon: str = "labMT_English",
+        reference_value: str | float | None = None,
+        weight: str | None = None,
+        ngram_limit: int = 10000,
+        wordshift_limit: int = 200,
+        **filter_dims,
+    ) -> Dict[str, Any]:
+        """Weighted-average sentiment word shift between two systems.
+
+        The sentiment analogue of :meth:`rtd`: scores each system's vocabulary
+        with a bundled labMT happiness lexicon and returns per-word contributions
+        to the change in average sentiment, plus the six component sums. System 1
+        is the baseline; system 2 is read as a shift away from it. The two systems
+        may differ on any axis (entity, dates, or filter dimensions), like
+        :meth:`allotax`. No ``alpha`` — that is an RTD parameter.
+
+        Args:
+            domain: Dataset domain.
+            dataset: Dataset ID.
+            entity/entity2: Global entity IDs. Omit entity2 to reuse entity
+                (e.g. date-vs-date).
+            dates/dates2: Date ranges for each system.
+            lexicon: labMT language, e.g. 'labMT_English', 'labMT_French' (short
+                names like 'English' also accepted). Wikipedia ngrams are English.
+            reference_value: Score partition point — None for system 1's weighted
+                mean (the baseline), 'average' (equivalent), or a float (5.0 is
+                labMT's neutral midpoint).
+            ngram_limit: Max types to load per system.
+            wordshift_limit: Truncate output to the top N words by |shift|.
+            **filter_dims: Dataset-specific filter dimensions passed as query
+                params (dim / dim2 suffix convention), e.g.
+                ``ngram_size=1, granularity="daily"``.
+
+        Returns:
+            Dict with entries, component_sums, s_avg_1, s_avg_2, reference_value,
+            normalization, total_diff, norm, meta.
+        """
+        params: Dict[str, Any] = {
+            "domain": domain, "dataset": dataset,
+            "lexicon": lexicon,
+            "ngram_limit": ngram_limit, "wordshift_limit": wordshift_limit,
+        }
+        optional = {
+            "entity": entity, "entity2": entity2, "dates": dates, "dates2": dates2,
+            "reference_value": reference_value, "weight": weight,
+        }
+        params.update({k: v for k, v in optional.items() if v is not None})
+        params.update(filter_dims)
+        return self._get_json("/storywrangler/wordshift", params)
+
 
 class HealthClient(_SubClient):
     """Interact with /health endpoints.
@@ -655,8 +714,9 @@ class DatasetClient(_SubClient):
             {'/wikimedia/term-series': {'summary': 'Term Series', 'dataset': 'ngrams'}, ...}
 
         Note: routes are per-domain, and the platform instruments
-        (``/storywrangler/allotax``, ``/storywrangler/rtd``) work for every
-        dataset — reach them via :meth:`allotax` and :meth:`rtd`.
+        (``/storywrangler/allotax``, ``/storywrangler/rtd``,
+        ``/storywrangler/wordshift``) work for every dataset — reach them via
+        :meth:`allotax`, :meth:`rtd`, and :meth:`wordshift`.
         """
         return self._domain_root().get("endpoints", {})
 
@@ -793,6 +853,50 @@ class DatasetClient(_SubClient):
             alpha=alpha, alphas=alphas, weight=weight,
             ngram_limit=ngram_limit, wordshift_limit=wordshift_limit,
             **filters,
+        )
+
+    def wordshift(
+        self,
+        *,
+        entity: str | None = None,
+        entity2: str | None = None,
+        dates: str | None = None,
+        dates2: str | None = None,
+        lexicon: str = "labMT_English",
+        reference_value: str | float | None = None,
+        weight: str | None = None,
+        ngram_limit: int = 10000,
+        wordshift_limit: int = 200,
+        **filter_dims,
+    ) -> Dict[str, Any]:
+        """Weighted-average sentiment word shift on this dataset.
+
+        Same as ``client.instrument.wordshift()`` but ``domain`` and ``dataset``
+        are already bound. The sentiment analogue of :meth:`rtd`; no ``alpha``.
+
+        Args:
+            entity/entity2: Global entity IDs. Omit entity2 to reuse entity
+                (e.g. date-vs-date).
+            dates/dates2: Date ranges for each system.
+            lexicon: labMT language (wikipedia ngrams are English).
+            reference_value: None (system 1's weighted mean), 'average', or a
+                float (5.0 is labMT's neutral midpoint).
+            ngram_limit: Max types to load per system.
+            wordshift_limit: Truncate output to the top N words by |shift|.
+            **filter_dims: Dataset-specific filters (e.g. ngram_size=1).
+
+        Raises:
+            ValueError: If a filter name is unknown or a value is invalid.
+                Use ``.filters`` to discover available dimensions.
+        """
+        self._resolve_dataset_id()
+        self._validate_filters(filter_dims)
+        return self._instrument.wordshift(
+            self.domain, self.dataset_id,
+            entity=entity, entity2=entity2, dates=dates, dates2=dates2,
+            lexicon=lexicon, reference_value=reference_value, weight=weight,
+            ngram_limit=ngram_limit, wordshift_limit=wordshift_limit,
+            **filter_dims,
         )
 
     def top_ngrams(
@@ -1019,7 +1123,7 @@ class Storywrangler:
         return _wrap(resp.json())
 
     def version(self) -> Dict[str, Any]:
-        """Component versions of the running API (api, schemas, duckdb, allotax)."""
+        """Component versions of the running API (api, schemas, duckdb, allotax, wordshift)."""
         return self.get("/version")
 
     def dataset(self, domain: str, dataset_id: Optional[str] = None) -> DatasetClient:

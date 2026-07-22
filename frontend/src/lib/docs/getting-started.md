@@ -129,7 +129,7 @@ print(result["wordshift"][:5])
   'divergence': -8.660948752039387e-05}]
 ```
 
-`GET /version` reports the API, schemas, DuckDB, and allotax versions in effect. Storywrangler [versions](/versioning) the interaction between an instrument and a pipeline, so any result stays reproducible for papers and pipelines.
+`GET /version` reports the API, schemas, DuckDB, allotax, and wordshift versions in effect. Storywrangler [versions](/versioning) the interaction between an instrument and a pipeline, so any result stays reproducible for papers and pipelines.
 
 ## Where to go next
 

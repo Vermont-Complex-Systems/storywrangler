@@ -228,7 +228,7 @@ async def platform_version():
 
     Useful for debugging, reproducibility, and pinning API clients to a known
     software stack. The `schemas` version records the registration contract in
-    effect; `duckdb` and `allotax` versions govern query results.
+    effect; `duckdb`, `allotax`, and `wordshift` versions govern query results.
     """
     import duckdb
 
@@ -246,9 +246,19 @@ async def platform_version():
         except ImportError:
             allotax_ver = "not installed"
 
+    try:
+        wordshift_ver = pkg_version("wordshift")
+    except PackageNotFoundError:
+        try:
+            import wordshift
+            wordshift_ver = getattr(wordshift, "__version__", "unknown")
+        except ImportError:
+            wordshift_ver = "not installed"
+
     return {
         "api": app.version,
         "schemas": schemas_ver,
         "duckdb": duckdb.__version__,
         "allotax": allotax_ver,
+        "wordshift": wordshift_ver,
     }

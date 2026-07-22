@@ -95,6 +95,7 @@ follow the URL, so you can guess them without docs:
 | `PUT /admin/auth/users/{id}/role` | `client.users.set_role(user_id, role)` |
 | `GET /storywrangler/allotax` | `client.instrument.allotax(...)` |
 | `GET /storywrangler/rtd` | `client.instrument.rtd(...)` |
+| `GET /storywrangler/wordshift` | `client.instrument.wordshift(...)` |
 | `GET /{domain}` | `client.dataset(domain)` — repr lists endpoints; `.endpoints` / `.datasets` |
 | `GET /{domain}/top-ngrams` | `client.dataset(domain, id).top_ngrams(...)` |
 | `GET /{domain}/term-series` | `client.dataset(domain, id).term_series(type, ...)` |
@@ -273,6 +274,21 @@ result = client.instrument.rtd(
 ```
 
 For the underlying computation without the platform, use the [`allotax`](https://pypi.org/project/allotax/) package directly.
+
+### Word shift
+
+Weighted-average sentiment word shift between two systems, scored with a bundled labMT lexicon. The sentiment analogue of RTD (no `alpha`):
+
+```python
+result = client.instrument.wordshift(
+    entity="wikidata:Q30",
+    dates="2026-02-10", dates2="2026-02-17",
+    lexicon="labMT_English",
+)
+# result keys: entries, component_sums, s_avg_1, s_avg_2, reference_value, meta
+```
+
+System 1 is the baseline; system 2 is read as a shift away from it. Omit `entity2` for a date-vs-date shift, or set it to compare two entities. For the underlying computation without the platform, use the [`wordshift`](https://pypi.org/project/wordshift/) package directly.
 
 ## Hash Bucket Assignment
 

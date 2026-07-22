@@ -1,10 +1,10 @@
-"""Shared helpers for the allotaxonometer instruments.
+"""Shared helpers for the storywrangler instruments.
 
-Both the parquet-backed generic endpoints (routers/storywrangler.py) and the
-mongodb-backed twitter endpoints (routers/twitter.py) load two type-frequency
-systems and hand them to the same ``allotax`` (Rust/PyO3) library. Only the
-data loading differs by backend; the JSON-sanitisation, version reporting, and
-import guard are identical, so they live here.
+The generic instrument endpoints (routers/storywrangler.py) load two
+type-frequency systems and hand them to a Rust/PyO3 library — ``allotax`` for
+rank-turbulence divergence, ``wordshift`` for weighted-average sentiment word
+shift. Only the data loading differs by backend; the JSON-sanitisation and
+version reporting are identical, so they live here.
 """
 
 import math
@@ -35,6 +35,17 @@ def allotax_version() -> str:
         try:
             import allotax
             return getattr(allotax, "__version__", "unknown")
+        except ImportError:
+            return "not installed"
+
+
+def wordshift_version() -> str:
+    try:
+        return pkg_version("wordshift")
+    except PackageNotFoundError:
+        try:
+            import wordshift
+            return getattr(wordshift, "__version__", "unknown")
         except ImportError:
             return "not installed"
 

@@ -136,6 +136,33 @@ class TestRtdDrift:
         )
 
 
+class TestWordshiftDrift:
+    def test_sdk_covers_all_api_params(self, openapi_spec):
+        """Every API query param should exist in the SDK method (or in **kwargs)."""
+        from storywrangler.client import DatasetClient
+
+        api_params = _openapi_query_params(openapi_spec, "/storywrangler/wordshift")
+        sdk_params = _sdk_params(DatasetClient.wordshift)
+        uncovered = api_params - sdk_params - _SERVER_ONLY_PARAMS
+        core_uncovered = {p for p in uncovered if not _is_filter_dim(p)}
+        assert not core_uncovered, (
+            f"API has query params not in SDK wordshift() signature: {core_uncovered}. "
+            f"Add them as explicit params or document why they flow through **filter_dims."
+        )
+
+    def test_sdk_params_exist_in_api(self, openapi_spec):
+        """Every SDK fixed param should exist in the API spec."""
+        from storywrangler.client import DatasetClient
+
+        api_params = _openapi_query_params(openapi_spec, "/storywrangler/wordshift")
+        sdk_params = _sdk_params(DatasetClient.wordshift)
+        extra = sdk_params - api_params - _SERVER_ONLY_PARAMS
+        assert not extra, (
+            f"SDK wordshift() has params not in OpenAPI spec: {extra}. "
+            f"The API may have removed them."
+        )
+
+
 class TestRouteCoverage:
     """Every registry/auth/instrument route must map to an SDK method.
 
@@ -163,6 +190,7 @@ class TestRouteCoverage:
         "/admin/auth/users/{user_id}/role": ("UsersClient", "set_role"),
         "/storywrangler/allotax": ("InstrumentClient", "allotax"),
         "/storywrangler/rtd": ("InstrumentClient", "rtd"),
+        "/storywrangler/wordshift": ("InstrumentClient", "wordshift"),
         # Domain roots — GET /{domain} lists endpoints + datasets
         "/babynames": ("DatasetClient", "endpoints"),
         "/storywrangler": ("DatasetClient", "endpoints"),
