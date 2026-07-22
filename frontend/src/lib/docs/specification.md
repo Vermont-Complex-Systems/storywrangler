@@ -718,9 +718,11 @@ Declares what columns the API reads and returns. Describes the response structur
 |---|---|---|
 | `type` | REQUIRED | Endpoint type. MUST be one of: `types-counts`, `time-series`. See §3.6 |
 | `type_column` | OPTIONAL | `types-counts` only. Column holding token/type values. Defaults to `types` |
-| `count_column` | OPTIONAL | Column holding the numeric measure. Defaults to `counts` for `types-counts`, `count` for `time-series` |
+| `count_column` | OPTIONAL | Column holding the numeric measure, or a list of selectable measure columns. Defaults to `counts` for `types-counts`, `count` for `time-series` |
 
 Datasets that use the default column names (`types`/`counts` or `count`) MAY omit `type_column` and `count_column`.
+
+`count_column` MAY be a list when the data carries several alternative measures of the same conceptual count (e.g. reddit's content type × weighting columns: `all_score_weighted`, `comments_unweighted`, ...). The first entry is the default; endpoints expose the choice via a `weight` query parameter validated against the list. Every listed column MUST exist in the data. Rank columns are not part of the menu — a stored rank reflects the pipeline's canonical measure and does not change with `weight`.
 
 **Constraints:**
 - `types-counts` datasets MUST declare either `entity_mapping` or `transform.filter_dimensions` (there must be at least one axis to slice on)

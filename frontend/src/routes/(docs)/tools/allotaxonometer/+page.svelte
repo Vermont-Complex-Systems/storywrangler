@@ -26,6 +26,20 @@
     alpha={0.58}
   />
 {/if}`;
+
+	const wordshiftInstallCode = `pip install wordshift`;
+
+	const wordshiftUsageCode = `import wordshift
+
+# type2freq_1, type2freq_2: {word: frequency} maps, e.g. two days of ranked
+# n-grams from GET /wikimedia/top-ngrams
+result = wordshift.weighted_avg_shift(
+    type2freq_1, type2freq_2,
+    lexicon="labMT_English",   # bundled labMT happiness lexicon
+    top_n=50,                  # cap the returned per-word entries
+)
+
+result["entries"][:5]          # the words that drove the sentiment change`;
 </script>
 
 <h1>Allotaxonometry</h1>
@@ -85,4 +99,36 @@
 	per-word signal) between two text collections into word-level contributions — which words
 	drove the change, through increased or decreased usage, and whether they pulled the score up
 	or down.
+</p>
+
+<p>
+	The reference implementation is the <a href="https://pypi.org/project/wordshift/">wordshift</a>
+	Python package, usable directly in scripts and notebooks. Install it:
+</p>
+
+<Code.Root code={wordshiftInstallCode} lang="bash" hideLines={true}>
+	<Code.CopyButton />
+</Code.Root>
+
+<p>
+	Give it two <code>{'{word: frequency}'}</code> maps and a bundled labMT lexicon; it returns each
+	word's signed contribution to the change in average sentiment, plus the component sums a shift
+	graph needs:
+</p>
+
+<Code.Root code={wordshiftUsageCode} lang="python">
+	<Code.CopyButton />
+</Code.Root>
+
+<p>
+	On the platform you do not have to fetch and feed the two systems yourself.
+	<code>GET /storywrangler/wordshift</code> (or <code>wiki.wordshift(...)</code> in the SDK)
+	resolves the dataset, loads both date-or-entity systems, and runs the shift server-side, the same
+	way <code>/rtd</code> does for divergence.
+</p>
+
+<p>
+	The core math lives in
+	<a href="https://github.com/Vermont-Complex-Systems/wordshift-core">wordshift-core</a>, a Rust
+	crate, mirroring the allotaxonometer's <code>allotaxonometer-core</code>.
 </p>

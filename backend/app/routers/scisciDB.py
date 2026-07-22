@@ -1,7 +1,7 @@
 """
 scisciDB metrics endpoint — flexible time-series queries over precomputed OpenAlex metrics.
 
-Uses query_utils.load_time_series(), which is available to any dataset registered with
+Uses duckdb_query.load_time_series(), which is available to any dataset registered with
 endpoint_schema.type='time-series'. The router is intentionally thin: registry lookup,
 validation, then delegate to the shared utility.
 
@@ -18,7 +18,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from ..core.database import get_session
 from ..core.duckdb_client import get_duckdb_client, run_blocking
-from ..core.query_utils import get_partition_defaults, get_queryable_dims, handle_query_error, load_time_series
+from ..core.duckdb_query import handle_query_error, load_time_series
+from ..core.query_utils import get_partition_defaults, get_queryable_dims
 from ..core.registry_utils import get_latest_entry
 
 router = APIRouter()

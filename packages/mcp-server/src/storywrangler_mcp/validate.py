@@ -109,7 +109,12 @@ def _check_column_identifiers(payload: dict, errors: list[str]) -> None:
     ep = payload.get("endpoint_schema") or {}
     if isinstance(ep, dict):
         declared["endpoint_schema.type_column"] = ep.get("type_column")
-        declared["endpoint_schema.count_column"] = ep.get("count_column")
+        cc = ep.get("count_column")
+        if isinstance(cc, list):
+            for col in cc:
+                declared[f"endpoint_schema.count_column[{col!r}]"] = col
+        else:
+            declared["endpoint_schema.count_column"] = cc
     tr = payload.get("transform") or {}
     if isinstance(tr, dict):
         declared["transform.time_dimension"] = tr.get("time_dimension")
@@ -177,11 +182,17 @@ def _check_declared_columns_against_schema(payload: dict, errors: list[str]) -> 
     tr = payload.get("transform") or {}
     tr = tr if isinstance(tr, dict) else {}
 
+    def _count_cols(default: str) -> list[str]:
+        # count_column may be a list (selectable measure menu, first = default);
+        # every entry must exist since any can reach the query via ?weight=.
+        cc = ep.get("count_column") or default
+        return cc if isinstance(cc, list) else [cc]
+
     expected: list[str] = []
     if ep.get("type") == "types-counts":
-        expected += [ep.get("type_column") or "types", ep.get("count_column") or "counts"]
+        expected += [ep.get("type_column") or "types", *_count_cols("counts")]
     elif ep.get("type") == "time-series":
-        expected += [ep.get("count_column") or "count"]
+        expected += _count_cols("count")
     if tr.get("time_dimension"):
         expected.append(tr["time_dimension"])
     expected += tr.get("filter_dimensions") or []
@@ -277,6 +288,14 @@ def _check_data_location_shape(payload: dict, errors: list[str], warnings: list[
 
 def _check_disk_layout(payload: dict, errors: list[str], warnings: list[str], notes: list[str]) -> None:
     loc = payload.get("data_location")
+    if payload.get("data_format") == "mongodb":
+        notes.append(
+            "note: mongodb is a pass-through format — no on-disk layout to check. "
+            "The server introspects the collection live at registration (requires "
+            "MONGODB_URI configured server-side); no level_order or hash buckets are "
+            "derived, and queries are equality filters + time range only."
+        )
+        return
     if not isinstance(loc, str):
         return
     if not os.path.exists(loc):

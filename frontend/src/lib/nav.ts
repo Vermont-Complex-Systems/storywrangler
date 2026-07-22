@@ -14,6 +14,7 @@ export const nav = [
 			{ label: 'Querying datasets', href: '/querying' },
 			{ label: 'Building a pipeline', href: '/pipelines' },
 			{ label: 'Registering a dataset', href: '/register' },
+			{ label: 'Registering big data', href: '/register-big-data' },
 			{ label: 'Design & architecture', href: '/design' },
 			{ label: 'Versioning', href: '/versioning' },
 			{ label: 'Storywrangler-Specs', href: '/specification' }

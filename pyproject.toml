@@ -3,7 +3,9 @@ name = "storywrangler-workspace"
 version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
+    "py-allotax",
     "storywrangler",
+    "storywrangler-api",
 ]
 
 [tool.uv.workspace]
@@ -16,10 +18,15 @@ members = [
 
 [tool.uv.sources]
 storywrangler = { workspace = true }
+storywrangler-api = { workspace = true }
+py-allotax = { git = "https://github.com/compstorylab/py-allotax.git", rev = "allotax-core" }
 
 [tool.uv]
 dev-dependencies = [
     "ipython>=9.13.0",
+    "ipykernel>=6.29",
+    "matplotlib>=3.8",
+    "pandas>=2.0",
     "pytest>=8.0.0",
     "ruff>=0.1.0",
 ]

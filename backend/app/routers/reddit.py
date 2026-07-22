@@ -1,21 +1,24 @@
 """
-Reddit endpoints — subreddit n-grams and term time series.
+Reddit endpoints — corpus-wide n-grams and term time series.
+
+The reddit/ngrams dataset has no entity dimension: hive levels are
+n / lang / year / month, and `date` lives inside the parquet files.
+Queries slice by language and n-gram size and compare across dates.
 """
 
 import logging
+from datetime import date as dt_date, timedelta
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from ..core.database import get_session
 from ..core.duckdb_client import get_duckdb_client, run_blocking
-from ..core.query_utils import (
-    handle_query_error, is_data_missing, latest_from_manifest, resolve_entity,
-)
+from ..core.duckdb_query import handle_query_error, is_data_missing
+from ..core.query_utils import latest_from_manifest, resolve_count_column
 from ..core.registry_utils import get_latest_entry
 from ..core.term_series import (
-    build_date_filter, fetch_sparkline_rows, ngrams_context, run_top_ngrams,
-    series_entry, validated_dims,
+    build_date_filter, ngrams_context, run_top_ngrams, series_entry, validated_dims,
 )
 from ..core.timing import timed
 from . import openapi_docs as docs
@@ -24,33 +27,74 @@ log = logging.getLogger(__name__)
 
 router = APIRouter()
 
+# The registered count-column menu (endpoint_schema.count_column) is the
+# source of truth for valid values; core/openapi_menus.py enriches this
+# description with the enumerated menu at OpenAPI build time.
+_WEIGHT_DESC = "Count measure (content type × weighting)."
+
+
+def _series_cols(ngrams_obj, weight) -> tuple:
+    """SELECT columns for term-series rows under the chosen measure.
+
+    Returns (select_expr, count_col). The frequency companion follows the
+    dataset's naming convention ({x}_weighted → {x}_freq, else {col}_freq);
+    NULL when no such column exists. `rank` is the pipeline's canonical
+    ranking (score-weighted) and does not change with the measure.
+    """
+    count_col = resolve_count_column(ngrams_obj, weight)
+    schema = ngrams_obj.data_schema or {}
+    if count_col.endswith("_weighted"):
+        freq_col = count_col[: -len("_weighted")] + "_freq"
+    else:
+        freq_col = f"{count_col}_freq"
+    if freq_col not in schema:
+        freq_col = "NULL"
+    return f"ngram, date, {count_col}, rank, {freq_col}", count_col
+
+
+def _year_pruning(date_params: list) -> tuple:
+    """Prune year=* hive directories from the in-file date filter's bounds.
+
+    The date column lives inside the parquet files, so the glob wildcards
+    year and month — this condition lets DuckDB drop whole year directories
+    from directory names alone, without reading file footers. Weekly files
+    are bucketed under the year their ISO week starts in, so the bounds are
+    padded by one week to keep boundary rows reachable.
+    """
+    pad = timedelta(days=6)
+    bounds = [dt_date.fromisoformat(str(p)[:10]) for p in date_params]
+    if len(bounds) == 2:
+        return "year BETWEEN ? AND ?", [(bounds[0] - pad).year, (bounds[1] + pad).year]
+    return "year <= ?", [(bounds[0] + pad).year]
+
 
 # ── top-ngrams ────────────────────────────────────────────────────────────────
 
 @router.get(
     "/top-ngrams",
-    openapi_extra=docs.REDDIT_GET_TOP_NGRAMS,
+    openapi_extra={**docs.REDDIT_GET_TOP_NGRAMS, "x-dataset": "ngrams"},
 )
 async def get_top_ngrams(
-    dates: str = Query(default="2024-11-01,2024-11-07"),
+    dates: str = Query(default="2022-12-01,2022-12-07"),
     dates2: Optional[str] = Query(default=None),
-    entity: str = Query(default="AskReddit", description="Subreddit name or global entity ID"),
-    granularity: str = Query(default="daily"),
+    lang: str = Query(default="en", description="Language code (hive `lang` partition)."),
     n: int = Query(default=1, description="N-gram size (1 = unigrams, 2 = bigrams)."),
+    weight: Optional[str] = Query(default=None, description=_WEIGHT_DESC),
     limit: int = Query(default=100),
     db: AsyncSession = Depends(get_session),
 ):
-    """Get top Reddit n-grams for a subreddit."""
+    """Get top Reddit n-grams for a language over a date range."""
     dataset_obj = await get_latest_entry(db, "reddit", "ngrams")
     if not dataset_obj:
         raise HTTPException(status_code=404, detail="'reddit/ngrams' dataset not found")
 
-    extra = validated_dims(dataset_obj, {"granularity": granularity, "ngram_size": n})
-    em = await resolve_entity(db, "reddit", "ngrams", entity)
+    extra = validated_dims(dataset_obj, {"n": n, "lang": lang})
+    count_col = resolve_count_column(dataset_obj, weight)
 
     return await run_top_ngrams(
-        dataset_obj, "reddit/ngrams", em.local_id, dates, dates2, extra, limit,
-        metadata={"granularity": granularity, "entity": entity},
+        dataset_obj, "reddit/ngrams", None, dates, dates2, extra, limit,
+        metadata={"lang": lang, "n": n, "weight": count_col},
+        count_col=count_col,
     )
 
 
@@ -58,81 +102,62 @@ async def get_top_ngrams(
 
 @router.get(
     "/term-series",
-    openapi_extra=docs.REDDIT_TERM_SERIES,
+    openapi_extra={**docs.REDDIT_TERM_SERIES, "x-dataset": "ngrams"},
 )
 async def term_series(
     type: str = Query(..., description="The n-gram term to look up. Case-sensitive."),
-    entity: Optional[str] = Query(None, description="Entity ID (optional). When omitted, no entity filtering is applied."),
     date: Optional[str] = Query(None, description="End date (YYYY-MM-DD). Defaults to latest available."),
-    window: int = Query(0, description="Number of days to look back from date. 0 = full history."),
-    granularity: str = Query("daily", description="Hive granularity: daily | weekly | monthly"),
+    window: int = Query(365, description="Number of days to look back from date. 0 = full history — slow (scans every weekly file, minutes for large languages) and likely to exceed the proxy timeout."),
+    lang: str = Query("en", description="Language code (hive `lang` partition)."),
     n: int = Query(1, description="N-gram size (1 = unigrams, 2 = bigrams)"),
+    weight: Optional[str] = Query(None, description=_WEIGHT_DESC),
     db: AsyncSession = Depends(get_session),
 ):
     """Per-date time series for a single n-gram term.
 
-    Returns counts and rank for each date.
-    Entity is optional — when omitted, queries across all entities.
+    Returns counts under the chosen weight, canonical rank, and frequency
+    for each date.
     """
-    with timed("resolve", "Entity resolution"):
-        ngrams_obj = await get_latest_entry(db, "reddit", "ngrams")
-        if not ngrams_obj:
-            raise HTTPException(status_code=404, detail="'reddit/ngrams' dataset not found")
-        local_id = None
-        if entity:
-            local_id = (await resolve_entity(db, "reddit", "ngrams", entity)).local_id
+    ngrams_obj = await get_latest_entry(db, "reddit", "ngrams")
+    if not ngrams_obj:
+        raise HTTPException(status_code=404, detail="'reddit/ngrams' dataset not found")
 
-    _, base_path = ngrams_context(
-        ngrams_obj, local_id, {"granularity": granularity, "ngram_size": n})
+    select_cols, _ = _series_cols(ngrams_obj, weight)
+    dims = validated_dims(ngrams_obj, {"n": n, "lang": lang})
+    _, base_path = ngrams_context(ngrams_obj, None, dims)
 
     with timed("discover", "Latest date from manifest"):
-        latest_date = latest_from_manifest(ngrams_obj, local_id, granularity)
+        # Availability is keyed n → lang; lang is the preferred lookup key.
+        latest_date = latest_from_manifest(ngrams_obj, None, lang)
 
     if not date:
         if not latest_date:
             return JSONResponse(
                 status_code=404,
-                content={"detail": "No data found for this entity", "latest_available_date": None},
+                content={"detail": "No data found for this language", "latest_available_date": None},
             )
         date = latest_date
 
     date_filter, date_params = build_date_filter(date, window)
+    year_filter, year_params = _year_pruning(date_params)
 
-    # ── Sparkline fast path (when sparklines dataset is registered) ──
-    series_rows = []
-    with timed("registry", "Sparkline registry lookup"):
-        sparkline_obj = await get_latest_entry(db, "reddit", "sparklines")
+    glob_pattern = f"{base_path}/*.parquet"
 
-    if sparkline_obj:
-        def _fast():
+    def _query():
+        with handle_query_error("reddit/ngrams"):
             with get_duckdb_client().timed_connect() as conn:
-                return fetch_sparkline_rows(
-                    conn, sparkline_obj, [type], local_id, n,
-                    date_filter, date_params, "reddit/term-series",
-                )
+                return conn.execute(
+                    f"""
+                    SELECT {select_cols}
+                    FROM read_parquet('{glob_pattern}', hive_partitioning=true)
+                    WHERE ngram = ? AND {date_filter} AND {year_filter}
+                    ORDER BY date
+                    """,
+                    [type, *date_params, *year_params],
+                ).fetchall()
 
-        with timed("fast_query", "DuckDB sparkline read"):
-            series_rows = await run_blocking(_fast)
-
-    # ── Slow path: scan daily partitions ──
-    if not series_rows:
-        glob_pattern = f"{base_path}/date=*/data_0.parquet"
-
-        def _slow():
-            with handle_query_error("reddit/ngrams"):
-                with get_duckdb_client().timed_connect() as conn:
-                    return conn.execute(
-                        f"""
-                        SELECT ngram, date, pv_count, pv_rank, pv_freq
-                        FROM read_parquet('{glob_pattern}', hive_partitioning=true)
-                        WHERE ngram = ? AND {date_filter}
-                        ORDER BY date
-                        """,
-                        [type, *date_params],
-                    ).fetchall()
-
-        with timed("slow_query", "DuckDB daily partition scan"):
-            series_rows = await run_blocking(_slow)
+    with timed("query", "DuckDB partition scan"):
+        series_rows = await run_blocking(_query)
 
     return {
         "type": type,
@@ -143,108 +168,76 @@ async def term_series(
 
 # ── term-series/batch ────────────────────────────────────────────────────────
 
-@router.get("/term-series/batch")
+@router.get("/term-series/batch", openapi_extra={"x-dataset": "ngrams"})
 async def term_series_batch(
     types: str = Query(..., description="Comma-separated n-gram terms, e.g. 'trump,covid,the'. Case-sensitive."),
-    entity: Optional[str] = Query(None, description="Entity ID (optional). When omitted, no entity filtering is applied."),
     date: Optional[str] = Query(None, description="End date (YYYY-MM-DD). Defaults to latest available."),
-    window: int = Query(0, description="Number of days to look back from date. 0 = full history."),
-    granularity: str = Query("daily", description="Hive granularity: daily | weekly | monthly"),
+    window: int = Query(365, description="Number of days to look back from date. 0 = full history — slow (scans every weekly file, minutes for large languages) and likely to exceed the proxy timeout."),
+    lang: str = Query("en", description="Language code (hive `lang` partition)."),
     n: int = Query(1, description="N-gram size (1 = unigrams, 2 = bigrams)"),
+    weight: Optional[str] = Query(None, description=_WEIGHT_DESC),
     db: AsyncSession = Depends(get_session),
 ):
     """Batch time series lookup for multiple terms in a single request.
 
     Returns a map of term -> time series. Ideal for fetching sparklines for all
     terms in an RTD wordshift comparison at once.
-
-    Entity is optional — when omitted, queries across all entities.
     """
     ngrams_obj = await get_latest_entry(db, "reddit", "ngrams")
     if not ngrams_obj:
         raise HTTPException(status_code=404, detail="'reddit/ngrams' dataset not found")
 
-    local_id = None
-    if entity:
-        local_id = (await resolve_entity(db, "reddit", "ngrams", entity)).local_id
-
-    _, base_path = ngrams_context(
-        ngrams_obj, local_id, {"granularity": granularity, "ngram_size": n})
-    latest_date = latest_from_manifest(ngrams_obj, local_id, granularity)
+    select_cols, _ = _series_cols(ngrams_obj, weight)
+    dims = validated_dims(ngrams_obj, {"n": n, "lang": lang})
+    _, base_path = ngrams_context(ngrams_obj, None, dims)
+    latest_date = latest_from_manifest(ngrams_obj, None, lang)
 
     if not date:
         if not latest_date:
             return JSONResponse(
                 status_code=404,
-                content={"detail": "No data found for this entity", "latest_available_date": None},
+                content={"detail": "No data found for this language", "latest_available_date": None},
             )
         date = latest_date
 
     date_filter, date_params = build_date_filter(date, window)
+    year_filter, year_params = _year_pruning(date_params)
 
     type_list = [t.strip() for t in types.split(",") if t.strip()]
     if not type_list:
         raise HTTPException(status_code=400, detail="types parameter must contain at least one term")
 
-    # ── Fast path: sparkline bucket lookups ──
-    sparkline_rows = []
-    sparkline_obj = await get_latest_entry(db, "reddit", "sparklines")
+    glob_pattern = f"{base_path}/*.parquet"
+    placeholders = ", ".join(["?"] * len(type_list))
 
-    if sparkline_obj:
-        def _fast():
-            with get_duckdb_client().timed_connect() as conn:
-                return fetch_sparkline_rows(
-                    conn, sparkline_obj, type_list, local_id, n,
-                    date_filter, date_params, "reddit/term-series/batch",
-                )
+    def _query():
+        with get_duckdb_client().timed_connect() as conn:
+            try:
+                return conn.execute(
+                    f"""
+                    SELECT {select_cols}
+                    FROM read_parquet('{glob_pattern}', hive_partitioning=true)
+                    WHERE ngram IN ({placeholders})
+                      AND {date_filter} AND {year_filter}
+                    ORDER BY ngram, date
+                    """,
+                    [*type_list, *date_params, *year_params],
+                ).fetchall()
+            except Exception as exc:
+                # Batch semantics: terms with no data return empty arrays,
+                # so a missing partition is fine — but log real errors.
+                if is_data_missing(exc):
+                    log.info("reddit/term-series/batch: no partition data for %s", type_list)
+                else:
+                    log.warning("reddit/term-series/batch: partition scan failed: %s", exc)
+                return []
 
-        with timed("fast_query", "DuckDB sparkline batch read"):
-            sparkline_rows = await run_blocking(_fast)
+    with timed("query", "DuckDB partition scan"):
+        rows = await run_blocking(_query)
 
-    found_terms = {row[0] for row in sparkline_rows}
-
-    # ── Slow path: daily partition fallback for missing terms ──
-    missing_terms = [t for t in type_list if t not in found_terms]
-    slow_results: dict = {}
-    if missing_terms:
-        glob_pattern = f"{base_path}/date=*/data_0.parquet"
-        slow_placeholders = ", ".join(["?"] * len(missing_terms))
-
-        def _slow():
-            with get_duckdb_client().timed_connect() as conn:
-                try:
-                    return conn.execute(
-                        f"""
-                        SELECT ngram, date, pv_count, pv_rank, pv_freq
-                        FROM read_parquet('{glob_pattern}', hive_partitioning=true)
-                        WHERE ngram IN ({slow_placeholders})
-                          AND {date_filter}
-                        ORDER BY ngram, date
-                        """,
-                        [*missing_terms, *date_params],
-                    ).fetchall()
-                except Exception as exc:
-                    # Batch semantics: terms with no data return empty arrays,
-                    # so a missing partition is fine — but log real errors.
-                    if is_data_missing(exc):
-                        log.info("reddit/term-series/batch: no partition data for %s", missing_terms)
-                    else:
-                        log.warning("reddit/term-series/batch: partition scan failed: %s", exc)
-                    return []
-
-        with timed("slow_query", "DuckDB daily partition scan"):
-            slow_rows = await run_blocking(_slow)
-
-        for row in slow_rows:
-            slow_results.setdefault(row[0], []).append(
-                series_entry(str(row[1]), row[2], row[3], row[4]))
-
-    # ── Merge results ──
     results: dict = {t: [] for t in type_list}
-    for row in sparkline_rows:
+    for row in rows:
         results[row[0]].append(series_entry(str(row[1]), row[2], row[3], row[4]))
-    for ngram, entries in slow_results.items():
-        results[ngram] = entries
 
     return {
         "results": results,

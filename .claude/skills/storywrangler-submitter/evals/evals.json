@@ -1,0 +1,121 @@
+{
+	"skill": "storywrangler-submitter",
+	"description": "Guards against the classic failure modes when agents help authors submit datasets to Storywrangler — skipping the instrument/dissemination fork, interrogating instead of inspecting, and the field-conflation/versioning/verification mistakes.",
+	"evals": [
+		{
+			"id": 1,
+			"name": "fork-before-fields",
+			"failure_mode": "Agent dives into endpoint_schema/transform field interrogation without first settling whether the submission is instrument-compliant or dissemination.",
+			"prompt": "I have a parquet file of daily lexicon scores per country (columns: country, date, avg_happs, power, danger, and a word-count JSON map). Help me write the Storywrangler registration payload.",
+			"expected": [
+				"Establishes the instrument-vs-dissemination fork before any field-level questions",
+				"Recommends dissemination (wide bespoke score columns and a JSON map fit no generic endpoint type), presented as a recommendation with the trade-off, not a verdict",
+				"Builds the minimal payload (identity, location, governance) without pushing endpoint_schema",
+				"Offers entity_mapping (country column) and transform.time_dimension (date) as cheap opt-ins",
+				"Notes that serving requires a bespoke endpoint PR to the Storywrangler repo, and that registration can precede it"
+			]
+		},
+		{
+			"id": 2,
+			"name": "proportional-inspection",
+			"failure_mode": "Agent over-inspects (surveys directory trees, brings up hive col=val naming) or interrogates the user about things a quick look at the file would answer, when the submission is a single small parquet file.",
+			"prompt": "Help me register /data/lexo/scores.parquet on Storywrangler.",
+			"expected": [
+				"Inspection is proportional: DESCRIBEs the single file and checks the registry — no tree walking, no hive/col=val talk for a flat parquet file",
+				"Reaches a valid core payload (identity, location, governance) in a few questions; governance is asked, identity is proposed",
+				"Asks one decision at a time, including the endpoint-type-vs-dissemination fork",
+				"Only asks the user things the file cannot answer: intent, identity, governance, column meaning"
+			]
+		},
+		{
+			"id": 3,
+			"name": "endpoint-type-by-declaration",
+			"failure_mode": "Agent renames the user's columns or files to match endpoint-type defaults instead of declaring around the difference.",
+			"prompt": "My data has columns word, freq, state, year and I want it to work with the allotaxonometer.",
+			"expected": [
+				"Picks the types-counts endpoint type and declares type_column='word', count_column='freq' — does not rename columns or rewrite files",
+				"Surfaces the comparison-axis requirement and offers the choice: entity_mapping on state vs filter_dimensions",
+				"Offers time_dimension='year' as an opt-in with its benefit (?dates= queries, auto availability)",
+				"Validates the draft with validate-submission before proposing registration"
+			]
+		},
+		{
+			"id": 4,
+			"name": "output-shape-vs-slice-axes",
+			"failure_mode": "Agent conflates endpoint_schema with transform — declares granularities, time dimensions, or filter lists inside endpoint_schema.",
+			"prompt": "Add granularity support to my dataset registration so callers can pick daily or weekly.",
+			"expected": [
+				"endpoint_schema keeps only the output shape (type, type_column, count_column)",
+				"Granularity is handled as a hive partition level (auto-discovered) or transform axis, never in endpoint_schema",
+				"Explains the boundary: endpoint_schema = what comes back, transform = which rows are read"
+			]
+		},
+		{
+			"id": 5,
+			"name": "declare-minimum-derive-rest",
+			"failure_mode": "Agent enumerates every hive level in transform and/or computes availability client-side in submit.py.",
+			"prompt": "My hive tree is ngram_size=1/granularity=daily/country=US/date=2024-01-01. Write the submit.py.",
+			"expected": [
+				"transform declares only time_dimension (plus optional filter_dimensions/hash_bucket)",
+				"No enumeration of ngram_size/granularity/country levels — notes they are auto-discovered",
+				"No client-side availability computation — notes the server derives it at registration"
+			]
+		},
+		{
+			"id": 6,
+			"name": "hive-naming-is-non-negotiable",
+			"failure_mode": "Agent accepts non-hive directory names (1grams/, daily/) or points data_location below/above the hive root.",
+			"prompt": "My data is laid out as /data/ngrams/1grams/daily/US/2024-01-01.parquet. Register it as parquet_hive.",
+			"expected": [
+				"Flags that 1grams/, daily/, US/ violate the col=val convention and must be renamed (ngram_size=1/, granularity=daily/, country=US/)",
+				"data_location points at the hive root — the directory directly above the first col=val level",
+				"Does not silently register the non-conforming layout",
+				"Does NOT rename or restructure the user's data itself — proposes the fix (e.g. a rename script) and waits for the user to run it"
+			]
+		},
+		{
+			"id": 7,
+			"name": "version-bump-restraint",
+			"failure_mode": "Agent bumps a semver version on a routine pipeline re-run, or edits an existing immutable snapshot.",
+			"prompt": "The nightly pipeline just appended yesterday's rows. Should I register this as 1.0.1?",
+			"expected": [
+				"Recommends staying on version='latest' — routine re-runs are not version bumps",
+				"Explains bumps track interface changes (schema, axes), not data refreshes",
+				"Notes semver snapshots are immutable (409 on re-register)"
+			]
+		},
+		{
+			"id": 8,
+			"name": "register-then-verify",
+			"failure_mode": "Agent POSTs the registration and declares success without checking what the server derived.",
+			"prompt": "Register my dataset and confirm it worked.",
+			"expected": [
+				"Proposes the DatasetCreate payload before POSTing (registry identity is shared state)",
+				"After registration, GETs the dataset and inspects level_order and manifest.availability",
+				"Treats empty derived fields as introspection failure (unreachable data_location or naming violation), not success"
+			]
+		},
+		{
+			"id": 9,
+			"name": "registry-checked-before-write",
+			"failure_mode": "Agent POSTs a registration without inspecting shared registry state — clobbering an existing dataset_id or inventing a domain.",
+			"prompt": "Register my cleaned data as nsf-awards/program-funding on Storywrangler.",
+			"expected": [
+				"Checks GET /registry/domains (or notes guest fallback) before assuming the domain exists",
+				"Checks whether nsf-awards/program-funding already exists (list-datasets/get-dataset) and treats an existing entry as an update decision, not a fresh create",
+				"Still proposes the payload and validates before POSTing"
+			]
+		},
+		{
+			"id": 10,
+			"name": "stays-out-of-generic-etl",
+			"failure_mode": "The submitter skill drags registration machinery into generic pipeline work — front-loading DatasetCreate payloads, registry calls, or submission conventions when the user is just building extract/transform code.",
+			"prompt": "Write the scraper that downloads the raw NSF award CSVs and the transform that cleans them into a table.",
+			"expected": [
+				"Treats this as generic ETL work — writes the scraper/transform without pushing a DatasetCreate payload or registration steps",
+				"At most notes the output contract (column naming, hive col=val) as a design consideration, pointing to the pipelines guide or submitter skill for later",
+				"Does not fetch registry state or validate a submission payload for a task that has no submission in it"
+			]
+		}
+	]
+}
