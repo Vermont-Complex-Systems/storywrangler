@@ -1,6 +1,6 @@
 {
 	"skill": "storywrangler-sveltekit",
-	"description": "Guards against the classic failure modes when an agent uses Storywrangler from a SvelteKit app — assuming a dataset instead of discovering the registry, picking the wrong instrument for the user's question, guessing endpoint arguments instead of reading them from the MCP, and mishandling Storywrangler's error surface / sanitized payloads. Remote-function mechanics are the Svelte skill's job, not tested here.",
+	"description": "Guards against the classic failure modes when an agent uses Storywrangler from a SvelteKit app — assuming a dataset instead of discovering the registry, forcing an instrument when the user may just want the data (or reciting a fixed instrument list instead of proposing from the MCP), guessing endpoint params/values instead of using the MCP's docs and registry surfaces, and writing evolving-API SvelteKit code from memory instead of deferring to the Svelte skills.",
 	"evals": [
 		{
 			"id": 1,
@@ -10,44 +10,45 @@
 			"expected": [
 				"Does not assume a dataset — lists the registry with the MCP `list-datasets` first",
 				"Surfaces the available datasets to the user and asks which one (keeps the user in the loop)",
-				"Uses `get-dataset` to inspect the chosen dataset's instruments, columns, and availability before wiring",
+				"Uses `get-dataset` to inspect the chosen dataset's dimensions, valid values, and date availability before wiring",
 				"Defers the remote-function mechanics to the Svelte skills/MCP rather than re-explaining them"
 			]
 		},
 		{
 			"id": 2,
-			"name": "instrument-fits-the-question",
-			"failure_mode": "Agent reaches for the heavy allotaxonometer (or the wrong instrument) regardless of what the user is actually trying to show.",
-			"prompt": "For US Wikipedia, I want to explain what words drove the shift between two specific dates. Which Storywrangler instrument, and wire it.",
+			"name": "data-or-instrument-not-forced",
+			"failure_mode": "Agent assumes the app must use an instrument (often defaulting to the allotaxonometer) instead of recognising the user may just want the dataset's data, and recites instruments from memory instead of proposing from the MCP.",
+			"prompt": "I've got the wikimedia ngrams dataset selected. What can I actually build on my page with it?",
 			"expected": [
-				"Recommends the lightweight wordshift / RTD instrument (single date-vs-date shift for one entity), not the full allotaxonometer",
-				"Explains the fit: the question is 'what drove the change', not 'compare two systems'",
-				"Confirms the entity and the two dates with the user / discovery rather than inventing them",
-				"Looks up the instrument's exact arguments via `get-dataset` instead of guessing param names"
+				"Does not force an instrument — notes the app can read the dataset's data directly (counts, ranks, time series) or apply an instrument over it",
+				"Looks up the available instruments and their use cases in the MCP docs (`get-documentation`) rather than reciting a fixed list",
+				"Proposes the options that fit and lets the user choose (user in the loop)",
+				"Does not treat top n-grams or term time series as instruments"
 			]
 		},
 		{
 			"id": 3,
-			"name": "args-and-availability-from-mcp",
-			"failure_mode": "Agent hardcodes guessed argument names/entity ids/date formats from memory, and skips checking whether the requested date exists.",
-			"prompt": "Wire an allotaxonometer comparing France and Germany on 2025-01-01 for the wikimedia ngrams dataset.",
+			"name": "params-from-docs-values-from-registry",
+			"failure_mode": "Agent guesses endpoint param names, entity id formats, or date formats from memory, conflates the two MCP surfaces, or mishandles the sanitized response.",
+			"prompt": "Wire the allotaxonometer comparing France and Germany on 2025-01-01 for the wikimedia ngrams dataset.",
 			"expected": [
-				"Reads the dataset's exact arguments (entity id scheme, date format, filter dims, limits) from `get-dataset` — does not guess",
-				"Resolves the entities and checks date availability before baking values in (defers to the MCP / storywrangler-analyst)",
-				"Maps the instrument's 404 (no data for that date) to a real UI state",
-				"Fetches server-side inside the remote function — a public read, no auth invented"
+				"Gets the endpoint's parameters and response shape from the API reference (`get-documentation api-reference/...`)",
+				"Gets the dataset's valid values (entity id scheme, date format, filter dims, date availability) from `get-dataset`",
+				"Checks the requested date is available before baking it in, and maps the endpoint's 404 to a real UI state",
+				"Handles the sanitized response: non-finite numbers arrive as null or the strings \"Infinity\"/\"-Infinity\", so measure fields are possibly-string",
+				"Does not guess param names or entity ids from memory"
 			]
 		},
 		{
 			"id": 4,
-			"name": "sanitized-payload-gotcha",
-			"failure_mode": "Agent treats instrument response fields as plain numbers, so Infinity/NaN values break the chart, and downloads the whole oversized payload.",
-			"prompt": "My allotaxonometer chart breaks — some divergence values come back as \"Infinity\" and the response is huge. How do I handle this in my SvelteKit app?",
+			"name": "defer-sveltekit-code",
+			"failure_mode": "Agent writes remote-function code from memory against a still-evolving SvelteKit API, instead of deferring the mechanics to the Svelte skills/MCP and contributing only the Storywrangler-specific parts.",
+			"prompt": "Give me the SvelteKit remote function that calls the storywrangler allotax endpoint.",
 			"expected": [
-				"Knows the server sanitizes non-finite numbers — `NaN` → `null`, `±Infinity` → the strings \"Infinity\"/\"-Infinity\" — so measure/divergence fields are possibly-string",
-				"Handles those string sentinels in the frontend rather than assuming numbers",
-				"Bounds the payload with the instrument's limit params, whose names it confirms via `get-dataset`",
-				"Does not re-document the endpoint from memory — points at the MCP for the real field/param names"
+				"Defers the remote-function mechanics (file type, query vs prerender, validation, rendering) to the Svelte skills/MCP rather than asserting them from memory",
+				"Notes the remote-functions API is still evolving, so the current syntax should come from the Svelte docs/skill",
+				"Contributes the Storywrangler-specific parts: the endpoint + params from the API reference, no-auth public read, error-surface mapping",
+				"Does not present a full hardcoded remote-function code block as if authoritative"
 			]
 		}
 	]
