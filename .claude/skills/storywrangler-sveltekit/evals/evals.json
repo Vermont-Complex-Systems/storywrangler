@@ -1,0 +1,54 @@
+{
+	"skill": "storywrangler-sveltekit",
+	"description": "Guards against the classic failure modes when an agent uses Storywrangler from a SvelteKit app — assuming a dataset instead of discovering the registry, picking the wrong instrument for the user's question, guessing endpoint arguments instead of reading them from the MCP, and mishandling Storywrangler's error surface / sanitized payloads. Remote-function mechanics are the Svelte skill's job, not tested here.",
+	"evals": [
+		{
+			"id": 1,
+			"name": "start-from-registry",
+			"failure_mode": "Agent silently defaults to a corpus (e.g. wikimedia ngrams) and starts wiring, instead of discovering what datasets exist and letting the user choose.",
+			"prompt": "I want to show some Storywrangler data in my SvelteKit app. Set it up.",
+			"expected": [
+				"Does not assume a dataset — lists the registry with the MCP `list-datasets` first",
+				"Surfaces the available datasets to the user and asks which one (keeps the user in the loop)",
+				"Uses `get-dataset` to inspect the chosen dataset's instruments, columns, and availability before wiring",
+				"Defers the remote-function mechanics to the Svelte skills/MCP rather than re-explaining them"
+			]
+		},
+		{
+			"id": 2,
+			"name": "instrument-fits-the-question",
+			"failure_mode": "Agent reaches for the heavy allotaxonometer (or the wrong instrument) regardless of what the user is actually trying to show.",
+			"prompt": "For US Wikipedia, I want to explain what words drove the shift between two specific dates. Which Storywrangler instrument, and wire it.",
+			"expected": [
+				"Recommends the lightweight wordshift / RTD instrument (single date-vs-date shift for one entity), not the full allotaxonometer",
+				"Explains the fit: the question is 'what drove the change', not 'compare two systems'",
+				"Confirms the entity and the two dates with the user / discovery rather than inventing them",
+				"Looks up the instrument's exact arguments via `get-dataset` instead of guessing param names"
+			]
+		},
+		{
+			"id": 3,
+			"name": "args-and-availability-from-mcp",
+			"failure_mode": "Agent hardcodes guessed argument names/entity ids/date formats from memory, and skips checking whether the requested date exists.",
+			"prompt": "Wire an allotaxonometer comparing France and Germany on 2025-01-01 for the wikimedia ngrams dataset.",
+			"expected": [
+				"Reads the dataset's exact arguments (entity id scheme, date format, filter dims, limits) from `get-dataset` — does not guess",
+				"Resolves the entities and checks date availability before baking values in (defers to the MCP / storywrangler-analyst)",
+				"Maps the instrument's 404 (no data for that date) to a real UI state",
+				"Fetches server-side inside the remote function — a public read, no auth invented"
+			]
+		},
+		{
+			"id": 4,
+			"name": "sanitized-payload-gotcha",
+			"failure_mode": "Agent treats instrument response fields as plain numbers, so Infinity/NaN values break the chart, and downloads the whole oversized payload.",
+			"prompt": "My allotaxonometer chart breaks — some divergence values come back as \"Infinity\" and the response is huge. How do I handle this in my SvelteKit app?",
+			"expected": [
+				"Knows the server sanitizes non-finite numbers — `NaN` → `null`, `±Infinity` → the strings \"Infinity\"/\"-Infinity\" — so measure/divergence fields are possibly-string",
+				"Handles those string sentinels in the frontend rather than assuming numbers",
+				"Bounds the payload with the instrument's limit params, whose names it confirms via `get-dataset`",
+				"Does not re-document the endpoint from memory — points at the MCP for the real field/param names"
+			]
+		}
+	]
+}
