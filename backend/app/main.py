@@ -19,7 +19,7 @@ from app.core.openapi_menus import install_dynamic_openapi, refresh_weight_menus
 from app.core.timing import get_timings, init_timings
 from app.models.auth import User
 from app.core.health_check import health_check_loop
-from app.routers import auth, babynames, domain_root, health, open_academic_analytics, reddit, registry, scisciDB, storywrangler, twitter, wikimedia, zoning_bylaws
+from app.routers import auth, babynames, bluesky, domain_root, health, open_academic_analytics, reddit, registry, scisciDB, storywrangler, twitter, wikimedia, zoning_bylaws
 from storywrangler_mcp.server import mcp as mcp_server
 
 log = logging.getLogger(__name__)
@@ -196,6 +196,7 @@ DOMAIN_ROUTERS = {
     "babynames": babynames.router,
     "storywrangler": storywrangler.router,
     "reddit": reddit.router,
+    "bluesky": bluesky.router,
     "wikimedia": wikimedia.router,
     "open-academic-analytics": open_academic_analytics.router,
     "scisciDB": scisciDB.router,
@@ -205,7 +206,14 @@ DOMAIN_ROUTERS = {
 for _domain, _router in DOMAIN_ROUTERS.items():
     app.include_router(_router, prefix=f"/{_domain}", tags=[_domain])
     # GET /{domain} — generic root listing the domain's endpoints + datasets.
-    app.add_api_route(f"/{_domain}", domain_root.make_endpoint(_domain), tags=[_domain])
+    # Hidden from the OpenAPI schema (include_in_schema=False): it's a discovery
+    # mechanism (SDK .endpoints / client repr, or a guessed GET), not a
+    # documented data contract — one near-identical entry per domain would just
+    # clutter the api-reference. The route still serves normally.
+    app.add_api_route(
+        f"/{_domain}", domain_root.make_endpoint(_domain),
+        tags=[_domain], include_in_schema=False,
+    )
 registry.VALID_DOMAINS = set(DOMAIN_ROUTERS)
 
 app.include_router(health.router, prefix="/health", tags=["health"])

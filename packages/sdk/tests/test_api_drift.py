@@ -216,6 +216,9 @@ class TestRouteCoverage:
         "/reddit/top-ngrams": ("DatasetClient", "top_ngrams"),
         "/reddit/term-series": ("DatasetClient", "term_series"),
         "/reddit/term-series/batch": ("DatasetClient", "term_series_batch"),
+        # bluesky: term-bucketed sparkline tree, term-series only (no top-ngrams yet)
+        "/bluesky/term-series": ("DatasetClient", "term_series"),
+        "/bluesky/term-series/batch": ("DatasetClient", "term_series_batch"),
         "/babynames/top-ngrams": ("DatasetClient", "top_ngrams"),
         "/vt-zoning-atlas/top-ngrams": ("DatasetClient", "top_ngrams"),
         # Bespoke routes — served via the escape hatch for now

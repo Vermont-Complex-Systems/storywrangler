@@ -417,6 +417,59 @@ REDDIT_TERM_SERIES = {
     },
 }
 
+BLUESKY_TERM_SERIES = {
+    "responses": {
+        "200": {
+            "description": "Successful response",
+            "content": {
+                "application/json": {
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "type": {
+                                "type": "string",
+                                "description": "The n-gram term that was looked up (echoed back).",
+                            },
+                            "latest_available_date": {
+                                "type": "string",
+                                "format": "date",
+                                "description": "Most recent date with data for this language.",
+                            },
+                            "series": {
+                                "type": "array",
+                                "description": "Time series entries, one per date, sorted chronologically.",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "date": {"type": "string", "format": "date"},
+                                        "counts": {"type": "integer", "description": "Count for this term on this date under the chosen weight"},
+                                        "rank": {"type": "integer", "description": "Rank by the chosen measure on this date (1 = most frequent). 0 means not ranked."},
+                                        "freq": {"type": "number", "description": "Relative frequency on this date under the chosen weight"},
+                                    },
+                                },
+                            },
+                        },
+                    },
+                    "example": {
+                        "type": "trump",
+                        "latest_available_date": "2025-09-12",
+                        "series": [
+                            {"date": "2025-09-11", "counts": 41964, "rank": 487, "freq": 0.00021},
+                            {"date": "2025-09-12", "counts": 45655, "rank": 455, "freq": 0.00023},
+                        ],
+                    },
+                }
+            },
+        }
+    },
+    "x-performance": {
+        "always_fast": "Every request is a hash-bucket point lookup on the term-bucketed tree (~tens of ms). window=0 (full history) is cheap — there is no partition scan path.",
+    },
+    "x-frontend-notes": {
+        "weight": "Valid weight values are the dataset's endpoint_schema.count_column list (GET /registry/bluesky/ngrams). counts, rank, AND freq all switch with the weight — bluesky ranks are per-measure (rank / rank_all), unlike reddit's canonical rank.",
+    },
+}
+
 STORYWRANGLER_ALLOTAXONOMETER = {
     "x-powered-by": "rust",
     "responses": {
