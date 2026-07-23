@@ -230,9 +230,17 @@ class EndpointSchemaConfig(BaseModel):
 
     ``type-documents``
         Provenance: ``(type, date) → ranked [(document, score)]``. Not queried
-        on its own — attached to a term-series response via
-        ``?include=<dataset_id>``. Declares doc_column / score_column /
-        order_column (and type_column for the type it is keyed by).
+        on its own — attached to a term-series response via ``?include=<role>``
+        (or ``?include=all``), resolved through ``lineage.derived_from``.
+        Declares doc_column / score_column / order_column (and type_column for
+        the type it is keyed by), plus an optional ``role`` name.
+
+    Physical orientation
+        A ``types-counts`` corpus is often served by two physical forms with
+        independent lifecycles: a **time-first** (date-partitioned) tree and a
+        **type-first** (hash-bucketed) sparkline. ``orientation`` declares which
+        one this registration is; the platform pairs them via
+        ``lineage.derived_from`` (see the field docs).
 
     See [endpoint schema spec](/docs/specification#endpoint-schemas).
     """
@@ -283,13 +291,36 @@ class EndpointSchemaConfig(BaseModel):
             "`weight`. Omit when the dataset has no precomputed frequency."
         ),
     )
+    orientation: Optional[Literal["time-first", "type-first"]] = Field(
+        None,
+        description=(
+            "types-counts only. Physical layout of this form of the corpus. "
+            "`time-first` (the default when omitted) is date-partitioned — it "
+            "feeds top-ngrams / allotax / rtd / wordshift and the term-series "
+            "slow fallback. `type-first` is hash-bucketed by type — the "
+            "term-series fast-path (sparkline) companion. Declare `type-first` "
+            "on a sparkline dataset whose `lineage.derived_from` names the "
+            "primary time-first dataset, so term-series resolves it without a "
+            "query param."
+        ),
+    )
+    role: Optional[str] = Field(
+        None,
+        description=(
+            "type-documents only. Short name for this provenance companion "
+            "(e.g. 'articles', 'subreddits'). A term-series request attaches it "
+            "with `?include=<role>` (or `?include=all`), resolved through "
+            "`lineage.derived_from` — no raw dataset id in the query surface. "
+            "Omit to be addressable only by dataset id (deprecated)."
+        ),
+    )
     doc_column: Optional[str] = Field(
         None,
         description=(
             "type-documents only. Column holding the source-document identifier "
             "(e.g. 'article_url'). A type-documents dataset maps (type, date) → a "
             "ranked list of these documents; a term-series request attaches them "
-            "via `?include=<this dataset_id>`."
+            "via `?include=<role>` (falling back to `?include=<dataset_id>`)."
         ),
     )
     score_column: Optional[str] = Field(
@@ -332,6 +363,24 @@ class EndpointSchemaConfig(BaseModel):
                     f"{name} has {len(val)} entries but count_column has "
                     f"{menu_len}; a list companion must be parallel to count_column."
                 )
+        return self
+
+    @model_validator(mode="after")
+    def validate_orientation_and_role(self) -> "EndpointSchemaConfig":
+        """Scope orientation to types-counts and role to type-documents.
+
+        Orientation describes a types-counts form's physical layout (time-first
+        vs type-first); type-documents is inherently type-first, so it takes no
+        orientation. `role` names a type-documents provenance companion for
+        `?include=`, so it is meaningless on any other type.
+        """
+        if self.orientation is not None and self.type != "types-counts":
+            raise ValueError(
+                "orientation applies only to types-counts datasets "
+                "(type-documents is inherently type-first)."
+            )
+        if self.role is not None and self.type != "type-documents":
+            raise ValueError("role applies only to type-documents datasets.")
         return self
 
 

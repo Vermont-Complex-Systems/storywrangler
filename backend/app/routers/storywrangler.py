@@ -34,7 +34,7 @@ from ..core.duckdb_query import (
 from ..core.query_utils import (
     dates_mode, extract_filter_vals, latest_available_for, latest_from_manifest,
     parse_dates, require_dates_supported, require_types_counts,
-    resolve_count_column, resolve_entity, resolve_series_columns,
+    resolve_companions, resolve_count_column, resolve_entity, resolve_series_columns,
 )
 from ..core.registry_utils import get_latest_entry
 from ..core.term_series import (
@@ -207,51 +207,94 @@ def _series_row(row, cols, includes=None) -> dict:
     return entry
 
 
-async def _fetch_includes(db, domain, include, ctx, terms) -> dict:
-    """Resolve and fetch each ?include= provenance dataset for *terms*.
+async def _resolve_include(db, domain, token, doc_companions) -> tuple:
+    """Resolve one ?include= token → (key, prov_obj).
 
-    Returns ``{dataset_id: {(type, date): [[doc, score], ...]}}``. *include* is a
-    comma-separated list of provenance dataset ids in this domain; an unknown or
-    non-type-documents id is a 400 (rather than a silently empty field).
+    A token is a declared provenance *role* (the clean surface — resolved from
+    the primary's lineage companions), falling back to a raw type-documents
+    dataset id (deprecated alias). Unknown or non-type-documents tokens are a
+    400, not a silently empty field. The returned *key* is the token as asked,
+    so the response nests under the role (or id) the caller used.
     """
-    ids = [p.strip() for p in (include or "").split(",") if p.strip()]
+    if token in doc_companions:
+        return token, doc_companions[token]
+    prov_obj = await get_latest_entry(db, domain, token)
+    if not prov_obj:
+        raise HTTPException(
+            status_code=400,
+            detail=f"include '{token}' is not a known provenance role or dataset "
+                   f"in '{domain}'. Available roles: {sorted(doc_companions)}",
+        )
+    if (prov_obj.endpoint_schema or {}).get("type") != "type-documents":
+        raise HTTPException(
+            status_code=400,
+            detail=f"include '{domain}/{token}' is not a type-documents dataset "
+                   "(register it with endpoint_schema.type='type-documents').",
+        )
+    return token, prov_obj
+
+
+async def _fetch_includes(db, domain, include, ctx, terms) -> dict:
+    """Resolve and fetch each ?include= provenance companion for *terms*.
+
+    Returns ``{key: {(type, date): [[doc, score], ...]}}`` keyed by role (or
+    dataset id for the deprecated raw-id form). *include* is a comma-separated
+    list of provenance roles declared on the primary's lineage companions, or
+    the literal ``all`` for every companion.
+    """
+    tokens = [p.strip() for p in (include or "").split(",") if p.strip()]
     # Provenance is a bucket-routed parquet read; mongodb pass-through datasets
     # have no type-documents companions, so include is a no-op there.
-    if not ids or not terms or getattr(ctx, "is_mongo", False):
+    if not tokens or not terms or getattr(ctx, "is_mongo", False):
         return {}
-    out: dict = {}
-    for prov_id in ids:
-        prov_obj = await get_latest_entry(db, domain, prov_id)
-        if not prov_obj:
-            raise HTTPException(
-                status_code=400, detail=f"include dataset '{domain}/{prov_id}' not found")
-        if (prov_obj.endpoint_schema or {}).get("type") != "type-documents":
-            raise HTTPException(
-                status_code=400,
-                detail=f"include dataset '{domain}/{prov_id}' is not a type-documents "
-                       "dataset (register it with endpoint_schema.type='type-documents').",
-            )
 
-        def _fetch(prov_obj=prov_obj, prov_id=prov_id):
+    doc_companions = (getattr(ctx, "companions", None) or {}).get("documents", {})
+    selected: dict = {}
+    for token in tokens:
+        if token == "all":
+            selected.update(doc_companions)
+            continue
+        key, prov_obj = await _resolve_include(db, domain, token, doc_companions)
+        selected[key] = prov_obj
+
+    out: dict = {}
+    for key, prov_obj in selected.items():
+        def _fetch(prov_obj=prov_obj):
             with get_duckdb_client().timed_connect() as conn:
                 return fetch_provenance(
                     conn, prov_obj, sorted(terms),
                     entity_value=ctx.local_id, filter_vals=ctx.filter_vals,
                     date_condition=ctx.date_filter, date_params=ctx.date_params,
-                    label=f"{domain}/{prov_id}", time_col=ctx.time_col,
+                    label=f"{domain}/{prov_obj.dataset_id}", time_col=ctx.time_col,
                 )
-        with timed("include", f"provenance {prov_id}"):
-            out[prov_id] = await run_blocking(_fetch)
+        with timed("include", f"provenance {key}"):
+            out[key] = await run_blocking(_fetch)
     return out
 
 
-async def _prepare_term_series(request, db, domain, dataset, entity, weight, dates):
+async def _resolve_sparkline_obj(db, domain, companions, sparkline_dataset):
+    """The type-first companion term-series' fast path reads.
+
+    Default (``sparkline_dataset is None``): the declared type-first companion
+    (lineage + ``orientation: type-first``). None → no fast path, so the query
+    uses the correct-but-slower date-first scan until a sparkline is registered
+    with that orientation. An explicit ``sparkline_dataset`` overrides by id
+    (deprecated); ``""`` also disables the fast path.
+    """
+    if sparkline_dataset is not None:
+        return await get_latest_entry(db, domain, sparkline_dataset) if sparkline_dataset else None
+    return companions["type_first"]
+
+
+async def _prepare_term_series(request, db, domain, dataset, entity, weight, dates,
+                               sparkline_dataset=None):
     """Shared term-series setup — dataset, columns, entity, date range, path.
 
     *dates* is a single date or a 'start,end' range (parse_dates, same as the
-    other generic endpoints); omit for full history. Returns (ctx, early) where
-    early is a 404 JSONResponse when an undated request hits a slice with no
-    data at all, else None.
+    other generic endpoints); omit for full history. *sparkline_dataset* is the
+    deprecated fast-path override (default None → resolve via lineage). Returns
+    (ctx, early) where early is a 404 JSONResponse when an undated request hits
+    a slice with no data at all, else None.
     """
     dataset_obj = await _resolve_types_counts(db, domain, dataset, dates)
     if dates_mode(dataset_obj) == "none":
@@ -318,11 +361,18 @@ async def _prepare_term_series(request, db, domain, dataset, entity, weight, dat
     if getattr(dataset_obj, "level_order", None):
         _, base_path = ngrams_context(dataset_obj, local_id, filter_vals)
 
+    # Companions are deduced from declared lineage: the type-first sparkline
+    # (fast path) and the type-documents provenance sets (?include=). Resolved
+    # once here so both the row scan and _fetch_includes reuse them.
+    companions = await resolve_companions(db, domain, dataset)
+    sparkline_obj = await _resolve_sparkline_obj(db, domain, companions, sparkline_dataset)
+
     ctx = SimpleNamespace(
         dataset_obj=dataset_obj, is_mongo=False, select_cols=select_cols, cols=cols,
         filter_vals=filter_vals, local_id=local_id, latest_date=latest_date,
         date_filter=date_filter, date_params=date_params, base_path=base_path,
         type_col=type_col, time_col=time_col,
+        companions=companions, sparkline_obj=sparkline_obj,
     )
     return ctx, None
 
@@ -408,10 +458,11 @@ async def _mongo_term_series_rows(domain, ctx, terms) -> list:
     return rows
 
 
-async def _term_series_rows(db, domain, ctx, terms, sparkline_dataset):
+async def _term_series_rows(domain, ctx, terms):
     """Fast sparkline bucket lookup, falling back to a dist-tree scan.
 
-    Fast path: hash-bucket point lookup on the type-first sparkline dataset.
+    Fast path: hash-bucket point lookup on the type-first sparkline companion
+    (ctx.sparkline_obj, resolved from lineage in _prepare_term_series).
     Slow path: a scan of the date-first tree (year/month pruned where the tree
     has those levels) for terms outside the precomputed vocabulary.
 
@@ -426,9 +477,7 @@ async def _term_series_rows(db, domain, ctx, terms, sparkline_dataset):
 
     label = f"{domain}/term-series"
     rows = []
-    sparkline_obj = (
-        await get_latest_entry(db, domain, sparkline_dataset) if sparkline_dataset else None
-    )
+    sparkline_obj = ctx.sparkline_obj
     if sparkline_obj:
         def _fast():
             with get_duckdb_client().timed_connect() as conn:
@@ -483,25 +532,26 @@ async def term_series(
     entity: Optional[str] = Query(None, description="Global entity ID (e.g. 'wikidata:Q30') or local ID. Omit for datasets without entity_mapping."),
     dates: Optional[str] = Query(None, description="Date range: a single date '2024-06-01' or 'start,end' like '2024-01-01,2024-12-31'. Omit for full history."),
     weight: Optional[str] = Query(None, description="Count measure — one of the dataset's endpoint_schema.count_column entries. Defaults to the first."),
-    sparkline_dataset: str = Query("sparklines", description="Registry dataset_id for the type-first sparkline precompute (default: 'sparklines'). Empty falls back to the dist-tree scan."),
-    include: Optional[str] = Query(None, description="Comma-separated type-documents dataset id(s) whose ranked source documents to attach per date (e.g. 'top_articles_ngrams'). Each is added to every entry under its dataset id."),
+    sparkline_dataset: Optional[str] = Query(None, description="Deprecated. The type-first sparkline companion is resolved from lineage; pass a dataset_id only to override, or '' to disable the fast path (dist-tree scan only)."),
+    include: Optional[str] = Query(None, description="Comma-separated provenance role(s) to attach per date (e.g. 'articles'), or 'all' for every declared companion. Roles are resolved from the primary's lineage; a raw type-documents dataset id also works (deprecated)."),
     db: AsyncSession = Depends(get_session),
 ):
     """Per-date time series for a single type in any registered types-counts dataset.
 
     Returns counts, and rank/freq when the dataset declares `rank_column`/
     `freq_column`. Fast path: hash-bucket lookup on the type-first sparkline
-    dataset; slow fallback: a scan of the date-first tree for types outside the
-    precomputed vocabulary. mongodb datasets are served by their bespoke
-    `/{domain}/term-series`.
+    companion (resolved from lineage); slow fallback: a scan of the date-first
+    tree for types outside the precomputed vocabulary. mongodb datasets are
+    served through the same endpoint (find + range, no aggregation).
 
-    `include=<type-documents dataset id>` attaches that dataset's ranked source
-    documents per date (the provenance behind each entry).
+    `include=<role>` (or `include=all`) attaches a type-documents companion's
+    ranked source documents per date (the provenance behind each entry).
     """
-    ctx, early = await _prepare_term_series(request, db, domain, dataset, entity, weight, dates)
+    ctx, early = await _prepare_term_series(
+        request, db, domain, dataset, entity, weight, dates, sparkline_dataset)
     if early is not None:
         return early
-    rows = await _term_series_rows(db, domain, ctx, [type], sparkline_dataset)
+    rows = await _term_series_rows(domain, ctx, [type])
     includes = await _fetch_includes(db, domain, include, ctx, {r[0] for r in rows})
     return {
         "type": type,
@@ -519,18 +569,19 @@ async def term_series_batch(
     entity: Optional[str] = Query(None, description="Global entity ID or local ID. Omit for datasets without entity_mapping."),
     dates: Optional[str] = Query(None, description="Date range: a single date or 'start,end'. Omit for full history."),
     weight: Optional[str] = Query(None, description="Count measure — defaults to the first registered."),
-    sparkline_dataset: str = Query("sparklines", description="Type-first sparkline dataset_id (default: 'sparklines')."),
-    include: Optional[str] = Query(None, description="Comma-separated type-documents dataset id(s) whose ranked source documents to attach per date."),
+    sparkline_dataset: Optional[str] = Query(None, description="Deprecated. The type-first sparkline companion is resolved from lineage; pass a dataset_id only to override, or '' to disable the fast path."),
+    include: Optional[str] = Query(None, description="Comma-separated provenance role(s) to attach per date, or 'all'. Resolved from the primary's lineage; a raw type-documents dataset id also works (deprecated)."),
     db: AsyncSession = Depends(get_session),
 ):
     """Batch term-series — a map of type → series in one request."""
     type_list = [t.strip() for t in types.split(",") if t.strip()]
     if not type_list:
         raise HTTPException(status_code=400, detail="types parameter must contain at least one term")
-    ctx, early = await _prepare_term_series(request, db, domain, dataset, entity, weight, dates)
+    ctx, early = await _prepare_term_series(
+        request, db, domain, dataset, entity, weight, dates, sparkline_dataset)
     if early is not None:
         return early
-    rows = await _term_series_rows(db, domain, ctx, type_list, sparkline_dataset)
+    rows = await _term_series_rows(domain, ctx, type_list)
     includes = await _fetch_includes(db, domain, include, ctx, {r[0] for r in rows})
     results = {t: [] for t in type_list}
     for r in rows:

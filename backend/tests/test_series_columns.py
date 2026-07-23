@@ -107,3 +107,43 @@ class TestTypeDocuments:
     def test_type_is_supported(self):
         from storywrangler_schemas.registry import _SUPPORTED_ENDPOINT_TYPES
         assert "type-documents" in _SUPPORTED_ENDPOINT_TYPES
+
+
+class TestOrientationAndRole:
+    """orientation scopes to types-counts; role scopes to type-documents."""
+
+    def _validate(self, ep):
+        from storywrangler_schemas.registry import EndpointSchemaConfig
+        return EndpointSchemaConfig.model_validate(ep)
+
+    def test_orientation_on_types_counts(self):
+        for o in ("time-first", "type-first"):
+            assert self._validate(
+                {"type": "types-counts", "count_column": "c", "orientation": o}
+            ).orientation == o
+
+    def test_orientation_defaults_none(self):
+        # Omitted → None, which the resolver reads as time-first (back-compat).
+        assert self._validate({"type": "types-counts", "count_column": "c"}).orientation is None
+
+    def test_orientation_rejected_on_type_documents(self):
+        import pytest
+        with pytest.raises(ValueError, match="orientation applies only to types-counts"):
+            self._validate({"type": "type-documents", "doc_column": "d",
+                            "score_column": "s", "orientation": "type-first"})
+
+    def test_role_on_type_documents(self):
+        ep = self._validate({"type": "type-documents", "doc_column": "d",
+                             "score_column": "s", "role": "articles"})
+        assert ep.role == "articles"
+
+    def test_role_rejected_on_types_counts(self):
+        import pytest
+        with pytest.raises(ValueError, match="role applies only to type-documents"):
+            self._validate({"type": "types-counts", "count_column": "c", "role": "articles"})
+
+    def test_invalid_orientation_value(self):
+        import pytest
+        with pytest.raises(ValueError):
+            self._validate({"type": "types-counts", "count_column": "c",
+                            "orientation": "sideways"})

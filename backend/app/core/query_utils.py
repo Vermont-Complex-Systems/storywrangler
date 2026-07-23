@@ -293,6 +293,61 @@ async def resolve_entity(
     )
 
 
+async def _domain_latest_entries(db: AsyncSession, domain: str) -> List[RegistryEntry]:
+    """All datasets in a domain, each resolved to its latest entry.
+
+    One row per dataset_id, using the same precedence as get_latest_entry
+    (the mutable 'latest' slot wins, else the newest snapshot). A domain holds
+    a handful of datasets, so this is a cheap scan.
+    """
+    result = await db.execute(
+        select(RegistryEntry)
+        .where(RegistryEntry.domain == domain)
+        .order_by(
+            RegistryEntry.dataset_id,
+            (RegistryEntry.version != "latest"),
+            RegistryEntry.created_at.desc(),
+        )
+    )
+    latest: dict = {}
+    for entry in result.scalars().all():
+        latest.setdefault(entry.dataset_id, entry)  # first per id wins (ordered)
+    return list(latest.values())
+
+
+async def resolve_companions(db: AsyncSession, domain: str, dataset: str) -> dict:
+    """Resolve a primary dataset's declared companions via lineage + orientation.
+
+    Returns ``{"type_first": entry | None, "documents": {role: entry, ...}}``.
+    A companion is any latest dataset in the domain whose
+    ``lineage.derived_from`` includes ``"<domain>/<dataset>"`` — so the pairing
+    is deduced from *declared provenance*, never sniffed from structure. Among
+    those companions:
+
+      - the ``types-counts`` dataset with ``orientation: type-first`` is the
+        term-series fast-path (sparkline);
+      - each ``type-documents`` dataset is an ``?include=`` source, keyed by its
+        declared ``role`` (or its dataset_id when no role is declared).
+
+    Decoupled: a sparkline or provenance set is added later by registering it
+    with ``derived_from``, with no change to the primary.
+    """
+    ref = f"{domain}/{dataset}"
+    type_first = None
+    documents: dict = {}
+    for entry in await _domain_latest_entries(db, domain):
+        derived = (entry.lineage or {}).get("derived_from") or []
+        if ref not in derived:
+            continue
+        ep = entry.endpoint_schema or {}
+        etype = ep.get("type")
+        if etype == "types-counts" and ep.get("orientation") == "type-first":
+            type_first = type_first or entry
+        elif etype == "type-documents":
+            documents[ep.get("role") or entry.dataset_id] = entry
+    return {"type_first": type_first, "documents": documents}
+
+
 def parse_dates(s: Optional[str]) -> Optional[List[str]]:
     """Split a 'start' or 'start,end' date string into a two-element list.
 

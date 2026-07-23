@@ -402,11 +402,13 @@ class InstrumentClient(_SubClient):
             dates: A single date ('2024-06-01') or 'start,end' range
                 ('2024-01-01,2024-12-31'); omit for full history.
             weight: Count measure — one of the registered count_column entries.
-            sparkline_dataset: Type-first fast-path dataset id (default
-                'sparklines' server-side); pass '' to force the dist-tree scan.
-            include: Comma-separated type-documents dataset id(s) whose ranked
-                source documents to attach per date (e.g. 'top_articles_ngrams'),
-                added to each entry under its dataset id.
+            sparkline_dataset: Deprecated. The type-first fast-path companion is
+                resolved from lineage; pass a dataset_id only to override, or ''
+                to force the dist-tree scan.
+            include: Comma-separated provenance role(s) to attach per date (e.g.
+                'articles'), or 'all' for every declared companion. Roles resolve
+                from the primary's lineage; a raw type-documents dataset id also
+                works (deprecated). Each is added to every entry under its key.
             **filter_dims: Dataset-specific filters by registered column name
                 (``n=1, lang="en"`` for reddit, ``ngram_size=1, granularity=
                 "daily"`` for wikimedia).

@@ -5,11 +5,17 @@ Follows: the generic `/storywrangler/top-ngrams` work (branch `generic-ngram-end
 
 **Shipped** (branch `feat/generic-term-series`): the rank/freq companion columns
 (`resolve_series_columns`), the generic `/storywrangler/term-series` + `/batch`
-across parquet_hive / flat parquet / mongodb, and the `?include=` provenance
-mechanism (`type-documents` + `fetch_provenance`). **Not yet built**: the
-orientation / companion-resolution section below (it replaces the current
-`sparkline_dataset` param and `?include=<dataset_id>` naming), and the
-per-domain retirement.
+across parquet_hive / flat parquet / mongodb, the `?include=` provenance
+mechanism (`type-documents` + `fetch_provenance`), and the orientation /
+companion-resolution section below — the `orientation` / `role` schema fields,
+lineage-based `resolve_companions`, term-series auto-resolving its type-first
+sparkline (no `sparkline_dataset` needed), and role-based `?include=<role>` /
+`include=all`. The implicit `"sparklines"` naming-convention fallback was
+**not** kept (it was the structural sniffing this section argues against): a
+sparkline must declare `orientation: type-first`, else the query uses the
+correct-but-slower date-first scan. The explicit deprecated aliases
+(`sparkline_dataset=<id>`, `include=<dataset_id>`) remain for one release.
+**Not yet built**: the per-domain retirement.
 
 ## Problem
 
@@ -255,9 +261,12 @@ nfl-tweets-articles    type-documents role=articles              derived_from=[t
 
 Additive. `orientation` defaults to `time-first`, so existing time-first
 datasets need no change; sparklines re-register with `orientation: type-first`
-(they already declare `derived_from`); `type-documents` datasets add a `role`.
-Keep `sparkline_dataset`/`?include=<id>` working as deprecated aliases for one
-release, then remove.
+(they already declare `derived_from`) to regain the fast path; `type-documents`
+datasets add a `role` to be addressable as `?include=<role>`. The explicit
+`sparkline_dataset`/`?include=<id>` aliases keep working (deprecated, one
+release); the implicit `"sparklines"` name-convention was dropped, so an
+un-migrated sparkline degrades to the date-first scan rather than being sniffed
+by name.
 
 ## Open questions
 
