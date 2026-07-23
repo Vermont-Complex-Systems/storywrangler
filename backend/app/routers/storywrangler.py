@@ -32,8 +32,8 @@ from ..core.duckdb_query import (
     load_system,
 )
 from ..core.query_utils import (
-    dates_mode, extract_filter_vals, latest_available_for, latest_from_manifest,
-    parse_dates, require_dates_supported, require_types_counts,
+    dates_mode, extract_filter_pair, extract_filter_vals, latest_available_for,
+    latest_from_manifest, parse_dates, require_dates_supported, require_types_counts,
     resolve_companions, resolve_count_column, resolve_entity, resolve_series_columns,
 )
 from ..core.registry_utils import get_latest_entry
@@ -635,17 +635,16 @@ async def allotaxonometer(
     # Any level_order column (partition/filter type) can be passed as
     # ?dim=val (system 1) or ?dim2=val (system 2), using actual column names
     # from the dataset — e.g. ?ngram_size=1 for wikimedia, ?n=1 for reddit.
-    filter_vals1 = extract_filter_vals(dataset_obj, request.query_params)
-    filter_vals2 = extract_filter_vals(dataset_obj, request.query_params, suffix="2")
+    # System 2 inherits system 1's filters per dimension unless overridden
+    # (?lang2=...) — bare ?dim= filters both systems. Same convention everywhere.
+    filter_vals1, filter_vals2 = extract_filter_pair(dataset_obj, request.query_params)
 
-    # mongodb pass-through datasets load systems via the router-registered
-    # hook (host-form data_location keeps db/collection routing in the bespoke
+    # mongodb pass-through datasets load systems via the router-registered hook
+    # (host-form data_location keeps db/collection routing in the bespoke
     # router). Single dates only: range aggregation is parquet territory.
     is_mongo = dataset_obj.data_format == "mongodb"
     if is_mongo:
         require_single_dates([("dates", dates), ("dates2", dates2)])
-        # System 2 inherits system 1's routing/filters unless overridden (?lang2=...)
-        filter_vals2 = {**filter_vals1, **filter_vals2}
 
     count_col = resolve_count_column(dataset_obj, weight)
 
@@ -761,18 +760,13 @@ async def rank_turbulence_divergence(
             detail="dates2 is required when dates is provided.",
         )
 
-    # Build filter vals from query params (same pattern as /allotax)
-    filter_vals = extract_filter_vals(dataset_obj, request.query_params)
-    filter_vals2 = extract_filter_vals(dataset_obj, request.query_params, suffix="2")
+    # Build filter vals from query params (same convention as /allotax): system
+    # 2 inherits system 1's filters per dimension unless overridden with ?dim2=.
+    filter_vals, filter_vals2 = extract_filter_pair(dataset_obj, request.query_params)
 
     is_mongo = dataset_obj.data_format == "mongodb"
     if is_mongo:
         require_single_dates([("dates", dates), ("dates2", dates2)])
-        filter_vals2 = {**filter_vals, **filter_vals2}
-
-    # Same entity for both systems (date-vs-date comparison)
-    if not filter_vals2:
-        filter_vals2 = dict(filter_vals)
 
     count_col = resolve_count_column(dataset_obj, weight)
 
@@ -907,15 +901,13 @@ async def weighted_avg_wordshift(
 
     ref_val = _parse_reference_value(reference_value)
 
-    # ?dim=val → system 1, ?dim2=val → system 2 (same convention as /allotax).
-    filter_vals1 = extract_filter_vals(dataset_obj, request.query_params)
-    filter_vals2 = extract_filter_vals(dataset_obj, request.query_params, suffix="2")
+    # ?dim=val → system 1, ?dim2=val → system 2 (same convention as /allotax):
+    # system 2 inherits system 1's filters per dimension unless overridden.
+    filter_vals1, filter_vals2 = extract_filter_pair(dataset_obj, request.query_params)
 
     is_mongo = dataset_obj.data_format == "mongodb"
     if is_mongo:
         require_single_dates([("dates", dates), ("dates2", dates2)])
-        # System 2 inherits system 1's routing/filters unless overridden (?lang2=...)
-        filter_vals2 = {**filter_vals1, **filter_vals2}
 
     count_col = resolve_count_column(dataset_obj, weight)
 

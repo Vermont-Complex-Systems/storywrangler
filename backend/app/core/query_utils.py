@@ -59,7 +59,8 @@ def get_queryable_dims(dataset_obj) -> list:
     ]
 
 
-def extract_filter_vals(dataset_obj, query_params, suffix: str = "") -> dict:
+def extract_filter_vals(dataset_obj, query_params, suffix: str = "",
+                        inject_defaults: bool = True) -> dict:
     """Filter-dimension values for one system, from raw request query params.
 
     The generic-endpoint convention (/storywrangler/*): any queryable
@@ -69,14 +70,20 @@ def extract_filter_vals(dataset_obj, query_params, suffix: str = "") -> dict:
     validated against the introspected filter_values with type coercion
     (query params arrive as strings; filter_values stores typed values).
     Raises 400 on a value not in the valid set.
+
+    ``inject_defaults=False`` returns only the explicitly-passed dims (no
+    level_order defaults) — used by extract_filter_pair to distinguish "system 2
+    said nothing about this dim" (inherit system 1) from "system 2 wants the
+    default".
     """
     vals = {
         dim: query_params[f"{dim}{suffix}"]
         for dim in get_queryable_dims(dataset_obj)
         if f"{dim}{suffix}" in query_params
     }
-    for dim, default_val in get_partition_defaults(dataset_obj).items():
-        vals.setdefault(dim, default_val)
+    if inject_defaults:
+        for dim, default_val in get_partition_defaults(dataset_obj).items():
+            vals.setdefault(dim, default_val)
 
     fv = dataset_obj.filter_values or {}
     for dim, val in list(vals.items()):
@@ -91,6 +98,29 @@ def extract_filter_vals(dataset_obj, query_params, suffix: str = "") -> dict:
             )
         vals[dim] = coerced
     return vals
+
+
+def extract_filter_pair(dataset_obj, query_params) -> tuple:
+    """(system-1 filters, system-2 filters) for the two-system instruments.
+
+    System 2 inherits system 1's filters per dimension, overridden by any
+    explicit ``?dim2=`` param — so bare ``?sex=M`` filters *both* systems, while
+    ``?sex=M&sex2=F`` compares them. This is the single source of the
+    convention: allotax / rtd / wordshift all use it, so the behaviour is
+    identical across endpoints and storage formats. (Previously the merge was
+    inlined per-endpoint and had drifted — parquet allotax/wordshift silently
+    left system 2 unfiltered, a comparison-skewing trap.)
+
+    System 2 takes only its *explicit* ``?dim2=`` overrides (no default
+    injection) merged over system 1 — otherwise a hive dataset's level_order
+    defaults would snap unspecified system-2 dims to the default instead of
+    inheriting system 1 (e.g. bare ``?granularity=weekly`` would compare weekly
+    vs the default daily).
+    """
+    fv1 = extract_filter_vals(dataset_obj, query_params)
+    explicit2 = extract_filter_vals(
+        dataset_obj, query_params, suffix="2", inject_defaults=False)
+    return fv1, {**fv1, **explicit2}
 
 
 # ── Count-column menu ────────────────────────────────────────────────────────

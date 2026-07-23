@@ -18,8 +18,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.core.mongo_query import require_single_dates
 from app.core.query_utils import (
-    dates_mode, extract_filter_vals, latest_available_for, require_dates_supported,
-    require_types_counts,
+    dates_mode, extract_filter_pair, extract_filter_vals, latest_available_for,
+    require_dates_supported, require_types_counts,
 )
 from tests.conftest import make_dataset_obj
 
@@ -117,6 +117,40 @@ class TestExtractFilterVals:
         )
         assert extract_filter_vals(ds, {}) == {}
         assert extract_filter_vals(ds, {"sex": "M"}) == {"sex": "M"}
+
+
+class TestExtractFilterPair:
+    """System 2 inherits system 1's filters per dimension unless overridden with
+    ?dim2= — the single convention behind allotax / rtd / wordshift."""
+
+    def _flat(self):
+        return make_dataset_obj(
+            "/data/flat.parquet",
+            transform={"time_dimension": "year", "filter_dimensions": ["sex"]},
+            filter_values={"sex": ["F", "M"]},
+        )
+
+    def test_flat_bare_filter_applies_to_both(self):
+        # The trap fix: ?sex=M with no sex2 filters BOTH systems, not just sys1.
+        fv1, fv2 = extract_filter_pair(self._flat(), {"sex": "M"})
+        assert fv1 == {"sex": "M"} and fv2 == {"sex": "M"}
+
+    def test_flat_suffix_overrides_system2(self):
+        fv1, fv2 = extract_filter_pair(self._flat(), {"sex": "M", "sex2": "F"})
+        assert fv1 == {"sex": "M"} and fv2 == {"sex": "F"}
+
+    def test_hive_bare_filter_inherited_not_defaulted(self):
+        # Regression: system 2 must inherit granularity=weekly, not snap to the
+        # daily default — else bare ?granularity=weekly compares weekly vs daily.
+        fv1, fv2 = extract_filter_pair(hive_dataset(), {"granularity": "weekly"})
+        assert fv1 == {"ngram_size": 1, "granularity": "weekly"}
+        assert fv2 == {"ngram_size": 1, "granularity": "weekly"}
+
+    def test_hive_partial_override_inherits_rest(self):
+        fv1, fv2 = extract_filter_pair(
+            hive_dataset(), {"granularity": "weekly", "ngram_size2": "2"})
+        assert fv1 == {"ngram_size": 1, "granularity": "weekly"}
+        assert fv2 == {"ngram_size": 2, "granularity": "weekly"}
 
 
 class TestRequireTypesCounts:
