@@ -9,12 +9,13 @@ mongo_client.py.
 
 import logging
 from types import SimpleNamespace
-from typing import Any, List, Optional
+from typing import List, Optional
 
 from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
+from storywrangler_schemas.coercion import coerce_scalar
 from storywrangler_schemas.standards import Standards
 from ..models.registry import EntityMapping, RegistryEntry
 
@@ -58,9 +59,91 @@ def get_queryable_dims(dataset_obj) -> list:
     ]
 
 
+def extract_filter_vals(dataset_obj, query_params, suffix: str = "") -> dict:
+    """Filter-dimension values for one system, from raw request query params.
+
+    The generic-endpoint convention (/storywrangler/*): any queryable
+    dimension can be passed as ``?dim=val`` — or ``?dim2=val`` with
+    ``suffix="2"`` for a second system. Missing partition dims get the
+    dataset's registered level_order defaults injected, and every value is
+    validated against the introspected filter_values with type coercion
+    (query params arrive as strings; filter_values stores typed values).
+    Raises 400 on a value not in the valid set.
+    """
+    vals = {
+        dim: query_params[f"{dim}{suffix}"]
+        for dim in get_queryable_dims(dataset_obj)
+        if f"{dim}{suffix}" in query_params
+    }
+    for dim, default_val in get_partition_defaults(dataset_obj).items():
+        vals.setdefault(dim, default_val)
+
+    fv = dataset_obj.filter_values or {}
+    for dim, val in list(vals.items()):
+        valid = fv.get(dim, [])
+        if not valid or val in valid:
+            continue
+        coerced = coerce_scalar(val)
+        if coerced not in valid:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{dim} must be one of {sorted(map(str, valid))}",
+            )
+        vals[dim] = coerced
+    return vals
+
+
 # ── Count-column menu ────────────────────────────────────────────────────────
 # endpoint_schema.count_column is a single column or a list of selectable
 # measure columns (first = default). Endpoints expose the choice as ?weight=.
+
+def dates_mode(dataset_obj) -> str:
+    """How the dataset's endpoints accept dates: 'range' | 'single' | 'none'.
+
+    Derived from the registration, never stored: no transform.time_dimension
+    → 'none' (dateless corpus — omit dates entirely); mongodb pass-through
+    → 'single' (per-day precomputed rows, no range aggregation); otherwise
+    → 'range' ('2024-10-01' or '2024-10-01,2024-10-31'). Surfaced as the
+    `dates` field in registry responses; manifest.availability holds the
+    actual bounds.
+    """
+    if not (getattr(dataset_obj, "transform", None) or {}).get("time_dimension"):
+        return "none"
+    if dataset_obj.data_format == "mongodb":
+        return "single"
+    return "range"
+
+
+def require_dates_supported(dataset_obj, label: str, *date_params) -> None:
+    """400 when dates are passed to a dataset that has no time dimension.
+
+    Silent-ignore is the alternative — load_system skips the time clause
+    when time_dimension is absent — and a 200 that quietly drops a filter
+    teaches the caller nothing.
+    """
+    if any(date_params) and dates_mode(dataset_obj) == "none":
+        raise HTTPException(
+            status_code=400,
+            detail=f"'{label}' has no time dimension — omit dates to load "
+                   "the full dataset.",
+        )
+
+
+def require_types_counts(dataset_obj) -> None:
+    """400 unless the dataset serves the types-counts endpoint family.
+
+    The generic endpoints and instruments load {types, counts} systems, so
+    they only work for datasets registered with
+    endpoint_schema.type='types-counts'.
+    """
+    ep = dataset_obj.endpoint_schema
+    if not ep or ep.get("type") != "types-counts":
+        raise HTTPException(
+            status_code=400,
+            detail="Dataset does not support the types-counts endpoint. "
+                   "Register with endpoint_schema.type='types-counts'.",
+        )
+
 
 def get_count_columns(dataset_obj) -> list:
     """Registered count-column menu as a list (may be empty)."""

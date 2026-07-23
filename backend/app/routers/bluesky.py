@@ -1,11 +1,13 @@
 """
 Bluesky endpoints — per-term n-gram time series.
 
-The bluesky/ngrams dataset is served from a term-bucketed sparkline tree
-(hive levels n / lang / ngram_bucket, date inside the files): every request
-is a hash-bucket point lookup, so there is no slow-scan fallback and window=0
-(full history) is cheap. A top-ngrams endpoint needs a date-sharded dist tree
-like reddit's — add it when the pipeline produces one.
+Same two-dataset layout as reddit: `bluesky/ngrams` is a date-sharded dist
+tree (hive levels n / lang / year / month, `date` inside the files) and
+`bluesky/sparklines` is a term-bucketed precompute (n / lang / ngram_bucket).
+Term-series takes the fast path — a hash-bucket point lookup on the sparkline
+tree (~tens of ms) — and falls back to a year-pruned scan of the dist tree for
+terms outside the precomputed vocabulary. Corpus-wide top-ngrams is served by
+the generic GET /storywrangler/top-ngrams (domain=bluesky).
 """
 
 import logging
@@ -15,11 +17,12 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from ..core.database import get_session
 from ..core.duckdb_client import get_duckdb_client, run_blocking
-from ..core.duckdb_query import handle_query_error
+from ..core.duckdb_query import handle_query_error, is_data_missing
 from ..core.query_utils import latest_from_manifest, resolve_count_column
 from ..core.registry_utils import get_latest_entry
 from ..core.term_series import (
-    bucket_files, build_date_filter, series_entry, validated_dims,
+    build_date_filter, fetch_sparkline_rows, ngrams_context, series_entry,
+    validated_dims, year_pruning,
 )
 from ..core.timing import timed
 from . import openapi_docs as docs
@@ -53,35 +56,54 @@ def _series_cols(ngrams_obj, weight) -> str:
     return f"ngram, date, {count_col}, {rank_col}, {freq_col}"
 
 
-def _fetch_series(conn, ngrams_obj, select_cols, terms, n, lang, date_filter, date_params) -> list:
-    """Bucket-routed read from the term-bucketed tree.
+def _fetch_sparkline(conn, sparkline_obj, select_cols, terms, n, lang, date_filter, date_params) -> list:
+    """Bucket-routed read from the bluesky sparkline precompute.
 
-    Terms hash to their ngram_bucket; the matching bucket file holds every
-    date for its terms, ngram-sorted, so this is a point lookup on one file
-    per bucket. Terms with no rows simply contribute nothing.
+    Terms hash to their ngram_bucket; the matching bucket file holds every date
+    for its terms, ngram-sorted, so this is a point lookup on one file instead
+    of a scan of the whole dist tree. Returns [] on a missing shard, signalling
+    the caller to fall back to the dist-tree scan.
     """
-    files = bucket_files(ngrams_obj, terms, entity_value=None, filter_vals={"n": n, "lang": lang})
-    file_list = ", ".join(f"'{f}'" for f in files)
-    placeholders = ", ".join(["?"] * len(terms))
-    return conn.execute(
-        f"SELECT {select_cols} FROM read_parquet([{file_list}]) "
-        f"WHERE ngram IN ({placeholders}) AND {date_filter} ORDER BY ngram, date",
-        [*terms, *date_params],
-    ).fetchall()
+    return fetch_sparkline_rows(
+        conn, sparkline_obj, terms,
+        entity_value=None, filter_vals={"n": n, "lang": lang},
+        select_cols=select_cols, date_condition=date_filter, date_params=date_params,
+        label="bluesky/term-series",
+    )
 
 
-async def _series_context(db, n: int, lang: str, weight, date: Optional[str]):
-    """Shared endpoint preamble: registry lookup, validation, date defaulting.
+# ── term-series ───────────────────────────────────────────────────────────────
 
-    Returns (ngrams_obj, select_cols, latest_date, date) or an early
-    JSONResponse when the language has no data to default the date from.
+@router.get(
+    "/term-series",
+    openapi_extra={**docs.BLUESKY_TERM_SERIES, "x-dataset": "ngrams"},
+)
+async def term_series(
+    type: str = Query(..., description="The n-gram term to look up. Case-sensitive."),
+    date: Optional[str] = Query(None, description="End date (YYYY-MM-DD). Defaults to latest available."),
+    window: int = Query(365, description="Number of days to look back from date. 0 = full history — cheap on the sparkline fast path, slow if it falls back to the dist-tree scan."),
+    lang: str = Query("en", description="Language code (hive `lang` partition)."),
+    n: int = Query(1, description="N-gram size (1 = unigrams, 2 = bigrams)"),
+    weight: Optional[str] = Query(None, description=_WEIGHT_DESC),
+    sparkline_dataset: str = Query("sparklines", description="Registry dataset_id for the precomputed term-bucketed sparklines (default: 'sparklines'). Empty falls back to the dist-tree scan."),
+    db: AsyncSession = Depends(get_session),
+):
+    """Per-date time series for a single n-gram term.
+
+    Returns counts, rank, and frequency under the chosen weight for each date.
+
+    **Fast path**: point lookup on the term's hash bucket in the sparkline
+    precompute (~tens of ms). **Slow fallback**: year-pruned scan of the dist
+    tree for terms outside the precomputed vocabulary (or when no sparkline
+    dataset is registered).
     """
     ngrams_obj = await get_latest_entry(db, "bluesky", "ngrams")
     if not ngrams_obj:
         raise HTTPException(status_code=404, detail="'bluesky/ngrams' dataset not found")
 
     select_cols = _series_cols(ngrams_obj, weight)
-    validated_dims(ngrams_obj, {"n": n, "lang": lang})
+    dims = validated_dims(ngrams_obj, {"n": n, "lang": lang})
+    _, base_path = ngrams_context(ngrams_obj, None, dims)
 
     with timed("discover", "Latest date from manifest"):
         # Availability is keyed n → lang; lang is the preferred lookup key.
@@ -94,44 +116,41 @@ async def _series_context(db, n: int, lang: str, weight, date: Optional[str]):
                 content={"detail": "No data found for this language", "latest_available_date": None},
             )
         date = latest_date
-    return ngrams_obj, select_cols, latest_date, date
-
-
-# ── term-series ───────────────────────────────────────────────────────────────
-
-@router.get(
-    "/term-series",
-    openapi_extra={**docs.BLUESKY_TERM_SERIES, "x-dataset": "ngrams"},
-)
-async def term_series(
-    type: str = Query(..., description="The n-gram term to look up. Case-sensitive."),
-    date: Optional[str] = Query(None, description="End date (YYYY-MM-DD). Defaults to latest available."),
-    window: int = Query(365, description="Number of days to look back from date. 0 = full history (cheap here — every request is a bucket point lookup)."),
-    lang: str = Query("en", description="Language code (hive `lang` partition)."),
-    n: int = Query(1, description="N-gram size (1 = unigrams, 2 = bigrams)"),
-    weight: Optional[str] = Query(None, description=_WEIGHT_DESC),
-    db: AsyncSession = Depends(get_session),
-):
-    """Per-date time series for a single n-gram term.
-
-    Returns counts, rank, and frequency under the chosen weight for each date.
-    Always a hash-bucket point lookup on the term-bucketed tree (~tens of ms).
-    """
-    ctx = await _series_context(db, n, lang, weight, date)
-    if isinstance(ctx, JSONResponse):
-        return ctx
-    ngrams_obj, select_cols, latest_date, date = ctx
 
     date_filter, date_params = build_date_filter(date, window)
 
-    def _query():
-        with handle_query_error("bluesky/ngrams"):
+    # ── Fast path: bucket lookup on the sparkline precompute ──
+    series_rows = []
+    with timed("registry", "Sparkline registry lookup"):
+        sparkline_obj = await get_latest_entry(db, "bluesky", sparkline_dataset)
+    if sparkline_obj:
+        def _fast():
             with get_duckdb_client().timed_connect() as conn:
-                return _fetch_series(conn, ngrams_obj, select_cols, [type], n, lang,
-                                     date_filter, date_params)
+                return _fetch_sparkline(conn, sparkline_obj, select_cols, [type], n, lang,
+                                        date_filter, date_params)
+        with timed("fast_query", "sparkline bucket read"):
+            series_rows = await run_blocking(_fast)
 
-    with timed("query", "sparkline bucket read"):
-        series_rows = await run_blocking(_query)
+    # ── Slow fallback: dist-tree scan ──
+    if not series_rows:
+        year_filter, year_params = year_pruning(date_params)
+        glob_pattern = f"{base_path}/*.parquet"
+
+        def _slow():
+            with handle_query_error("bluesky/ngrams"):
+                with get_duckdb_client().timed_connect() as conn:
+                    return conn.execute(
+                        f"""
+                        SELECT {select_cols}
+                        FROM read_parquet('{glob_pattern}', hive_partitioning=true)
+                        WHERE ngram = ? AND {date_filter} AND {year_filter}
+                        ORDER BY date
+                        """,
+                        [type, *date_params, *year_params],
+                    ).fetchall()
+
+        with timed("slow_query", "DuckDB partition scan"):
+            series_rows = await run_blocking(_slow)
 
     return {
         "type": type,
@@ -146,36 +165,84 @@ async def term_series(
 async def term_series_batch(
     types: str = Query(..., description="Comma-separated n-gram terms, e.g. 'trump,covid,the'. Case-sensitive."),
     date: Optional[str] = Query(None, description="End date (YYYY-MM-DD). Defaults to latest available."),
-    window: int = Query(365, description="Number of days to look back from date. 0 = full history (cheap here — every request is a bucket point lookup)."),
+    window: int = Query(365, description="Number of days to look back from date. 0 = full history — cheap on the sparkline fast path, slow if it falls back to the dist-tree scan."),
     lang: str = Query("en", description="Language code (hive `lang` partition)."),
     n: int = Query(1, description="N-gram size (1 = unigrams, 2 = bigrams)"),
     weight: Optional[str] = Query(None, description=_WEIGHT_DESC),
+    sparkline_dataset: str = Query("sparklines", description="Registry dataset_id for the precomputed term-bucketed sparklines (default: 'sparklines'). Empty falls back to the dist-tree scan."),
     db: AsyncSession = Depends(get_session),
 ):
     """Batch time series lookup for multiple terms in a single request.
 
-    Returns a map of term -> time series. Terms with no data return empty
-    arrays. Terms hashing to the same bucket share one file read.
+    Returns a map of term -> time series. Ideal for fetching sparklines for all
+    terms in an RTD wordshift comparison at once. Uses the sparkline precompute
+    (hash-bucket point lookups) when registered; falls back to the dist-tree scan.
     """
+    ngrams_obj = await get_latest_entry(db, "bluesky", "ngrams")
+    if not ngrams_obj:
+        raise HTTPException(status_code=404, detail="'bluesky/ngrams' dataset not found")
+
+    select_cols = _series_cols(ngrams_obj, weight)
+    dims = validated_dims(ngrams_obj, {"n": n, "lang": lang})
+    _, base_path = ngrams_context(ngrams_obj, None, dims)
+    latest_date = latest_from_manifest(ngrams_obj, None, lang)
+
+    if not date:
+        if not latest_date:
+            return JSONResponse(
+                status_code=404,
+                content={"detail": "No data found for this language", "latest_available_date": None},
+            )
+        date = latest_date
+
+    date_filter, date_params = build_date_filter(date, window)
+
     type_list = [t.strip() for t in types.split(",") if t.strip()]
     if not type_list:
         raise HTTPException(status_code=400, detail="types parameter must contain at least one term")
 
-    ctx = await _series_context(db, n, lang, weight, date)
-    if isinstance(ctx, JSONResponse):
-        return ctx
-    ngrams_obj, select_cols, latest_date, date = ctx
-
-    date_filter, date_params = build_date_filter(date, window)
-
-    def _query():
-        with handle_query_error("bluesky/ngrams"):
+    # ── Fast path: bucket lookups on the sparkline precompute ──
+    rows = []
+    with timed("registry", "Sparkline registry lookup"):
+        sparkline_obj = await get_latest_entry(db, "bluesky", sparkline_dataset)
+    if sparkline_obj:
+        def _fast():
             with get_duckdb_client().timed_connect() as conn:
-                return _fetch_series(conn, ngrams_obj, select_cols, type_list, n, lang,
-                                     date_filter, date_params)
+                return _fetch_sparkline(conn, sparkline_obj, select_cols, type_list, n, lang,
+                                        date_filter, date_params)
+        with timed("fast_query", "sparkline bucket read"):
+            rows = await run_blocking(_fast)
 
-    with timed("query", "sparkline bucket read"):
-        rows = await run_blocking(_query)
+    # ── Slow fallback: dist-tree scan ──
+    if not rows:
+        year_filter, year_params = year_pruning(date_params)
+        glob_pattern = f"{base_path}/*.parquet"
+        placeholders = ", ".join(["?"] * len(type_list))
+
+        def _slow():
+            with get_duckdb_client().timed_connect() as conn:
+                try:
+                    return conn.execute(
+                        f"""
+                        SELECT {select_cols}
+                        FROM read_parquet('{glob_pattern}', hive_partitioning=true)
+                        WHERE ngram IN ({placeholders})
+                          AND {date_filter} AND {year_filter}
+                        ORDER BY ngram, date
+                        """,
+                        [*type_list, *date_params, *year_params],
+                    ).fetchall()
+                except Exception as exc:
+                    # Batch semantics: terms with no data return empty arrays,
+                    # so a missing partition is fine — but log real errors.
+                    if is_data_missing(exc):
+                        log.info("bluesky/term-series/batch: no partition data for %s", type_list)
+                    else:
+                        log.warning("bluesky/term-series/batch: partition scan failed: %s", exc)
+                    return []
+
+        with timed("slow_query", "DuckDB partition scan"):
+            rows = await run_blocking(_slow)
 
     results: dict = {t: [] for t in type_list}
     for row in rows:

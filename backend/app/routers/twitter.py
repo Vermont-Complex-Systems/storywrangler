@@ -42,7 +42,6 @@ from ..core.mongo_client import (
 )
 from ..core.mongo_query import (
     dataset_columns as _cols,
-    day_filter as _day_filter,
     latest_available as _latest_available,
     range_filter as _range_filter,
     register_mongo_routing,
@@ -229,82 +228,6 @@ async def term_series_batch(
         )
 
     return {"results": results, "latest_available_date": latest}
-
-
-# ── top-ngrams ────────────────────────────────────────────────────────────────
-
-@router.get("/top-ngrams", openapi_extra={"x-dataset": "ngrams"})
-async def top_ngrams(
-    dates: str = Query(..., description="A single date (YYYY-MM-DD) for system 1."),
-    dates2: Optional[str] = Query(None, description="Optional single date for a second system to compare."),
-    lang: str = Query("en", description="Language code — selects the MongoDB collection."),
-    ngram_size: int = Query(1, description="N-gram size (1|2|3) — selects the MongoDB database."),
-    weight: Optional[str] = Query(None, description="Measure — 'counts' or 'count_noRT'."),
-    limit: int = Query(100, le=10000),
-    db: AsyncSession = Depends(get_session),
-):
-    """Top terms for a single date (optionally two dates to compare).
-
-    Uses the pipeline-precomputed `rank`, so a plain sort/limit suffices —
-    no server-side aggregation. Single dates only: summing counts over a
-    range would need an aggregation pipeline (parquet territory).
-    """
-    for label, val in (("dates", dates), ("dates2", dates2)):
-        if val and "," in val:
-            raise HTTPException(
-                status_code=400,
-                detail=f"{label} must be a single YYYY-MM-DD date for mongodb datasets — "
-                       "range aggregation is not supported on the pass-through path.",
-            )
-
-    dataset_obj = await _get_dataset(db)
-    type_col, time_col = _cols(dataset_obj)
-    count_col, _, _ = _measures(dataset_obj, weight)
-
-    def _top(coll, date_str: str) -> list:
-        q = {time_col: _day_filter(dataset_obj, time_col, date_str)}
-        # Over-fetch so dedupe still yields ~limit unique terms on heavily-
-        # duplicated days: some days are uniformly ~5x duplicated at the source
-        # (whole-day re-ingestion), so top-N by count is 1/5 unique. 8x covers
-        # that with margin; pathological days may still fall short (the real fix
-        # is upstream deduplication of the collection).
-        cursor = (
-            coll.find(q, projection={type_col: True, count_col: True, "_id": False},
-                      max_time_ms=_TIMEOUT_MS)
-            .sort(count_col, -1)
-            .limit(limit * 8)
-        )
-        out, seen = [], set()
-        for d in cursor:
-            term = d.get(type_col)
-            if term in seen:
-                continue
-            seen.add(term)
-            out.append({"types": term, "counts": d.get(count_col)})
-            if len(out) >= limit:
-                break
-        return out
-
-    def _query():
-        with handle_mongo_error(_LABEL):
-            coll = _coll(ngram_size, lang)
-            first = _top(coll, dates)
-            second = _top(coll, dates2) if dates2 else None
-            return first, second
-
-    with timed("query", "MongoDB find"):
-        first, second = await run_blocking_mongo(_query)
-
-    metadata = {"lang": lang, "ngram_size": ngram_size, "weight": count_col}
-    if second is not None:
-        if dates == dates2:
-            # Same date collides into one JSON key and drops system 1.
-            raise HTTPException(
-                status_code=400,
-                detail="dates and dates2 must differ to compare two systems.",
-            )
-        return {dates: first, dates2: second, "metadata": metadata}
-    return {"data": first, "metadata": metadata}
 
 
 # ── instrument routing ────────────────────────────────────────────────────────

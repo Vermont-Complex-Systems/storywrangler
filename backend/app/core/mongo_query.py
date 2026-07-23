@@ -22,7 +22,7 @@ per-day rows, so find + sort + limit suffices and the guardrail holds.
 
 import logging
 from datetime import datetime, timedelta
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Callable, Dict, Optional, Tuple
 
 from fastapi import HTTPException
 
@@ -139,6 +139,25 @@ def day_filter(dataset_obj, time_col: str, date_str: str):
     return date_str
 
 
+def require_single_dates(pairs, required: bool = True) -> None:
+    """400 unless every (label, value) date param is a single YYYY-MM-DD.
+
+    The pass-through guardrail at the parameter level: range aggregation is
+    parquet territory, so mongo endpoints only accept single dates. With
+    ``required=False``, absent values pass (for optional params like dates2).
+    """
+    for label, val in pairs:
+        if not val and not required:
+            continue
+        if not val or "," in val:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{label} must be a single YYYY-MM-DD date for mongodb "
+                       "datasets — range aggregation is not supported on the "
+                       "pass-through path.",
+            )
+
+
 def latest_available(coll, time_col: str) -> Optional[str]:
     """Latest date present in the routed collection (indexed on time).
 
@@ -170,11 +189,17 @@ def load_system(coll, type_col, count_col, time_col, dataset_obj, date_str: str,
     collections.
     """
     q = {time_col: day_filter(dataset_obj, time_col, date_str)}
+    # Over-fetch so the dedupe below still yields ~limit unique terms on
+    # heavily-duplicated days: some days are uniformly ~5x duplicated at the
+    # source (whole-day re-ingestion), so top-N by count is 1/5 unique. 8x
+    # covers that with margin; pathological days may still fall short (the
+    # real fix is upstream deduplication of the collection). limit=0 means
+    # no limit in pymongo, so it needs no over-fetch.
     cursor = (
         coll.find(q, projection={type_col: True, count_col: True, "_id": False},
                   max_time_ms=_TIMEOUT_MS)
         .sort(count_col, -1)
-        .limit(limit)
+        .limit(limit * 8)
     )
     # allotax (Rust) requires types to be a list of unique str. Coerce numeric
     # tokens to str, and dedupe the source's duplicate (word, day) rows —
@@ -190,6 +215,8 @@ def load_system(coll, type_col, count_col, time_col, dataset_obj, date_str: str,
         seen.add(key)
         types.append(key)
         counts.append(float(d.get(count_col) or 0))
+        if limit and len(types) >= limit:
+            break
     return {"types": types, "counts": counts}
 
 

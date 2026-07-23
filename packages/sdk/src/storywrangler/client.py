@@ -329,7 +329,51 @@ class RegistryClient(_SubClient):
 
 
 class InstrumentClient(_SubClient):
-    """Interact with /storywrangler instrument endpoints."""
+    """Interact with the generic /storywrangler endpoints (any registered
+    types-counts dataset): the instruments and top-ngrams."""
+
+    def top_ngrams(
+        self,
+        domain: str = "wikimedia",
+        dataset: str = "ngrams",
+        *,
+        dates: str | None = None,
+        dates2: str | None = None,
+        entity: str | None = None,
+        weight: str | None = None,
+        limit: int | None = None,
+        **filter_dims,
+    ) -> Dict[str, Any]:
+        """Top types by count — GET /storywrangler/top-ngrams.
+
+        Works for any registered types-counts dataset.
+
+        Args:
+            domain: Dataset domain.
+            dataset: Dataset ID.
+            dates: Date/year range for system 1 ('2024-10-01' or
+                '2024-10-01,2024-10-31'). Omit to load all time (datasets
+                without a time dimension take no dates; mongodb datasets
+                require a single date).
+            dates2: Optional second range for a temporal comparison — the
+                response keys the two arrays by date range instead of 'data'.
+            entity: Global entity ID (e.g. 'wikidata:Q30') or local ID; omit
+                for datasets without entity_mapping.
+            weight: Count measure — one of the dataset's registered
+                count_column entries. Defaults to the first.
+            limit: Max types per system (0 = no limit).
+            **filter_dims: Dataset-specific filter dimensions passed as query
+                params, using actual column names from the dataset's
+                level_order — e.g. ``ngram_size=1, granularity="daily"`` for
+                wikimedia, ``n=1, lang="en"`` for reddit, ``sex="M"`` for
+                babynames.
+        """
+        params: Dict[str, Any] = {"domain": domain, "dataset": dataset}
+        optional = {"dates": dates, "dates2": dates2, "entity": entity,
+                    "weight": weight, "limit": limit}
+        params.update({k: v for k, v in optional.items() if v is not None})
+        params.update(filter_dims)
+        return self._get_json("/storywrangler/top-ngrams", params)
 
     def allotax(
         self,
@@ -713,10 +757,11 @@ class DatasetClient(_SubClient):
 
             {'/wikimedia/term-series': {'summary': 'Term Series', 'dataset': 'ngrams'}, ...}
 
-        Note: routes are per-domain, and the platform instruments
-        (``/storywrangler/allotax``, ``/storywrangler/rtd``,
-        ``/storywrangler/wordshift``) work for every dataset — reach them via
-        :meth:`allotax`, :meth:`rtd`, and :meth:`wordshift`.
+        Note: routes are per-domain, and the generic platform endpoints
+        (``/storywrangler/top-ngrams``, ``/storywrangler/allotax``,
+        ``/storywrangler/rtd``, ``/storywrangler/wordshift``) work for every
+        dataset — reach them via :meth:`top_ngrams`, :meth:`allotax`,
+        :meth:`rtd`, and :meth:`wordshift`.
         """
         return self._domain_root().get("endpoints", {})
 
@@ -899,6 +944,35 @@ class DatasetClient(_SubClient):
             **filter_dims,
         )
 
+    def _validate_dates(self, dates, dates2) -> None:
+        """Pre-flight the dates contract against registry metadata.
+
+        Derived the same way as the registry's `dates` field: no
+        transform.time_dimension → dateless (omit dates entirely); mongodb
+        pass-through → single days only. Best-effort — skipped when metadata
+        can't be fetched, letting the server's 400 teach instead.
+        """
+        if dates is None and dates2 is None:
+            return
+        try:
+            meta = self._ensure_meta()
+        except Exception:
+            return
+        label = f"{self.domain}/{self.dataset_id}"
+        if not (meta.get("transform") or {}).get("time_dimension"):
+            raise ValueError(
+                f"{label} has no time dimension — omit dates to load the "
+                f"full dataset. (.meta['dates'] shows each dataset's contract.)"
+            )
+        if meta.get("data_format") == "mongodb":
+            for name, val in (("dates", dates), ("dates2", dates2)):
+                if val and "," in str(val):
+                    raise ValueError(
+                        f"{label} takes single YYYY-MM-DD dates only (mongodb "
+                        f"pass-through, no range aggregation); got {name}={val!r}. "
+                        f"Check .availability for the covered dates."
+                    )
+
     def top_ngrams(
         self,
         *,
@@ -909,10 +983,16 @@ class DatasetClient(_SubClient):
         limit: int | None = None,
         **filter_dims,
     ) -> Dict[str, Any]:
-        """Top types by count — GET /{domain}/top-ngrams.
+        """Top types by count — GET /storywrangler/top-ngrams with this
+        dataset bound.
+
+        Same as ``client.instrument.top_ngrams()`` but ``domain`` and
+        ``dataset`` are already bound — the generic platform endpoint, so it
+        works for any registered types-counts dataset (like the instruments).
 
         Args:
             dates: Date or range for system 1 ('2024-10-01' or '2024-10-01,2024-10-31').
+                Omit to load all time (dateless datasets take no dates).
             dates2: Optional second range for temporal comparison.
             entity: Entity ID (e.g. 'wikidata:Q30') or local ID, where the
                 dataset declares an entity_mapping — same convention as
@@ -921,18 +1001,19 @@ class DatasetClient(_SubClient):
             **filter_dims: Dataset-specific filters (e.g. ``granularity="daily",
                 ngram_size=1`` for wikimedia, ``sex="M"`` for babynames). Use
                 ``.filters`` to discover them.
+
+        Raises:
+            ValueError: If a filter name is unknown or a value is invalid.
+                Use ``.filters`` to discover available dimensions.
         """
-        params = {
-            k: v for k, v in
-            {"dates": dates, "dates2": dates2, "entity": entity,
-             "weight": weight, "limit": limit}.items()
-            if v is not None
-        }
-        params.update(filter_dims)
-        path = f"/{self.domain}/top-ngrams"
-        self._check_route(path)
-        self._validate_filters(filter_dims, path=path)
-        return self._get_json(path, params)
+        self._resolve_dataset_id()
+        self._validate_filters(filter_dims)
+        self._validate_dates(dates, dates2)
+        return self._instrument.top_ngrams(
+            self.domain, self.dataset_id,
+            dates=dates, dates2=dates2, entity=entity, weight=weight, limit=limit,
+            **filter_dims,
+        )
 
     def term_series(
         self,

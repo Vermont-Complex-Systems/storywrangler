@@ -7,7 +7,6 @@ Queries slice by language and n-gram size and compare across dates.
 """
 
 import logging
-from datetime import date as dt_date, timedelta
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
@@ -18,8 +17,8 @@ from ..core.duckdb_query import handle_query_error, is_data_missing
 from ..core.query_utils import latest_from_manifest, resolve_count_column
 from ..core.registry_utils import get_latest_entry
 from ..core.term_series import (
-    bucket_files, build_date_filter, ngrams_context, run_top_ngrams, series_entry,
-    validated_dims,
+    build_date_filter, fetch_sparkline_rows, ngrams_context, series_entry,
+    validated_dims, year_pruning,
 )
 from ..core.timing import timed
 from . import openapi_docs as docs
@@ -53,22 +52,6 @@ def _series_cols(ngrams_obj, weight) -> tuple:
     return f"ngram, date, {count_col}, rank, {freq_col}", count_col
 
 
-def _year_pruning(date_params: list) -> tuple:
-    """Prune year=* hive directories from the in-file date filter's bounds.
-
-    The date column lives inside the parquet files, so the glob wildcards
-    year and month — this condition lets DuckDB drop whole year directories
-    from directory names alone, without reading file footers. Weekly files
-    are bucketed under the year their ISO week starts in, so the bounds are
-    padded by one week to keep boundary rows reachable.
-    """
-    pad = timedelta(days=6)
-    bounds = [dt_date.fromisoformat(str(p)[:10]) for p in date_params]
-    if len(bounds) == 2:
-        return "year BETWEEN ? AND ?", [(bounds[0] - pad).year, (bounds[1] + pad).year]
-    return "year <= ?", [(bounds[0] + pad).year]
-
-
 def _fetch_sparkline(conn, sparkline_obj, select_cols, terms, n, lang, date_filter, date_params) -> list:
     """Bucket-routed read from the reddit sparkline precompute.
 
@@ -78,48 +61,11 @@ def _fetch_sparkline(conn, sparkline_obj, select_cols, terms, n, lang, date_filt
     year-partitioned (date is an in-file column). Returns [] on a missing shard,
     signalling the caller to fall back to the raw-tree scan.
     """
-    files = bucket_files(sparkline_obj, terms, entity_value=None, filter_vals={"n": n, "lang": lang})
-    file_list = ", ".join(f"'{f}'" for f in files)
-    placeholders = ", ".join(["?"] * len(terms))
-    try:
-        return conn.execute(
-            f"SELECT {select_cols} FROM read_parquet([{file_list}]) "
-            f"WHERE ngram IN ({placeholders}) AND {date_filter} ORDER BY ngram, date",
-            [*terms, *date_params],
-        ).fetchall()
-    except Exception as exc:
-        if not is_data_missing(exc):
-            log.warning("reddit sparkline read failed (%s); falling back to scan: %s", terms, exc)
-        return []
-
-
-# ── top-ngrams ────────────────────────────────────────────────────────────────
-
-@router.get(
-    "/top-ngrams",
-    openapi_extra={**docs.REDDIT_GET_TOP_NGRAMS, "x-dataset": "ngrams"},
-)
-async def get_top_ngrams(
-    dates: str = Query(default="2022-12-01,2022-12-07"),
-    dates2: Optional[str] = Query(default=None),
-    lang: str = Query(default="en", description="Language code (hive `lang` partition)."),
-    n: int = Query(default=1, description="N-gram size (1 = unigrams, 2 = bigrams)."),
-    weight: Optional[str] = Query(default=None, description=_WEIGHT_DESC),
-    limit: int = Query(default=100),
-    db: AsyncSession = Depends(get_session),
-):
-    """Get top Reddit n-grams for a language over a date range."""
-    dataset_obj = await get_latest_entry(db, "reddit", "ngrams")
-    if not dataset_obj:
-        raise HTTPException(status_code=404, detail="'reddit/ngrams' dataset not found")
-
-    extra = validated_dims(dataset_obj, {"n": n, "lang": lang})
-    count_col = resolve_count_column(dataset_obj, weight)
-
-    return await run_top_ngrams(
-        dataset_obj, "reddit/ngrams", None, dates, dates2, extra, limit,
-        metadata={"lang": lang, "n": n, "weight": count_col},
-        count_col=count_col,
+    return fetch_sparkline_rows(
+        conn, sparkline_obj, terms,
+        entity_value=None, filter_vals={"n": n, "lang": lang},
+        select_cols=select_cols, date_condition=date_filter, date_params=date_params,
+        label="reddit/term-series",
     )
 
 
@@ -184,7 +130,7 @@ async def term_series(
 
     # ── Slow fallback: raw weekly-tree scan ──
     if not series_rows:
-        year_filter, year_params = _year_pruning(date_params)
+        year_filter, year_params = year_pruning(date_params)
         glob_pattern = f"{base_path}/*.parquet"
 
         def _slow():
@@ -266,7 +212,7 @@ async def term_series_batch(
 
     # ── Slow fallback: raw weekly-tree scan ──
     if not rows:
-        year_filter, year_params = _year_pruning(date_params)
+        year_filter, year_params = year_pruning(date_params)
         glob_pattern = f"{base_path}/*.parquet"
         placeholders = ", ".join(["?"] * len(type_list))
 

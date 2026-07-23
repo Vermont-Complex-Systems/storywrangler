@@ -5,50 +5,6 @@ frontend/performance notes — kept out of the routers so endpoint logic
 stays readable. Constants are named <ROUTER>_<ENDPOINT_FUNCTION>.
 """
 
-WIKIMEDIA_GET_TOP_NGRAMS = {
-    "responses": {
-        "200": {
-            "description": "Successful response",
-            "content": {
-                "application/json": {
-                    "schema": {
-                        "type": "object",
-                        "properties": {
-                            "data": {
-                                "type": "array",
-                                "description": "N-gram frequency entries sorted by count descending.",
-                                "items": {
-                                    "type": "object",
-                                    "properties": {
-                                        "types": {"type": "string", "description": "The n-gram string"},
-                                        "counts": {"type": "integer", "description": "Total occurrence count over the date range"},
-                                    },
-                                },
-                            },
-                            "metadata": {
-                                "type": "object",
-                                "description": "Request metadata echoed back",
-                                "properties": {
-                                    "granularity": {"type": "string", "description": "Granularity used (daily/weekly/monthly)"},
-                                    "location": {"type": "string", "description": "Entity ID used"},
-                                },
-                            },
-                        },
-                    },
-                    "example": {
-                        "data": [
-                            {"types": "the", "counts": 12345678},
-                            {"types": "of", "counts": 9876543},
-                            {"types": "a", "counts": 8234567},
-                        ],
-                        "metadata": {"granularity": "daily", "location": "wikidata:Q30"},
-                    },
-                }
-            },
-        }
-    }
-}
-
 WIKIMEDIA_LIST_REVISION_ARTICLES = {
     "responses": {
         "200": {
@@ -316,53 +272,6 @@ WIKIMEDIA_TERM_SERIES_BATCH = {
     },
 }
 
-REDDIT_GET_TOP_NGRAMS = {
-    "responses": {
-        "200": {
-            "description": "Successful response",
-            "content": {
-                "application/json": {
-                    "schema": {
-                        "type": "object",
-                        "properties": {
-                            "data": {
-                                "type": "array",
-                                "description": "N-gram frequency entries sorted by count descending.",
-                                "items": {
-                                    "type": "object",
-                                    "properties": {
-                                        "types": {"type": "string", "description": "The n-gram string"},
-                                        "counts": {"type": "number", "description": "Summed score-weighted count over the date range"},
-                                    },
-                                },
-                            },
-                            "metadata": {
-                                "type": "object",
-                                "description": "Request metadata echoed back",
-                                "properties": {
-                                    "lang": {"type": "string", "description": "Language code used"},
-                                    "n": {"type": "integer", "description": "N-gram size used"},
-                                    "weight": {"type": "string", "description": "Count column the counts were aggregated from"},
-                                },
-                            },
-                        },
-                    },
-                    "example": {
-                        "data": [
-                            {"types": "the", "counts": 12345678.5},
-                            {"types": "of", "counts": 9876543.25},
-                        ],
-                        "metadata": {"lang": "en", "n": 1, "weight": "all_score_weighted"},
-                    },
-                }
-            },
-        }
-    },
-    "x-frontend-notes": {
-        "weight": "Valid weight values are the dataset's endpoint_schema.count_column list (GET /registry/reddit/ngrams) — content type (comments/submissions/all) × weighting (score/controversy/unweighted). Omit for the default (first entry).",
-    },
-}
-
 REDDIT_TERM_SERIES = {
     "responses": {
         "200": {
@@ -463,10 +372,69 @@ BLUESKY_TERM_SERIES = {
         }
     },
     "x-performance": {
-        "always_fast": "Every request is a hash-bucket point lookup on the term-bucketed tree (~tens of ms). window=0 (full history) is cheap — there is no partition scan path.",
+        "fast_path": "Terms in the precomputed vocabulary are a hash-bucket point lookup on the sparkline tree (~tens of ms); window=0 (full history) is cheap on this path.",
+        "slow_fallback": "Terms outside the sparkline vocabulary fall back to a year-pruned scan of the bluesky/ngrams dist tree — slower, and slower still at window=0.",
     },
     "x-frontend-notes": {
         "weight": "Valid weight values are the dataset's endpoint_schema.count_column list (GET /registry/bluesky/ngrams). counts, rank, AND freq all switch with the weight — bluesky ranks are per-measure (rank / rank_all), unlike reddit's canonical rank.",
+    },
+}
+
+STORYWRANGLER_TOP_NGRAMS = {
+    "responses": {
+        "200": {
+            "description": "Successful response",
+            "content": {
+                "application/json": {
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "data": {
+                                "type": "array",
+                                "description": "Type/count entries sorted by count descending. With dates2, replaced by two arrays keyed by each date range (e.g. '2024-10-01_2024-10-07').",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "types": {"type": "string", "description": "The type (n-gram, name, ...)"},
+                                        "counts": {"type": "integer", "description": "Total count over the date range under the selected weight"},
+                                    },
+                                },
+                            },
+                            "metadata": {
+                                "type": "object",
+                                "description": "Request metadata echoed back",
+                                "properties": {
+                                    "domain": {"type": "string", "description": "Dataset domain"},
+                                    "dataset": {"type": "string", "description": "Dataset ID"},
+                                    "dataset_version": {"type": "string", "description": "Registered dataset version served"},
+                                    "entity": {"type": "string", "description": "Entity ID used (null for entity-less datasets)"},
+                                    "filters": {"type": "object", "description": "Filter dimensions applied, defaults included"},
+                                    "weight": {"type": "string", "description": "Count column used"},
+                                },
+                            },
+                        },
+                    },
+                    "example": {
+                        "data": [
+                            {"types": "the", "counts": 12345678},
+                            {"types": "of", "counts": 9876543},
+                        ],
+                        "metadata": {
+                            "domain": "wikimedia",
+                            "dataset": "ngrams",
+                            "dataset_version": "1.0.0",
+                            "entity": "wikidata:Q30",
+                            "filters": {"ngram_size": 1, "granularity": "daily"},
+                            "weight": "pv_count",
+                        },
+                    },
+                }
+            },
+        }
+    },
+    "x-frontend-notes": {
+        "filters": "Filter dimensions are dataset-specific query params using registered column names (?ngram_size=1&granularity=daily for wikimedia, ?n=1&lang=en for reddit, ?sex=M for babynames). Discover them via GET /registry/{domain}/{dataset_id} (level_order / transform.filter_dimensions).",
+        "comparison": "Pass dates2 for a two-system temporal comparison; the response keys the two arrays by their date ranges instead of 'data'. mongodb pass-through datasets (twitter) accept single dates only.",
     },
 }
 
@@ -547,91 +515,4 @@ STORYWRANGLER_ALLOTAXONOMETER = {
             },
         }
     },
-}
-
-BABYNAMES_GET_BABYNAMES_TOP_NGRAMS = {
-    "responses": {
-        "200": {
-            "description": "Successful response",
-            "content": {
-                "application/json": {
-                    "schema": {
-                        "type": "object",
-                        "properties": {
-                            "data": {
-                                "type": "array",
-                                "description": "Baby name frequency entries sorted by count descending.",
-                                "items": {
-                                    "type": "object",
-                                    "properties": {
-                                        "types": {"type": "string", "description": "The baby name"},
-                                        "counts": {"type": "integer", "description": "Number of babies given this name in the date range"},
-                                    },
-                                },
-                            },
-                            "metadata": {
-                                "type": "object",
-                                "description": "Request metadata echoed back",
-                                "properties": {
-                                    "location": {"type": "string", "description": "Entity ID used"},
-                                    "sex": {"type": "string", "description": "Sex filter applied (M, F, or null)"},
-                                },
-                            },
-                        },
-                    },
-                    "example": {
-                        "data": [
-                            {"types": "James", "counts": 85234},
-                            {"types": "John", "counts": 79102},
-                            {"types": "Robert", "counts": 75680},
-                        ],
-                        "metadata": {"location": "wikidata:Q30", "sex": "M"},
-                    },
-                }
-            },
-        }
-    }
-}
-
-ZONING_BYLAWS_GET_ZONING_BYLAWS_NGRAMS = {
-    "responses": {
-        "200": {
-            "description": "Successful response",
-            "content": {
-                "application/json": {
-                    "schema": {
-                        "type": "object",
-                        "properties": {
-                            "data": {
-                                "type": "array",
-                                "description": "Top words in the town's zoning bylaw, sorted by frequency descending.",
-                                "items": {
-                                    "type": "object",
-                                    "properties": {
-                                        "types": {"type": "string", "description": "Word token"},
-                                        "counts": {"type": "integer", "description": "Frequency count of the word"},
-                                    },
-                                },
-                            },
-                            "metadata": {
-                                "type": "object",
-                                "description": "Request metadata echoed back",
-                                "properties": {
-                                    "location": {"type": "string", "description": "Entity ID used"},
-                                },
-                            },
-                        },
-                    },
-                    "example": {
-                        "data": [
-                            {"types": "the", "counts": 4394},
-                            {"types": "of", "counts": 2559},
-                            {"types": "and", "counts": 1956},
-                        ],
-                        "metadata": {"location": "Arlington"},
-                    },
-                }
-            },
-        }
-    }
 }

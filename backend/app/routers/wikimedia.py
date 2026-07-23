@@ -16,7 +16,7 @@ from ..core.query_utils import resolve_entity
 from ..core.registry_utils import get_latest_entry
 from ..core.term_series import (
     bucket_files, build_date_filter, fetch_sparkline_rows, latest_series_date,
-    ngrams_context, run_top_ngrams, series_entry, validated_dims,
+    ngrams_context, series_entry,
 )
 from ..core.timing import timed
 from . import openapi_docs as docs
@@ -76,37 +76,6 @@ def _fetch_top_articles(
             [url, float(score) if score else 0.0]
         )
     return articles
-
-
-# ── top-ngrams ─────────────────────────────────────────────────────────────────
-
-@router.get(
-    "/top-ngrams",
-    openapi_extra={**docs.WIKIMEDIA_GET_TOP_NGRAMS, "x-dataset": "ngrams"},
-)
-async def get_top_ngrams(
-    dates: str = Query(default="2024-11-01,2024-11-07"),
-    dates2: Optional[str] = Query(default=None),
-    entity: str = Query(default="wikidata:Q30", description="Entity ID (e.g. 'wikidata:Q30') or local ID (e.g. 'en')."),
-    granularity: str = Query(default="daily"),
-    ngram_size: Optional[int] = Query(default=None, description="N-gram size (1 = unigrams, 2 = bigrams) — the registered column name."),
-    n: int = Query(default=1, description="Deprecated alias for ngram_size."),
-    limit: int = Query(default=100),
-    db: AsyncSession = Depends(get_session),
-):
-    """Get top Wikipedia n-grams."""
-    n = ngram_size if ngram_size is not None else n
-    dataset_obj = await get_latest_entry(db, "wikimedia", "ngrams")
-    if not dataset_obj:
-        raise HTTPException(status_code=404, detail="'wikimedia/ngrams' dataset not found")
-
-    extra = validated_dims(dataset_obj, {"granularity": granularity, "ngram_size": n})
-    em = await resolve_entity(db, "wikimedia", "ngrams", entity)
-
-    return await run_top_ngrams(
-        dataset_obj, "wikimedia/ngrams", em.local_id, dates, dates2, extra, limit,
-        metadata={"granularity": granularity, "location": entity},
-    )
 
 
 # ── revisions ──────────────────────────────────────────────────────────────────
@@ -291,8 +260,11 @@ async def term_series(
         def _fast():
             with get_duckdb_client().timed_connect() as conn:
                 rows = fetch_sparkline_rows(
-                    conn, sparkline_obj, [type], local_id, n,
-                    date_filter, date_params, "wikimedia/term-series",
+                    conn, sparkline_obj, [type],
+                    entity_value=local_id, filter_vals={"ngram_size": n},
+                    select_cols="ngram, date, pv_count, pv_rank, pv_freq",
+                    date_condition=date_filter, date_params=date_params,
+                    label="wikimedia/term-series",
                 )
                 arts: dict = {}
                 if rows and include_articles:
@@ -429,8 +401,11 @@ async def term_series_batch(
         def _fast():
             with get_duckdb_client().timed_connect() as conn:
                 rows = fetch_sparkline_rows(
-                    conn, sparkline_obj, type_list, local_id, n,
-                    date_filter, date_params, "wikimedia/term-series/batch",
+                    conn, sparkline_obj, type_list,
+                    entity_value=local_id, filter_vals={"ngram_size": n},
+                    select_cols="ngram, date, pv_count, pv_rank, pv_freq",
+                    date_condition=date_filter, date_params=date_params,
+                    label="wikimedia/term-series/batch",
                 )
                 arts: dict = {}
                 found = {row[0] for row in rows}

@@ -24,6 +24,7 @@ from ..core.parquet_introspect import (
     introspect,
     validate_and_build_level_order,
 )
+from ..core.query_utils import dates_mode
 from ..core.registry_utils import get_latest_entry
 from ..models.auth import User
 from ..models.registry import RegistryEntry, EntityMapping
@@ -702,6 +703,9 @@ def _entry_response(ds, *, manifest: Optional[dict] = None) -> Dict[str, Any]:
         "schema_version": ds.schema_version,
         "data_location": ds.data_location,
         "data_format": ds.data_format,
+        # Derived, never stored: how endpoints accept dates for this dataset
+        # ('range' | 'single' | 'none'); availability holds the actual bounds.
+        "dates": dates_mode(ds),
         "description": ds.description,
         "manifest": manifest if manifest is not None else (ds.manifest or {}),
         "data_schema": ds.data_schema,

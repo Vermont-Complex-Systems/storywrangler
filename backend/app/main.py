@@ -19,7 +19,7 @@ from app.core.openapi_menus import install_dynamic_openapi, refresh_weight_menus
 from app.core.timing import get_timings, init_timings
 from app.models.auth import User
 from app.core.health_check import health_check_loop
-from app.routers import auth, babynames, bluesky, domain_root, health, open_academic_analytics, reddit, registry, scisciDB, storywrangler, twitter, wikimedia, zoning_bylaws
+from app.routers import auth, bluesky, domain_root, health, open_academic_analytics, reddit, registry, scisciDB, storywrangler, twitter, wikimedia
 from storywrangler_mcp.server import mcp as mcp_server
 
 log = logging.getLogger(__name__)
@@ -192,8 +192,11 @@ app.include_router(registry.admin_router, prefix="/admin/registry", tags=["admin
 
 # Dataset-domain routers. Single source of truth: the keys double as the
 # accepted `domain` values for dataset registration (registry.VALID_DOMAINS).
+# A None router means the domain has no bespoke routes — its datasets are
+# served entirely by the generic /storywrangler endpoints; it still gets a
+# GET /{domain} root and stays registrable.
 DOMAIN_ROUTERS = {
-    "babynames": babynames.router,
+    "babynames": None,
     "storywrangler": storywrangler.router,
     "reddit": reddit.router,
     "bluesky": bluesky.router,
@@ -201,10 +204,11 @@ DOMAIN_ROUTERS = {
     "open-academic-analytics": open_academic_analytics.router,
     "scisciDB": scisciDB.router,
     "twitter": twitter.router,
-    "vt-zoning-atlas": zoning_bylaws.router,
+    "vt-zoning-atlas": None,
 }
 for _domain, _router in DOMAIN_ROUTERS.items():
-    app.include_router(_router, prefix=f"/{_domain}", tags=[_domain])
+    if _router is not None:
+        app.include_router(_router, prefix=f"/{_domain}", tags=[_domain])
     # GET /{domain} — generic root listing the domain's endpoints + datasets.
     # Hidden from the OpenAPI schema (include_in_schema=False): it's a discovery
     # mechanism (SDK .endpoints / client repr, or a guessed GET), not a
