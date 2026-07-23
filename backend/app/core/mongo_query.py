@@ -139,6 +139,24 @@ def day_filter(dataset_obj, time_col: str, date_str: str):
     return date_str
 
 
+def date_range_filter(dataset_obj, time_col: str, date_range) -> Optional[dict]:
+    """Time sub-filter for a [start, end] range — the generic term-series form.
+
+    *date_range* is ``[start, end]`` (parse_dates) or None for full history
+    (no time bound). Matches the stored BSON type: datetime bounds when
+    introspection saw TIMESTAMP/DATE (end padded to the day's end), ISO
+    strings otherwise. Unlike range_filter this is not equality/one-anchor —
+    it is still a plain range read, not an aggregation, so the pass-through
+    guardrail holds.
+    """
+    if not date_range:
+        return None
+    start, end = date_range[0], date_range[1]
+    if _stores_datetimes(dataset_obj, time_col):
+        return {"$gte": parse_day(start), "$lt": parse_day(end) + timedelta(days=1)}
+    return {"$gte": start, "$lte": end}
+
+
 def require_single_dates(pairs, required: bool = True) -> None:
     """400 unless every (label, value) date param is a single YYYY-MM-DD.
 

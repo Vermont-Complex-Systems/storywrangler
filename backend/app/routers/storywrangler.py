@@ -22,8 +22,11 @@ from ..core.allotax_utils import (
 )
 from ..core.database import get_session
 from ..core.duckdb_client import get_duckdb_client, run_blocking
-from ..core.mongo_client import run_blocking_mongo
-from ..core.mongo_query import load_instrument_system, require_single_dates
+from ..core.mongo_client import QUERY_TIMEOUT_S, handle_mongo_error, run_blocking_mongo
+from ..core.mongo_query import (
+    date_range_filter, latest_available, load_instrument_system,
+    require_single_dates, resolve_collection, resolve_measures, series_projection,
+)
 from ..core.duckdb_query import (
     build_hive_path, derive_time_partitions, handle_query_error, is_data_missing,
     load_system,
@@ -212,7 +215,9 @@ async def _fetch_includes(db, domain, include, ctx, terms) -> dict:
     non-type-documents id is a 400 (rather than a silently empty field).
     """
     ids = [p.strip() for p in (include or "").split(",") if p.strip()]
-    if not ids or not terms:
+    # Provenance is a bucket-routed parquet read; mongodb pass-through datasets
+    # have no type-documents companions, so include is a no-op there.
+    if not ids or not terms or getattr(ctx, "is_mongo", False):
         return {}
     out: dict = {}
     for prov_id in ids:
@@ -263,17 +268,30 @@ async def _prepare_term_series(request, db, domain, dataset, entity, weight, dat
     type_col = ep.get("type_column") or "types"
     time_col = (dataset_obj.transform or {}).get("time_dimension") or "date"
 
-    select_cols, cols = _series_select(dataset_obj, weight, type_col, time_col)
     filter_vals = extract_filter_vals(dataset_obj, request.query_params)
-
     has_entity = bool((dataset_obj.entity_mapping or {}).get("local_id_column"))
     local_id = (
         (await resolve_entity(db, domain, dataset, entity)).local_id
         if has_entity and entity else None
     )
-
-    latest_date = latest_available_for(dataset_obj, local_id, filter_vals)
     date_range = parse_dates(dates)
+
+    # mongodb pass-through: a different backend (find, not read_parquet). Its
+    # cols come from resolve_measures and its latest date from a live probe in
+    # _mongo_term_series_rows; no sparkline/include/hive machinery applies.
+    if dataset_obj.data_format == "mongodb":
+        count_col = resolve_count_column(dataset_obj, weight)
+        count_col, rank_f, freq_f = resolve_measures(dataset_obj, count_col)
+        ctx = SimpleNamespace(
+            dataset_obj=dataset_obj, is_mongo=True,
+            cols={"count": count_col, "rank": rank_f, "freq": freq_f},
+            filter_vals=filter_vals, local_id=local_id, date_range=date_range,
+            type_col=type_col, time_col=time_col, latest_date=None,
+        )
+        return ctx, None
+
+    select_cols, cols = _series_select(dataset_obj, weight, type_col, time_col)
+    latest_date = latest_available_for(dataset_obj, local_id, filter_vals)
     if date_range is None and not latest_date:
         return None, JSONResponse(
             status_code=404,
@@ -293,7 +311,7 @@ async def _prepare_term_series(request, db, domain, dataset, entity, weight, dat
         _, base_path = ngrams_context(dataset_obj, local_id, filter_vals)
 
     ctx = SimpleNamespace(
-        dataset_obj=dataset_obj, select_cols=select_cols, cols=cols,
+        dataset_obj=dataset_obj, is_mongo=False, select_cols=select_cols, cols=cols,
         filter_vals=filter_vals, local_id=local_id, latest_date=latest_date,
         date_filter=date_filter, date_params=date_params, base_path=base_path,
         type_col=type_col, time_col=time_col,
@@ -337,6 +355,51 @@ def _term_series_scan_target(ctx) -> tuple:
     return from_clause, where, params
 
 
+async def _mongo_term_series_rows(domain, ctx, terms) -> list:
+    """Per-(type, date) rows for *terms* from a mongodb pass-through dataset.
+
+    The mongo analogue of the parquet path: resolve the collection (routing
+    hook), find ``{type: {$in: terms}, time: range}`` (a plain range read, no
+    aggregation — the pass-through guardrail), and return rows in the same
+    ``(type, time, count, rank, freq)`` tuple shape the parquet scan yields, so
+    _series_row handles both. Duplicate (type, day) rows in the source are
+    collapsed (some corpora re-ingest whole days). Sets ctx.latest_date from a
+    live max-time probe.
+    """
+    obj = ctx.dataset_obj
+    count_col = ctx.cols["count"]
+    rank_f, freq_f = ctx.cols["rank"], ctx.cols["freq"]
+
+    def _query():
+        with handle_mongo_error(f"{domain}/{obj.dataset_id}"):
+            coll = resolve_collection(obj, domain, ctx.filter_vals)
+            latest = latest_available(coll, ctx.time_col)
+            q = {ctx.type_col: {"$in": list(terms)}}
+            time_filter = date_range_filter(obj, ctx.time_col, ctx.date_range)
+            if time_filter is not None:
+                q[ctx.time_col] = time_filter
+            cursor = coll.find(
+                q,
+                projection=series_projection(ctx.type_col, ctx.time_col, count_col, rank_f, freq_f),
+                max_time_ms=QUERY_TIMEOUT_S * 1000,
+            ).sort([(ctx.type_col, 1), (ctx.time_col, 1)])
+            return latest, list(cursor)
+
+    with timed("mongo_query", "MongoDB find"):
+        latest, docs = await run_blocking_mongo(_query)
+    ctx.latest_date = latest
+
+    rows, seen = [], set()
+    for d in docs:
+        term = d.get(ctx.type_col)
+        day = str(d.get(ctx.time_col))[:10]
+        if (term, day) in seen:
+            continue
+        seen.add((term, day))
+        rows.append((term, day, d.get(count_col), d.get(rank_f), d.get(freq_f)))
+    return rows
+
+
 async def _term_series_rows(db, domain, ctx, terms, sparkline_dataset):
     """Fast sparkline bucket lookup, falling back to a dist-tree scan.
 
@@ -350,6 +413,9 @@ async def _term_series_rows(db, domain, ctx, terms, sparkline_dataset):
     never swallowed into an empty result, so a slow scan that times out reads
     as a timeout, not as "no data".
     """
+    if getattr(ctx, "is_mongo", False):
+        return await _mongo_term_series_rows(domain, ctx, terms)
+
     label = f"{domain}/term-series"
     rows = []
     sparkline_obj = (
