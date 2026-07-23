@@ -32,8 +32,7 @@ from ..core.query_utils import (
 )
 from ..core.registry_utils import get_latest_entry
 from ..core.term_series import (
-    build_date_filter, fetch_sparkline_rows, ngrams_context, run_top_ngrams,
-    year_pruning,
+    fetch_sparkline_rows, ngrams_context, run_top_ngrams, year_pruning,
 )
 from . import openapi_docs as docs
 from ..core.timing import timed
@@ -204,13 +203,15 @@ def _series_row(row, cols) -> dict:
     return entry
 
 
-async def _prepare_term_series(request, db, domain, dataset, entity, weight, date, window):
-    """Shared term-series setup — dataset, columns, entity, default date, path.
+async def _prepare_term_series(request, db, domain, dataset, entity, weight, dates):
+    """Shared term-series setup — dataset, columns, entity, date range, path.
 
-    Returns (ctx, early) where early is a 404 JSONResponse when the dataset has
-    no data to default the date from, else None.
+    *dates* is a single date or a 'start,end' range (parse_dates, same as the
+    other generic endpoints); omit for full history. Returns (ctx, early) where
+    early is a 404 JSONResponse when an undated request hits a slice with no
+    data at all, else None.
     """
-    dataset_obj = await _resolve_types_counts(db, domain, dataset)
+    dataset_obj = await _resolve_types_counts(db, domain, dataset, dates)
     if dates_mode(dataset_obj) == "none":
         raise HTTPException(
             status_code=400,
@@ -232,15 +233,18 @@ async def _prepare_term_series(request, db, domain, dataset, entity, weight, dat
     )
 
     latest_date = latest_available_for(dataset_obj, local_id, filter_vals)
-    if not date:
-        if not latest_date:
-            return None, JSONResponse(
-                status_code=404,
-                content={"detail": "No data found for this dataset", "latest_available_date": None},
-            )
-        date = latest_date
+    date_range = parse_dates(dates)
+    if date_range is None and not latest_date:
+        return None, JSONResponse(
+            status_code=404,
+            content={"detail": "No data found for this dataset", "latest_available_date": None},
+        )
 
-    date_filter, date_params = build_date_filter(date, window)
+    # Explicit range → BETWEEN; omitted → full history (no date bound).
+    if date_range:
+        date_filter, date_params = "date BETWEEN ? AND ?", [date_range[0], date_range[1]]
+    else:
+        date_filter, date_params = "1=1", []
     _, base_path = ngrams_context(dataset_obj, local_id, filter_vals)
 
     ctx = SimpleNamespace(
@@ -279,7 +283,8 @@ async def _term_series_rows(db, domain, ctx, terms, sparkline_dataset, *, batch)
         return rows
 
     year_filter, year_params = (
-        year_pruning(ctx.date_params) if _has_year_partition(ctx.dataset_obj) else ("1=1", [])
+        year_pruning(ctx.date_params)
+        if ctx.date_params and _has_year_partition(ctx.dataset_obj) else ("1=1", [])
     )
     glob = f"{ctx.base_path}/*.parquet"
     placeholders = ", ".join(["?"] * len(terms))
@@ -315,8 +320,7 @@ async def term_series(
     dataset: str = Query("ngrams", description="Dataset ID within the domain"),
     type: str = Query(..., description="The type/term to look up. Case-sensitive."),
     entity: Optional[str] = Query(None, description="Global entity ID (e.g. 'wikidata:Q30') or local ID. Omit for datasets without entity_mapping."),
-    date: Optional[str] = Query(None, description="End date (YYYY-MM-DD). Defaults to latest available."),
-    window: int = Query(0, description="Days to look back from date. 0 = full history."),
+    dates: Optional[str] = Query(None, description="Date range: a single date '2024-06-01' or 'start,end' like '2024-01-01,2024-12-31'. Omit for full history."),
     weight: Optional[str] = Query(None, description="Count measure — one of the dataset's endpoint_schema.count_column entries. Defaults to the first."),
     sparkline_dataset: str = Query("sparklines", description="Registry dataset_id for the type-first sparkline precompute (default: 'sparklines'). Empty falls back to the dist-tree scan."),
     db: AsyncSession = Depends(get_session),
@@ -329,7 +333,7 @@ async def term_series(
     precomputed vocabulary. mongodb datasets are served by their bespoke
     `/{domain}/term-series`.
     """
-    ctx, early = await _prepare_term_series(request, db, domain, dataset, entity, weight, date, window)
+    ctx, early = await _prepare_term_series(request, db, domain, dataset, entity, weight, dates)
     if early is not None:
         return early
     rows = await _term_series_rows(db, domain, ctx, [type], sparkline_dataset, batch=False)
@@ -347,8 +351,7 @@ async def term_series_batch(
     dataset: str = Query("ngrams", description="Dataset ID within the domain"),
     types: str = Query(..., description="Comma-separated types, e.g. 'trump,covid,the'. Case-sensitive."),
     entity: Optional[str] = Query(None, description="Global entity ID or local ID. Omit for datasets without entity_mapping."),
-    date: Optional[str] = Query(None, description="End date (YYYY-MM-DD). Defaults to latest available."),
-    window: int = Query(0, description="Days to look back from date. 0 = full history."),
+    dates: Optional[str] = Query(None, description="Date range: a single date or 'start,end'. Omit for full history."),
     weight: Optional[str] = Query(None, description="Count measure — defaults to the first registered."),
     sparkline_dataset: str = Query("sparklines", description="Type-first sparkline dataset_id (default: 'sparklines')."),
     db: AsyncSession = Depends(get_session),
@@ -357,7 +360,7 @@ async def term_series_batch(
     type_list = [t.strip() for t in types.split(",") if t.strip()]
     if not type_list:
         raise HTTPException(status_code=400, detail="types parameter must contain at least one term")
-    ctx, early = await _prepare_term_series(request, db, domain, dataset, entity, weight, date, window)
+    ctx, early = await _prepare_term_series(request, db, domain, dataset, entity, weight, dates)
     if early is not None:
         return early
     rows = await _term_series_rows(db, domain, ctx, type_list, sparkline_dataset, batch=True)

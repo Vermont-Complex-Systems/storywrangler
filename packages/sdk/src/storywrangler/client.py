@@ -382,8 +382,7 @@ class InstrumentClient(_SubClient):
         *,
         type: str,
         entity: str | None = None,
-        date: str | None = None,
-        window: int | None = None,
+        dates: str | None = None,
         weight: str | None = None,
         sparkline_dataset: str | None = None,
         **filter_dims,
@@ -399,8 +398,8 @@ class InstrumentClient(_SubClient):
             type: The term to look up (case-sensitive).
             entity: Global entity ID or local ID; omit when the dataset has no
                 entity_mapping.
-            date: Anchor date; defaults to the latest available.
-            window: Days of history back from the anchor (0 = full history).
+            dates: A single date ('2024-06-01') or 'start,end' range
+                ('2024-01-01,2024-12-31'); omit for full history.
             weight: Count measure — one of the registered count_column entries.
             sparkline_dataset: Type-first fast-path dataset id (default
                 'sparklines' server-side); pass '' to force the dist-tree scan.
@@ -409,7 +408,7 @@ class InstrumentClient(_SubClient):
                 "daily"`` for wikimedia).
         """
         params: Dict[str, Any] = {"domain": domain, "dataset": dataset, "type": type}
-        optional = {"entity": entity, "date": date, "window": window,
+        optional = {"entity": entity, "dates": dates,
                     "weight": weight, "sparkline_dataset": sparkline_dataset}
         params.update({k: v for k, v in optional.items() if v is not None})
         params.update(filter_dims)
@@ -422,8 +421,7 @@ class InstrumentClient(_SubClient):
         *,
         types: "str | List[str]",
         entity: str | None = None,
-        date: str | None = None,
-        window: int | None = None,
+        dates: str | None = None,
         weight: str | None = None,
         sparkline_dataset: str | None = None,
         **filter_dims,
@@ -436,7 +434,7 @@ class InstrumentClient(_SubClient):
         if isinstance(types, (list, tuple)):
             types = ",".join(types)
         params: Dict[str, Any] = {"domain": domain, "dataset": dataset, "types": types}
-        optional = {"entity": entity, "date": date, "window": window,
+        optional = {"entity": entity, "dates": dates,
                     "weight": weight, "sparkline_dataset": sparkline_dataset}
         params.update({k: v for k, v in optional.items() if v is not None})
         params.update(filter_dims)
