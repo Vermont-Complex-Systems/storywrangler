@@ -112,24 +112,6 @@ def _stores_datetimes(dataset_obj, time_col: str) -> bool:
     return (dataset_obj.data_schema or {}).get(time_col, "").upper() in ("TIMESTAMP", "DATE")
 
 
-def range_filter(dataset_obj, time_col: str, date_str: str, window: int) -> dict:
-    """Time sub-filter for a date + look-back window (window=0 → full history).
-
-    Matches the stored BSON type: datetime bounds when introspection saw
-    TIMESTAMP/DATE, ISO strings otherwise.
-    """
-    end = parse_day(date_str)
-    if _stores_datetimes(dataset_obj, time_col):
-        cond = {"$lt": end + timedelta(days=1)}
-        if window > 0:
-            cond["$gte"] = end - timedelta(days=window)
-        return cond
-    cond = {"$lte": date_str}
-    if window > 0:
-        cond["$gte"] = (end - timedelta(days=window)).strftime("%Y-%m-%d")
-    return cond
-
-
 def day_filter(dataset_obj, time_col: str, date_str: str):
     """Exact-day sub-filter. Single days only — summing counts over a range
     needs an aggregation pipeline, which pass-through datasets do not get."""
@@ -145,9 +127,8 @@ def date_range_filter(dataset_obj, time_col: str, date_range) -> Optional[dict]:
     *date_range* is ``[start, end]`` (parse_dates) or None for full history
     (no time bound). Matches the stored BSON type: datetime bounds when
     introspection saw TIMESTAMP/DATE (end padded to the day's end), ISO
-    strings otherwise. Unlike range_filter this is not equality/one-anchor —
-    it is still a plain range read, not an aggregation, so the pass-through
-    guardrail holds.
+    strings otherwise. It is a plain range read, not an aggregation, so the
+    pass-through guardrail holds.
     """
     if not date_range:
         return None

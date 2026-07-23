@@ -17,7 +17,7 @@
 	// Instrument-ready datasets (those with an endpoint_schema.type).
 	const datasets = registry.filter((d) => d.type);
 
-	// Two candidate terms compared, from /wikimedia/term-series/batch.
+	// Two candidate terms compared, from /storywrangler/term-series/batch.
 	// US convention: Republican red, Democrat blue.
 	const COLORS: Record<string, string> = { Trump: 'text-red-500', Harris: 'text-blue-500' };
 	const seriesSet = termdata.terms.map((t) => ({
@@ -113,7 +113,7 @@
 		<div>
 			<p class="text-foreground break-all">
 				<span class="text-green-500">$</span> curl -s <span class="text-orange-500"
-					>'…/wikimedia/term-series/batch?entity={termdata.entity}&types={termLabel}'</span
+					>'…/storywrangler/term-series/batch?domain=wikimedia&dataset=ngrams&entity={termdata.entity}&types={termLabel}'</span
 				>
 			</p>
 			<p class="text-muted-foreground mt-1">

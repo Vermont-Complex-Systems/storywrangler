@@ -19,7 +19,7 @@ from app.core.openapi_menus import install_dynamic_openapi, refresh_weight_menus
 from app.core.timing import get_timings, init_timings
 from app.models.auth import User
 from app.core.health_check import health_check_loop
-from app.routers import auth, bluesky, domain_root, health, open_academic_analytics, reddit, registry, scisciDB, storywrangler, twitter, wikimedia
+from app.routers import auth, domain_root, health, open_academic_analytics, registry, scisciDB, storywrangler, twitter, wikimedia
 from storywrangler_mcp.server import mcp as mcp_server
 
 log = logging.getLogger(__name__)
@@ -198,8 +198,8 @@ app.include_router(registry.admin_router, prefix="/admin/registry", tags=["admin
 DOMAIN_ROUTERS = {
     "babynames": None,
     "storywrangler": storywrangler.router,
-    "reddit": reddit.router,
-    "bluesky": bluesky.router,
+    "reddit": None,
+    "bluesky": None,
     "wikimedia": wikimedia.router,
     "open-academic-analytics": open_academic_analytics.router,
     "scisciDB": scisciDB.router,

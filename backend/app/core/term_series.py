@@ -1,23 +1,19 @@
-"""Shared helpers for sparkline-backed domain routers (wikimedia, reddit, bluesky).
+"""Shared helpers for the generic sparkline-backed endpoints (/storywrangler
+term-series and top-ngrams).
 
-These routers expose the same term-series endpoint family over hive-partitioned
-ngram datasets with precomputed, hash-bucket-sharded sparkline files (and, for
-reddit/bluesky, a date-sharded dist tree for the slow fallback). Everything that
-is not genuinely domain-specific lives here:
+These consume hive-partitioned ngram datasets with precomputed,
+hash-bucket-sharded sparkline files. Everything that is not genuinely
+endpoint-specific lives here:
 
-  validated_dims()        — validate query params against introspected filter_values
   ngrams_context()        — (filter_vals, entity base path) for partition scans
-  build_date_filter()     — date/window → SQL condition + params
-  year_pruning()          — prune year=* dist-tree dirs from an in-file date filter
-  series_entry()          — one time-series response row
   log_fast_path_miss()    — classify a sparkline failure before scan fallback
+  bucket_files()          — glob the hash-bucket dirs that can hold a set of terms
   fetch_sparkline_rows()  — bucket-routed sparkline lookup for a set of terms
   fetch_provenance()      — bucket-routed source-document lookup (?include=)
   run_top_ngrams()        — the full top-ngrams endpoint body (off the event loop)
 """
 
 import logging
-from datetime import date as dt_date, datetime, timedelta
 from typing import List, Optional
 
 from fastapi import HTTPException
@@ -28,33 +24,9 @@ from .duckdb_query import (
     get_bucket_config, handle_query_error, is_data_missing, load_system,
     resolve_bucket_count,
 )
-from .query_utils import get_queryable_dims, latest_from_manifest, parse_dates
+from .query_utils import get_queryable_dims, parse_dates
 
 log = logging.getLogger(__name__)
-
-
-def validated_dims(dataset_obj, candidates: dict) -> dict:
-    """Return the subset of *candidates* that are queryable dimensions.
-
-    Each value is validated against the introspected filter_values (the
-    authoritative record of what is actually on disk); an invalid value
-    raises 400. Candidates that are not queryable dims are dropped —
-    they are not hive levels for this dataset.
-    """
-    fv = dataset_obj.filter_values or {}
-    queryable = get_queryable_dims(dataset_obj)
-    extra: dict = {}
-    for dim, val in candidates.items():
-        if dim not in queryable:
-            continue
-        valid = fv.get(dim, [])
-        if valid and val not in valid:
-            raise HTTPException(
-                status_code=400,
-                detail=f"{dim} must be one of {sorted(valid)}",
-            )
-        extra[dim] = val
-    return extra
 
 
 def ngrams_context(ngrams_obj, local_id, dim_values: dict) -> tuple:
@@ -62,51 +34,6 @@ def ngrams_context(ngrams_obj, local_id, dim_values: dict) -> tuple:
     dims = get_queryable_dims(ngrams_obj)
     filter_vals = {d: dim_values[d] for d in dims if d in dim_values}
     return filter_vals, entity_base_path(ngrams_obj, local_id, filter_vals)
-
-
-def build_date_filter(date_str: str, window: int) -> tuple:
-    """Parse a date + look-back window into a SQL condition and bind params.
-
-    Returns ("date BETWEEN ? AND ?", [start, end]) when window > 0,
-    or ("date <= ?", [end]) for full history. Raises 400 on a bad date.
-    """
-    try:
-        end = datetime.strptime(date_str, "%Y-%m-%d")
-    except ValueError:
-        raise HTTPException(status_code=400, detail=f"Invalid date: {date_str}")
-
-    if window > 0:
-        start_str = (end - timedelta(days=window)).strftime("%Y-%m-%d")
-        return "date BETWEEN ? AND ?", [start_str, date_str]
-    return "date <= ?", [date_str]
-
-
-def latest_series_date(
-    ngrams_obj, sparkline_obj, local_id, granularity: str, n: int,
-) -> Optional[str]:
-    """Latest available date for term-series defaults and responses.
-
-    Takes the max across the ngrams and sparkline manifests: the two are
-    built by separate pipelines, so either can run ahead of the other
-    (e.g. DuckLake sparklines update nightly while the raw ngrams sync
-    lags). Sparkline data is daily-only, so its manifest — keyed by
-    entity → ngram_size — only participates for daily requests.
-    """
-    candidates = [latest_from_manifest(ngrams_obj, local_id, granularity)]
-    if sparkline_obj and granularity == "daily":
-        candidates.append(latest_from_manifest(sparkline_obj, local_id, str(n)))
-    dates = [d for d in candidates if d]
-    return max(dates) if dates else None
-
-
-def series_entry(date_str: str, count, rank, freq) -> dict:
-    """Shape one (date, count, rank, freq) row for a term-series response."""
-    return {
-        "date": date_str,
-        "counts": int(count) if count else 0,
-        "rank": int(rank) if rank else 0,
-        "freq": float(freq) if freq else 0.0,
-    }
 
 
 def log_fast_path_miss(label: str, exc: Exception) -> None:
@@ -144,23 +71,6 @@ def bucket_files(dataset_obj, terms, *, entity_value=None, filter_vals=None) -> 
         )
         for b in sorted(buckets)
     ]
-
-
-def year_pruning(date_params: list) -> tuple:
-    """Prune year=* hive directories from an in-file date filter's bounds.
-
-    For dist trees whose ``date`` column lives inside the files while
-    ``year`` is a hive partition (reddit, bluesky): this condition lets
-    DuckDB drop whole year directories from directory names alone, without
-    reading file footers. Bounds are padded by one week so weekly files
-    bucketed under the year their ISO week starts in stay reachable (a
-    no-op for daily trees).
-    """
-    pad = timedelta(days=6)
-    bounds = [dt_date.fromisoformat(str(p)[:10]) for p in date_params]
-    if len(bounds) == 2:
-        return "year BETWEEN ? AND ?", [(bounds[0] - pad).year, (bounds[1] + pad).year]
-    return "year <= ?", [(bounds[0] + pad).year]
 
 
 def fetch_sparkline_rows(
