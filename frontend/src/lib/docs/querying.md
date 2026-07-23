@@ -84,10 +84,10 @@ wiki.allotax(entity="wikidata:Q30", entity2="wikidata:Q145",
   precomputed vocabulary (~65K terms) return in tens of milliseconds; arbitrary
   terms fall back to scanning daily partition files (~3–5 s). Prefer vocabulary
   terms for interactive use.
-- **Skip what you don't need.** `include_articles=false` on term-series is
-  roughly 2× faster — only request articles when the user drills in.
-- **Window the series.** `window=0` returns full history; use `window=30` or
-  `window=90` when only recent data is needed.
+- **Skip what you don't need.** Omitting `include=` (the default) is roughly 2×
+  faster than `include=articles`; only request articles when the user drills in.
+- **Window the series.** Omit `dates` for full history; pass a narrow range like
+  `dates=2024-10-01,2024-12-31` when only recent data is needed.
 - **Batch when comparing terms.** The batch term-series endpoint fetches many
   sparklines in one request; missing terms come back as empty arrays, never
   errors.
