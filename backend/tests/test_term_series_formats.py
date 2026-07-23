@@ -139,3 +139,32 @@ class TestBucketReadStrict:
         obj = self._bucketed_obj(self._write_bucket(conn, tmp_path))
         with pytest.raises(Exception, match="missing_col"):
             self._read(conn, obj, "ngram, date, missing_col", strict=True)
+
+
+class TestCompanionCovers:
+    """The coverage gate: a companion must have a hive level for every request
+    filter dim, else its files would answer for the wrong slice."""
+
+    def _companion(self, *cols):
+        from app.core.term_series import _companion_covers  # noqa: F401
+        return SimpleNamespace(
+            level_order=[{"column": c, "type": "partition"} for c in cols])
+
+    def test_covers_when_all_dims_are_levels(self):
+        from app.core.term_series import _companion_covers
+        assert _companion_covers(
+            self._companion("ngram_size", "granularity", "country", "ngram_bucket"),
+            {"ngram_size": 1, "granularity": "weekly"})
+
+    def test_missing_dim_not_covered(self):
+        # The daily-sparkline trap: no granularity level → cannot answer
+        # granularity=weekly (or daily — the path can't pin the slice at all).
+        from app.core.term_series import _companion_covers
+        assert not _companion_covers(
+            self._companion("ngram_size", "country", "ngram_bucket"),
+            {"ngram_size": 1, "granularity": "weekly"})
+
+    def test_no_filters_trivially_covered(self):
+        from app.core.term_series import _companion_covers
+        assert _companion_covers(self._companion(), {})
+        assert _companion_covers(SimpleNamespace(level_order=None), {})

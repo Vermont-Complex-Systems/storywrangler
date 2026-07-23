@@ -299,6 +299,25 @@ async def _resolve_include(db, domain, token, doc_companions) -> tuple:
     return token, prov_obj
 
 
+def _companion_covers(companion_obj, filter_vals: dict) -> bool:
+    """Can the companion express every request filter dim as a hive level?
+
+    A bucket-routed companion answers a request by pinning the filter dims
+    into its hive path. A dim it has no level for would be silently ignored —
+    the read would return rows from whatever slice its files hold, mislabelled
+    as the requested one (a daily-only sparkline answering granularity=weekly).
+    Not expressible → no bucket read; the date-first scan serves the request
+    correctly. A self-served type-first dataset covers by construction (the
+    request dims come from its own level_order).
+
+    A dim the companion *does* level on but holds no data for (granularity=
+    weekly pinned into a daily-only tree) needs no check: the path misses,
+    the read returns [], and the scan takes over.
+    """
+    levels = {lv["column"] for lv in (getattr(companion_obj, "level_order", None) or [])}
+    return all(dim in levels for dim in filter_vals)
+
+
 async def fetch_includes(db, domain, include, ctx, terms) -> dict:
     """Resolve and fetch each ?include= provenance companion for *terms*.
 
@@ -306,6 +325,10 @@ async def fetch_includes(db, domain, include, ctx, terms) -> dict:
     dataset id for the deprecated raw-id form). *include* is a comma-separated
     list of provenance roles declared on the primary's lineage companions, or
     the literal ``all`` for every companion.
+
+    A companion that cannot express the request's filter dims as hive levels
+    is skipped with a log line (its documents would come from the wrong slice)
+    — same sparse-result semantics as a companion with no data.
     """
     tokens = [p.strip() for p in (include or "").split(",") if p.strip()]
     # Provenance is a bucket-routed parquet read; mongodb pass-through datasets
@@ -324,6 +347,15 @@ async def fetch_includes(db, domain, include, ctx, terms) -> dict:
 
     out: dict = {}
     for key, prov_obj in selected.items():
+        if not _companion_covers(prov_obj, ctx.filter_vals):
+            log.info(
+                "include %r (%s/%s): companion has no hive level for dims %s; "
+                "skipping (its documents would come from the wrong slice)",
+                key, domain, prov_obj.dataset_id,
+                sorted(set(ctx.filter_vals)
+                       - {lv["column"] for lv in (getattr(prov_obj, "level_order", None) or [])}),
+            )
+            continue
         def _fetch(prov_obj=prov_obj):
             with get_duckdb_client().timed_connect() as conn:
                 return fetch_provenance(
@@ -428,6 +460,20 @@ async def prepare_term_series(request, db, domain, dataset, entity, weight, date
     companions = await resolve_companions(db, domain, dataset)
     sparkline_obj = await _resolve_sparkline_obj(
         db, domain, dataset_obj, companions, sparkline_dataset)
+    # Coverage gate: a companion that has no hive level for one of the
+    # request's filter dims cannot answer for that slice — its files would be
+    # read as-is and mislabelled (a daily-only sparkline answering
+    # granularity=weekly). Drop the fast path; the date-first scan is correct.
+    if sparkline_obj is not None and not _companion_covers(sparkline_obj, filter_vals):
+        log.info(
+            "%s/%s: sparkline %r has no hive level for dims %s; using the "
+            "date-first scan (re-register the companion with those levels "
+            "to restore the fast path)",
+            domain, dataset, sparkline_obj.dataset_id,
+            sorted(set(filter_vals)
+                   - {lv["column"] for lv in (getattr(sparkline_obj, "level_order", None) or [])}),
+        )
+        sparkline_obj = None
 
     # latest_available_date is the max of primary and sparkline availability
     # (the two pipelines advance independently); the undated no-data 404 uses it

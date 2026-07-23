@@ -137,3 +137,26 @@ class TestSelfTypeFirst:
         primary = _entry("ngrams", etype="types-counts")
         got = self._resolve_sparkline(primary, {"type_first": None, "documents": {}})
         assert got is None
+
+
+class TestFetchIncludesCoverage:
+    def test_non_covering_companion_skipped(self):
+        # A provenance companion with no granularity level would attach
+        # documents from the wrong slice — it is skipped, not queried.
+        from app.core.term_series import fetch_includes
+        prov = SimpleNamespace(
+            dataset_id="ngrams-articles",
+            endpoint_schema={"type": "type-documents", "role": "articles"},
+            level_order=[{"column": "ngram_size", "type": "partition"},
+                         {"column": "country", "type": "entity"},
+                         {"column": "ngram_bucket", "type": "hash_bucket"}],
+        )
+        ctx = SimpleNamespace(
+            is_mongo=False,
+            companions={"documents": {"articles": prov}},
+            filter_vals={"ngram_size": 1, "granularity": "weekly"},
+            local_id="United States", date_filter="1=1", date_params=[],
+            time_col="date",
+        )
+        out = asyncio.run(fetch_includes(None, "wikimedia", "articles", ctx, {"trump"}))
+        assert out == {}
