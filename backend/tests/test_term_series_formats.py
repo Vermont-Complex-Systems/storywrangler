@@ -12,7 +12,7 @@ from types import SimpleNamespace
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.core.mongo_query import date_range_filter
-from app.routers.storywrangler import _term_series_scan_target
+from app.core.term_series import _term_series_scan_target
 
 
 def _ctx(dataset_obj, **kw):

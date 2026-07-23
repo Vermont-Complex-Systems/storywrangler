@@ -10,10 +10,8 @@ Currently includes:
 
 import logging
 import math
-from types import SimpleNamespace
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from ..core.allotax_utils import (
     sanitize_floats as _sanitize_floats,
@@ -22,23 +20,20 @@ from ..core.allotax_utils import (
 )
 from ..core.database import get_session
 from ..core.duckdb_client import get_duckdb_client, run_blocking
-from ..core.mongo_client import QUERY_TIMEOUT_S, handle_mongo_error, run_blocking_mongo
+from ..core.mongo_client import run_blocking_mongo
 from ..core.mongo_query import (
-    date_range_filter, latest_available, load_instrument_system,
-    require_single_dates, resolve_collection, resolve_measures, series_projection,
+    load_instrument_system, require_single_dates,
 )
 from ..core.duckdb_query import (
-    build_hive_path, derive_time_partitions, handle_query_error, is_data_missing,
-    load_system,
+    handle_query_error, load_system,
 )
 from ..core.query_utils import (
-    dates_mode, extract_filter_pair, extract_filter_vals, latest_available_for,
-    latest_from_manifest, parse_dates, require_dates_supported, require_types_counts,
-    resolve_companions, resolve_count_column, resolve_entity, resolve_series_columns,
+    extract_filter_pair, extract_filter_vals, latest_from_manifest, parse_dates,
+    require_dates_supported, require_types_counts, resolve_count_column, resolve_entity,
 )
 from ..core.registry_utils import get_latest_entry
 from ..core.term_series import (
-    fetch_provenance, fetch_sparkline_rows, ngrams_context, run_top_ngrams,
+    fetch_includes, prepare_term_series, run_top_ngrams, series_row, term_series_rows,
 )
 from . import openapi_docs as docs
 from ..core.timing import timed
@@ -171,358 +166,6 @@ async def top_ngrams(
 
 # ── term-series (generic) ──────────────────────────────────────────────────────
 
-def _series_select(dataset_obj, weight, type_col, time_col) -> tuple:
-    """(select_cols, cols) for a term-series row under the chosen weight.
-
-    cols is {count, rank, freq} with None for companions the dataset did not
-    declare (resolve_series_columns) — the response omits those. select_cols
-    keeps a fixed 5-column shape (type, time, count, rank, freq), NULL-filling
-    undeclared companions so row unpacking stays positional. type_col/time_col
-    are the registered type/time columns.
-    """
-    cols = resolve_series_columns(dataset_obj, weight)
-    if cols is None:
-        cols = {"count": resolve_count_column(dataset_obj, weight), "rank": None, "freq": None}
-    select_cols = (
-        f"{type_col}, {time_col}, {cols['count']}, "
-        f"{cols['rank'] or 'NULL'}, {cols['freq'] or 'NULL'}"
-    )
-    return select_cols, cols
-
-
-def _series_row(row, cols, includes=None) -> dict:
-    """Shape one term-series row, omitting companions the dataset didn't declare.
-
-    *includes* is ``{dataset_id: {(type, date): [[doc, score], ...]}}`` — each
-    requested ?include= provenance dataset's documents, attached under its id.
-    """
-    date_str = str(row[1])
-    entry = {"date": date_str, "counts": int(row[2]) if row[2] else 0}
-    if cols["rank"] is not None:
-        entry["rank"] = int(row[3]) if row[3] else 0
-    if cols["freq"] is not None:
-        entry["freq"] = float(row[4]) if row[4] else 0.0
-    for prov_id, prov in (includes or {}).items():
-        entry[prov_id] = prov.get((row[0], date_str), [])
-    return entry
-
-
-async def _resolve_include(db, domain, token, doc_companions) -> tuple:
-    """Resolve one ?include= token → (key, prov_obj).
-
-    A token is a declared provenance *role* (the clean surface — resolved from
-    the primary's lineage companions), falling back to a raw type-documents
-    dataset id (deprecated alias). Unknown or non-type-documents tokens are a
-    400, not a silently empty field. The returned *key* is the token as asked,
-    so the response nests under the role (or id) the caller used.
-    """
-    if token in doc_companions:
-        return token, doc_companions[token]
-    prov_obj = await get_latest_entry(db, domain, token)
-    if not prov_obj:
-        raise HTTPException(
-            status_code=400,
-            detail=f"include '{token}' is not a known provenance role or dataset "
-                   f"in '{domain}'. Available roles: {sorted(doc_companions)}",
-        )
-    if (prov_obj.endpoint_schema or {}).get("type") != "type-documents":
-        raise HTTPException(
-            status_code=400,
-            detail=f"include '{domain}/{token}' is not a type-documents dataset "
-                   "(register it with endpoint_schema.type='type-documents').",
-        )
-    return token, prov_obj
-
-
-async def _fetch_includes(db, domain, include, ctx, terms) -> dict:
-    """Resolve and fetch each ?include= provenance companion for *terms*.
-
-    Returns ``{key: {(type, date): [[doc, score], ...]}}`` keyed by role (or
-    dataset id for the deprecated raw-id form). *include* is a comma-separated
-    list of provenance roles declared on the primary's lineage companions, or
-    the literal ``all`` for every companion.
-    """
-    tokens = [p.strip() for p in (include or "").split(",") if p.strip()]
-    # Provenance is a bucket-routed parquet read; mongodb pass-through datasets
-    # have no type-documents companions, so include is a no-op there.
-    if not tokens or not terms or getattr(ctx, "is_mongo", False):
-        return {}
-
-    doc_companions = (getattr(ctx, "companions", None) or {}).get("documents", {})
-    selected: dict = {}
-    for token in tokens:
-        if token == "all":
-            selected.update(doc_companions)
-            continue
-        key, prov_obj = await _resolve_include(db, domain, token, doc_companions)
-        selected[key] = prov_obj
-
-    out: dict = {}
-    for key, prov_obj in selected.items():
-        def _fetch(prov_obj=prov_obj):
-            with get_duckdb_client().timed_connect() as conn:
-                return fetch_provenance(
-                    conn, prov_obj, sorted(terms),
-                    entity_value=ctx.local_id, filter_vals=ctx.filter_vals,
-                    date_condition=ctx.date_filter, date_params=ctx.date_params,
-                    label=f"{domain}/{prov_obj.dataset_id}", time_col=ctx.time_col,
-                )
-        with timed("include", f"provenance {key}"):
-            out[key] = await run_blocking(_fetch)
-    return out
-
-
-async def _resolve_sparkline_obj(db, domain, companions, sparkline_dataset):
-    """The type-first companion term-series' fast path reads.
-
-    Default (``sparkline_dataset is None``): the declared type-first companion
-    (lineage + ``orientation: type-first``). None → no fast path, so the query
-    uses the correct-but-slower date-first scan until a sparkline is registered
-    with that orientation. An explicit ``sparkline_dataset`` overrides by id
-    (deprecated); ``""`` also disables the fast path.
-    """
-    if sparkline_dataset is not None:
-        return await get_latest_entry(db, domain, sparkline_dataset) if sparkline_dataset else None
-    return companions["type_first"]
-
-
-async def _prepare_term_series(request, db, domain, dataset, entity, weight, dates,
-                               sparkline_dataset=None):
-    """Shared term-series setup — dataset, columns, entity, date range, path.
-
-    *dates* is a single date or a 'start,end' range (parse_dates, same as the
-    other generic endpoints); omit for full history. *sparkline_dataset* is the
-    deprecated fast-path override (default None → resolve via lineage). Returns
-    (ctx, early) where early is a 404 JSONResponse when an undated request hits
-    a slice with no data at all, else None.
-    """
-    dataset_obj = await _resolve_types_counts(db, domain, dataset, dates)
-    if dates_mode(dataset_obj) == "none":
-        raise HTTPException(
-            status_code=400,
-            detail=f"'{domain}/{dataset}' has no time dimension — a term time series needs one.",
-        )
-
-    # Type and time columns come from the registration (like load_system), not
-    # hardcoded — so term-series works for any types-counts dataset, not only
-    # the ngram/date ones. The response normalises to date/counts/rank/freq
-    # regardless of the source column names.
-    ep = dataset_obj.endpoint_schema or {}
-    type_col = ep.get("type_column") or "types"
-    time_col = (dataset_obj.transform or {}).get("time_dimension") or "date"
-
-    filter_vals = extract_filter_vals(dataset_obj, request.query_params)
-    has_entity = bool((dataset_obj.entity_mapping or {}).get("local_id_column"))
-    # A term series is a single slice, and it cannot aggregate (rank/freq don't
-    # sum). So an entity-partitioned dataset needs the entity pinned — otherwise
-    # the scan spans every entity and returns duplicate-date rows.
-    if has_entity and not entity:
-        raise HTTPException(
-            status_code=400,
-            detail=f"'{domain}/{dataset}' is partitioned by entity — pass ?entity= "
-                   "(a term series is a single entity's trajectory).",
-        )
-    local_id = (
-        (await resolve_entity(db, domain, dataset, entity)).local_id if has_entity else None
-    )
-    date_range = parse_dates(dates)
-
-    # mongodb pass-through: a different backend (find, not read_parquet). Its
-    # cols come from resolve_measures and its latest date from a live probe in
-    # _mongo_term_series_rows; no sparkline/include/hive machinery applies.
-    if dataset_obj.data_format == "mongodb":
-        count_col = resolve_count_column(dataset_obj, weight)
-        count_col, rank_f, freq_f = resolve_measures(dataset_obj, count_col)
-        ctx = SimpleNamespace(
-            dataset_obj=dataset_obj, is_mongo=True,
-            cols={"count": count_col, "rank": rank_f, "freq": freq_f},
-            filter_vals=filter_vals, local_id=local_id, date_range=date_range,
-            type_col=type_col, time_col=time_col, latest_date=None,
-        )
-        return ctx, None
-
-    select_cols, cols = _series_select(dataset_obj, weight, type_col, time_col)
-    latest_date = latest_available_for(dataset_obj, local_id, filter_vals)
-    if date_range is None and not latest_date:
-        return None, JSONResponse(
-            status_code=404,
-            content={"detail": "No data found for this dataset", "latest_available_date": None},
-        )
-
-    # Explicit range → BETWEEN; omitted → full history (no time bound).
-    if date_range:
-        date_filter, date_params = f"{time_col} BETWEEN ? AND ?", [date_range[0], date_range[1]]
-    else:
-        date_filter, date_params = "1=1", []
-
-    # base_path is the hive entity path (fallback for the dist-tree scan); flat
-    # parquet has no level_order and scans read_parquet(data_location) directly.
-    base_path = None
-    if getattr(dataset_obj, "level_order", None):
-        _, base_path = ngrams_context(dataset_obj, local_id, filter_vals)
-
-    # Companions are deduced from declared lineage: the type-first sparkline
-    # (fast path) and the type-documents provenance sets (?include=). Resolved
-    # once here so both the row scan and _fetch_includes reuse them.
-    companions = await resolve_companions(db, domain, dataset)
-    sparkline_obj = await _resolve_sparkline_obj(db, domain, companions, sparkline_dataset)
-
-    ctx = SimpleNamespace(
-        dataset_obj=dataset_obj, is_mongo=False, select_cols=select_cols, cols=cols,
-        filter_vals=filter_vals, local_id=local_id, latest_date=latest_date,
-        date_filter=date_filter, date_params=date_params, base_path=base_path,
-        type_col=type_col, time_col=time_col,
-        companions=companions, sparkline_obj=sparkline_obj,
-    )
-    return ctx, None
-
-
-def _term_series_scan_target(ctx) -> tuple:
-    """(from_clause, extra_where, extra_params) for the direct date-first scan.
-
-    parquet_hive pins entity / filter / single-valued time_partition components
-    in the hive path (derive_time_partitions), adding WHERE IN conditions for
-    multi-valued ones, so DuckDB prunes directories. Flat parquet has no hive
-    levels: it reads read_parquet(data_location) and expresses entity and filter
-    dimensions as in-file WHERE conditions.
-    """
-    obj = ctx.dataset_obj
-    if getattr(obj, "level_order", None):
-        tp_path_vals, tp_conditions, tp_params = derive_time_partitions(
-            ctx.date_params, obj.level_order)
-        path = build_hive_path(
-            obj, entity_value=ctx.local_id, filter_vals=ctx.filter_vals,
-            time_partition_vals=tp_path_vals, glob_suffix="/*.parquet",
-        ) or f"{ctx.base_path}/*.parquet"
-        return f"read_parquet('{path}', hive_partitioning=true)", tp_conditions, tp_params
-
-    # Flat parquet: entity + filter dims are in-file columns → WHERE conditions.
-    where, params = [], []
-    entity_col = (obj.entity_mapping or {}).get("local_id_column")
-    if entity_col and ctx.local_id is not None:
-        where.append(f"{entity_col} = ?")
-        params.append(ctx.local_id)
-    for col, val in ctx.filter_vals.items():
-        where.append(f"{col} = ?")
-        params.append(val)
-    loc = obj.data_location
-    from_clause = (
-        f"read_parquet('{loc}')" if isinstance(loc, str)
-        else "read_parquet([" + ", ".join(f"'{p}'" for p in loc) + "])"
-    )
-    return from_clause, where, params
-
-
-async def _mongo_term_series_rows(domain, ctx, terms) -> list:
-    """Per-(type, date) rows for *terms* from a mongodb pass-through dataset.
-
-    The mongo analogue of the parquet path: resolve the collection (routing
-    hook), find ``{type: {$in: terms}, time: range}`` (a plain range read, no
-    aggregation — the pass-through guardrail), and return rows in the same
-    ``(type, time, count, rank, freq)`` tuple shape the parquet scan yields, so
-    _series_row handles both. Duplicate (type, day) rows in the source are
-    collapsed (some corpora re-ingest whole days). Sets ctx.latest_date from a
-    live max-time probe.
-    """
-    obj = ctx.dataset_obj
-    count_col = ctx.cols["count"]
-    rank_f, freq_f = ctx.cols["rank"], ctx.cols["freq"]
-
-    def _query():
-        with handle_mongo_error(f"{domain}/{obj.dataset_id}"):
-            coll = resolve_collection(obj, domain, ctx.filter_vals)
-            latest = latest_available(coll, ctx.time_col)
-            q = {ctx.type_col: {"$in": list(terms)}}
-            time_filter = date_range_filter(obj, ctx.time_col, ctx.date_range)
-            if time_filter is not None:
-                q[ctx.time_col] = time_filter
-            cursor = coll.find(
-                q,
-                projection=series_projection(ctx.type_col, ctx.time_col, count_col, rank_f, freq_f),
-                max_time_ms=QUERY_TIMEOUT_S * 1000,
-            ).sort([(ctx.type_col, 1), (ctx.time_col, 1)])
-            return latest, list(cursor)
-
-    with timed("mongo_query", "MongoDB find"):
-        latest, docs = await run_blocking_mongo(_query)
-    ctx.latest_date = latest
-
-    rows, seen = [], set()
-    for d in docs:
-        term = d.get(ctx.type_col)
-        day = str(d.get(ctx.time_col))[:10]
-        if (term, day) in seen:
-            continue
-        seen.add((term, day))
-        rows.append((term, day, d.get(count_col), d.get(rank_f), d.get(freq_f)))
-    return rows
-
-
-async def _term_series_rows(domain, ctx, terms):
-    """Fast sparkline bucket lookup, falling back to a dist-tree scan.
-
-    Fast path: hash-bucket point lookup on the type-first sparkline companion
-    (ctx.sparkline_obj, resolved from lineage in _prepare_term_series).
-    Slow path: a scan of the date-first tree (year/month pruned where the tree
-    has those levels) for terms outside the precomputed vocabulary.
-
-    A term with no data on disk yields no rows — an empty series, the same
-    whether one term or many was asked for. A *real* failure (a timeout, a
-    genuine query error) raises through handle_query_error (504 / 500); it is
-    never swallowed into an empty result, so a slow scan that times out reads
-    as a timeout, not as "no data".
-    """
-    if getattr(ctx, "is_mongo", False):
-        return await _mongo_term_series_rows(domain, ctx, terms)
-
-    label = f"{domain}/term-series"
-    rows = []
-    sparkline_obj = ctx.sparkline_obj
-    if sparkline_obj:
-        def _fast():
-            with get_duckdb_client().timed_connect() as conn:
-                return fetch_sparkline_rows(
-                    conn, sparkline_obj, terms,
-                    entity_value=ctx.local_id, filter_vals=ctx.filter_vals,
-                    select_cols=ctx.select_cols, date_condition=ctx.date_filter,
-                    date_params=ctx.date_params, label=label,
-                    type_col=ctx.type_col, time_col=ctx.time_col,
-                )
-        with timed("fast_query", "sparkline bucket read"):
-            rows = await run_blocking(_fast)
-    if rows:
-        return rows
-
-    from_clause, extra_where, extra_params = _term_series_scan_target(ctx)
-    placeholders = ", ".join(["?"] * len(terms))
-    where = [f"{ctx.type_col} IN ({placeholders})"]
-    if ctx.date_filter != "1=1":
-        where.append(ctx.date_filter)
-    where.extend(extra_where)
-    sql = (
-        f"SELECT {ctx.select_cols} FROM {from_clause} "
-        f"WHERE {' AND '.join(where)} ORDER BY {ctx.type_col}, {ctx.time_col}"
-    )
-    params = [*terms, *ctx.date_params, *extra_params]
-
-    def _slow():
-        with handle_query_error(f"{domain}/{ctx.dataset_obj.dataset_id}"):
-            with get_duckdb_client().timed_connect() as conn:
-                try:
-                    return conn.execute(sql, params).fetchall()
-                except Exception as exc:
-                    # A missing partition/file is a legitimate empty result (the
-                    # slice-level 404 is handled earlier in _prepare_term_series);
-                    # anything else re-raises for handle_query_error to classify.
-                    if is_data_missing(exc):
-                        log.info("%s: no partition data for %s", label, terms)
-                        return []
-                    raise
-
-    with timed("slow_query", "DuckDB partition scan"):
-        return await run_blocking(_slow)
-
-
 @router.get("/term-series", openapi_extra=docs.STORYWRANGLER_TERM_SERIES)
 async def term_series(
     request: Request,
@@ -547,16 +190,14 @@ async def term_series(
     `include=<role>` (or `include=all`) attaches a type-documents companion's
     ranked source documents per date (the provenance behind each entry).
     """
-    ctx, early = await _prepare_term_series(
+    ctx = await prepare_term_series(
         request, db, domain, dataset, entity, weight, dates, sparkline_dataset)
-    if early is not None:
-        return early
-    rows = await _term_series_rows(domain, ctx, [type])
-    includes = await _fetch_includes(db, domain, include, ctx, {r[0] for r in rows})
+    rows = await term_series_rows(domain, ctx, [type])
+    includes = await fetch_includes(db, domain, include, ctx, {r[0] for r in rows})
     return {
         "type": type,
         "latest_available_date": ctx.latest_date,
-        "series": [_series_row(r, ctx.cols, includes) for r in rows],
+        "series": [series_row(r, ctx.cols, includes) for r in rows],
     }
 
 
@@ -577,15 +218,13 @@ async def term_series_batch(
     type_list = [t.strip() for t in types.split(",") if t.strip()]
     if not type_list:
         raise HTTPException(status_code=400, detail="types parameter must contain at least one term")
-    ctx, early = await _prepare_term_series(
+    ctx = await prepare_term_series(
         request, db, domain, dataset, entity, weight, dates, sparkline_dataset)
-    if early is not None:
-        return early
-    rows = await _term_series_rows(domain, ctx, type_list)
-    includes = await _fetch_includes(db, domain, include, ctx, {r[0] for r in rows})
+    rows = await term_series_rows(domain, ctx, type_list)
+    includes = await fetch_includes(db, domain, include, ctx, {r[0] for r in rows})
     results = {t: [] for t in type_list}
     for r in rows:
-        results[r[0]].append(_series_row(r, ctx.cols, includes))
+        results[r[0]].append(series_row(r, ctx.cols, includes))
     return {"results": results, "latest_available_date": ctx.latest_date}
 
 
