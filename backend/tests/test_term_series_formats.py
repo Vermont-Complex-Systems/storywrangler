@@ -178,13 +178,18 @@ class TestPerMissingTermFallback:
     FLAT = SimpleNamespace(level_order=None, data_location="/d/x.parquet",
                            entity_mapping=None, dataset_id="ngrams")
 
-    def _ctx(self, sparkline_rows):
+    def _ctx(self, sparkline_rows, *, dated=True, sparkline=True):
+        # dated by default: the undated+missing+sparkline combination is the
+        # teaching-400 case, tested separately below.
+        date_filter, date_params = (
+            ("date BETWEEN ? AND ?", ["2024-01-01", "2024-01-31"]) if dated
+            else ("1=1", []))
         return SimpleNamespace(
             dataset_obj=self.FLAT, is_mongo=False,
-            sparkline_obj=SimpleNamespace(dataset_id="sparklines"),
+            sparkline_obj=SimpleNamespace(dataset_id="sparklines") if sparkline else None,
             select_cols="ngram, date, c, NULL, NULL",
-            filter_vals={}, local_id=None,
-            date_filter="1=1", date_params=[], base_path=None,
+            filter_vals={}, local_id=None, latest_date="2024-01-31",
+            date_filter=date_filter, date_params=date_params, base_path=None,
             type_col="ngram", time_col="date",
             _sparkline_rows=sparkline_rows,
         )
@@ -224,17 +229,37 @@ class TestPerMissingTermFallback:
         scanned = [("Zykov", "2024-01-01", 1, None, None)]
         rows, scan_params = self._run(monkeypatch, self._ctx(fast), scanned)
         assert rows == [*fast, *scanned]
-        assert scan_params == ["Zykov"]  # only the missing term reaches the scan
+        # only the missing term reaches the scan (+ the date bounds)
+        assert scan_params == ["Zykov", "2024-01-01", "2024-01-31"]
 
     def test_all_found_skips_scan(self, monkeypatch):
         fast = [("the", "2024-01-01", 5, None, None),
                 ("Zykov", "2024-01-01", 1, None, None)]
-        rows, scan_params = self._run(monkeypatch, self._ctx(fast), [])
+        rows, scan_params = self._run(monkeypatch, self._ctx(fast, dated=False), [])
         assert rows == fast
-        assert scan_params is None  # scan never ran
+        assert scan_params is None  # scan never ran (undated is fine: no miss)
 
     def test_none_found_scans_all(self, monkeypatch):
         scanned = [("the", "2024-01-01", 5, None, None)]
         rows, scan_params = self._run(monkeypatch, self._ctx([]), scanned)
+        assert rows == scanned
+        assert scan_params == ["the", "Zykov", "2024-01-01", "2024-01-31"]
+
+    def test_undated_miss_on_sparkline_dataset_teaches_400(self, monkeypatch):
+        # Undated full history is a fast-path privilege: a vocabulary miss
+        # without dates= must not launch an unbounded scan of the raw tree.
+        import pytest
+        from fastapi import HTTPException
+        with pytest.raises(HTTPException) as exc:
+            self._run(monkeypatch, self._ctx([], dated=False), [])
+        assert exc.value.status_code == 400
+        assert "Zykov" in exc.value.detail and "dates=" in exc.value.detail
+
+    def test_undated_scan_allowed_without_fast_path(self, monkeypatch):
+        # A dataset with no sparkline companion lives by the scan — undated
+        # full-history reads are its normal usage (babynames, scisciDB).
+        scanned = [("the", "2024-01-01", 5, None, None)]
+        rows, scan_params = self._run(
+            monkeypatch, self._ctx([], dated=False, sparkline=False), scanned)
         assert rows == scanned
         assert scan_params == ["the", "Zykov"]

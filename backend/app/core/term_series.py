@@ -612,7 +612,11 @@ async def term_series_rows(domain, ctx, terms):
     has those levels) for the terms the fast path did not find — per missing
     term, so a batch mixing vocabulary and out-of-vocabulary terms returns
     fast rows for the former and honest scan results for the latter (never a
-    silent empty because a sibling term hit the sparkline). A self-served
+    silent empty because a sibling term hit the sparkline). Undated full
+    history is a fast-path privilege: on a dataset with a type-first
+    companion, a vocabulary miss without dates= raises a teaching 400 instead
+    of an unbounded scan (datasets with no fast path keep undated scans — the
+    scan is their normal read). A self-served
     type-first dataset has no date-first tree, so there is no slow path: a
     bucket miss is an honest empty series, not a cue to re-read the same
     bucket tree through a wildcard glob.
@@ -664,6 +668,24 @@ async def term_series_rows(domain, ctx, terms):
     missing = [t for t in terms if t not in found]
     if not missing:
         return rows
+
+    # Undated full history is a fast-path privilege. A dataset registers a
+    # type-first companion precisely because its date-first tree is too big to
+    # scan casually (reddit: minutes, past the proxy timeout) — so a miss on
+    # an undated request teaches instead of launching an unbounded scan.
+    # Datasets with no fast path at all live by the scan; their undated
+    # full-history reads stay allowed.
+    if sparkline_obj and ctx.date_filter == "1=1":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"{missing} not in the precomputed fast-path vocabulary of "
+                f"'{domain}/{ctx.dataset_obj.dataset_id}' — an undated request "
+                "would scan the full date-first history. Pass dates= to bound "
+                "the scan (e.g. dates=2024-01-01,2024-12-31; latest available: "
+                f"{ctx.latest_date}), or drop those types."
+            ),
+        )
     if rows:
         log.info("%s: %d/%d terms missing from sparkline; scanning %s",
                  label, len(missing), len(terms), missing)
