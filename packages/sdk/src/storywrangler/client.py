@@ -1092,71 +1092,67 @@ class DatasetClient(_SubClient):
         type: str,
         *,
         entity: str | None = None,
-        date: str | None = None,
-        window: int | None = None,
+        dates: str | None = None,
         weight: str | None = None,
-        include_articles: bool | None = None,
+        include: str | None = None,
         sparkline_dataset: str | None = None,
         **filter_dims,
     ) -> Dict[str, Any]:
-        """One term's counts over time — GET /{domain}/term-series.
+        """One term's series over time — GET /storywrangler/term-series with
+        this dataset bound.
+
+        Same as ``client.instrument.term_series()`` but ``domain`` and
+        ``dataset`` are already bound — the generic platform endpoint, so it
+        works for any registered types-counts dataset (like the instruments).
 
         Args:
-            type: The term to look up (e.g. 'hello').
-            entity: Global entity ID, where the domain supports entity resolution.
-            date: Anchor date; defaults to the latest available.
-            window: Days of history around the anchor date (0 = full history).
-            include_articles: Attach top articles per date (wikimedia only).
-            sparkline_dataset: Override the sparkline source (wikimedia only).
-            **filter_dims: Dataset-specific filters (e.g. ``granularity="daily"``).
+            type: The term to look up (case-sensitive).
+            entity: Entity ID (e.g. 'wikidata:Q30') or local ID, where the
+                dataset declares an entity_mapping.
+            dates: A single date ('2024-06-01') or 'start,end' range
+                ('2024-01-01,2024-12-31'); omit for full history.
+            weight: Count measure — one of the registered count_column entries.
+            include: Provenance role(s) to attach per date (e.g. 'articles'), or
+                'all'; resolved from the dataset's lineage.
+            sparkline_dataset: Deprecated — the type-first sparkline is resolved
+                from lineage; pass an id only to override.
+            **filter_dims: Dataset-specific filters (e.g. ``granularity="daily",
+                ngram_size=1``). Use ``.filters`` to discover them.
         """
-        params: Dict[str, Any] = {"type": type}
-        params.update({
-            k: v for k, v in
-            {"entity": entity, "date": date, "window": window, "weight": weight,
-             "include_articles": include_articles, "sparkline_dataset": sparkline_dataset}.items()
-            if v is not None
-        })
-        params.update(filter_dims)
-        path = f"/{self.domain}/term-series"
-        self._check_route(path)
-        self._validate_filters(filter_dims, path=path)
-        return self._get_json(path, params)
+        self._resolve_dataset_id()
+        self._validate_filters(filter_dims)
+        self._validate_dates(dates, None)
+        return self._instrument.term_series(
+            self.domain, self.dataset_id,
+            type=type, entity=entity, dates=dates, weight=weight,
+            include=include, sparkline_dataset=sparkline_dataset, **filter_dims,
+        )
 
     def term_series_batch(
         self,
         types: "str | List[str]",
         *,
         entity: str | None = None,
-        date: str | None = None,
-        window: int | None = None,
+        dates: str | None = None,
         weight: str | None = None,
-        include_articles: bool | None = None,
-        articles_dates: str | None = None,
+        include: str | None = None,
         sparkline_dataset: str | None = None,
         **filter_dims,
     ) -> Dict[str, Any]:
-        """Several terms' counts over time — GET /{domain}/term-series/batch.
+        """Several terms' series in one request — GET /storywrangler/term-series/batch
+        with this dataset bound.
 
-        Args:
-            types: Terms to look up — a list or a comma-separated string.
-            (remaining args as in :meth:`term_series`)
+        Returns a map of type → series. ``types`` is a list or comma-separated
+        string; remaining args as in :meth:`term_series`.
         """
-        if isinstance(types, (list, tuple)):
-            types = ",".join(types)
-        params: Dict[str, Any] = {"types": types}
-        params.update({
-            k: v for k, v in
-            {"entity": entity, "date": date, "window": window, "weight": weight,
-             "include_articles": include_articles, "articles_dates": articles_dates,
-             "sparkline_dataset": sparkline_dataset}.items()
-            if v is not None
-        })
-        params.update(filter_dims)
-        path = f"/{self.domain}/term-series/batch"
-        self._check_route(path)
-        self._validate_filters(filter_dims, path=path)
-        return self._get_json(path, params)
+        self._resolve_dataset_id()
+        self._validate_filters(filter_dims)
+        self._validate_dates(dates, None)
+        return self._instrument.term_series_batch(
+            self.domain, self.dataset_id,
+            types=types, entity=entity, dates=dates, weight=weight,
+            include=include, sparkline_dataset=sparkline_dataset, **filter_dims,
+        )
 
     def __getattr__(self, name: str):
         """Unknown attributes become domain-route calls (route mirror).
