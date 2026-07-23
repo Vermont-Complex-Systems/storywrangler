@@ -386,6 +386,7 @@ class InstrumentClient(_SubClient):
         weight: str | None = None,
         sparkline_dataset: str | None = None,
         include: str | None = None,
+        include_dates: str | None = None,
         **filter_dims,
     ) -> Dict[str, Any]:
         """One type's series over time — GET /storywrangler/term-series.
@@ -409,13 +410,17 @@ class InstrumentClient(_SubClient):
                 'articles'), or 'all' for every declared companion. Roles resolve
                 from the primary's lineage; a raw type-documents dataset id also
                 works (deprecated). Each is added to every entry under its key.
+            include_dates: Comma-separated exact dates to attach provenance
+                for (e.g. the two comparison dates); narrows the include=
+                documents only, not the series range.
             **filter_dims: Dataset-specific filters by registered column name
                 (``n=1, lang="en"`` for reddit, ``ngram_size=1, granularity=
                 "daily"`` for wikimedia).
         """
         params: Dict[str, Any] = {"domain": domain, "dataset": dataset, "type": type}
         optional = {"entity": entity, "dates": dates, "weight": weight,
-                    "sparkline_dataset": sparkline_dataset, "include": include}
+                    "sparkline_dataset": sparkline_dataset, "include": include,
+                    "include_dates": include_dates}
         params.update({k: v for k, v in optional.items() if v is not None})
         params.update(filter_dims)
         return self._get_json("/storywrangler/term-series", params)
@@ -431,6 +436,7 @@ class InstrumentClient(_SubClient):
         weight: str | None = None,
         sparkline_dataset: str | None = None,
         include: str | None = None,
+        include_dates: str | None = None,
         **filter_dims,
     ) -> Dict[str, Any]:
         """Several types' series in one request — GET /storywrangler/term-series/batch.
@@ -442,7 +448,8 @@ class InstrumentClient(_SubClient):
             types = ",".join(types)
         params: Dict[str, Any] = {"domain": domain, "dataset": dataset, "types": types}
         optional = {"entity": entity, "dates": dates, "weight": weight,
-                    "sparkline_dataset": sparkline_dataset, "include": include}
+                    "sparkline_dataset": sparkline_dataset, "include": include,
+                    "include_dates": include_dates}
         params.update({k: v for k, v in optional.items() if v is not None})
         params.update(filter_dims)
         return self._get_json("/storywrangler/term-series/batch", params)
@@ -1099,6 +1106,7 @@ class DatasetClient(_SubClient):
         dates: str | None = None,
         weight: str | None = None,
         include: str | None = None,
+        include_dates: str | None = None,
         sparkline_dataset: str | None = None,
         **filter_dims,
     ) -> Dict[str, Any]:
@@ -1118,6 +1126,8 @@ class DatasetClient(_SubClient):
             weight: Count measure — one of the registered count_column entries.
             include: Provenance role(s) to attach per date (e.g. 'articles'), or
                 'all'; resolved from the dataset's lineage.
+            include_dates: Exact dates to attach provenance for (comma-
+                separated); narrows include= documents only.
             sparkline_dataset: Deprecated — the type-first sparkline is resolved
                 from lineage; pass an id only to override.
             **filter_dims: Dataset-specific filters (e.g. ``granularity="daily",
@@ -1129,7 +1139,8 @@ class DatasetClient(_SubClient):
         return self._instrument.term_series(
             self.domain, self.dataset_id,
             type=type, entity=entity, dates=dates, weight=weight,
-            include=include, sparkline_dataset=sparkline_dataset, **filter_dims,
+            include=include, include_dates=include_dates,
+            sparkline_dataset=sparkline_dataset, **filter_dims,
         )
 
     def term_series_batch(
@@ -1140,6 +1151,7 @@ class DatasetClient(_SubClient):
         dates: str | None = None,
         weight: str | None = None,
         include: str | None = None,
+        include_dates: str | None = None,
         sparkline_dataset: str | None = None,
         **filter_dims,
     ) -> Dict[str, Any]:
@@ -1155,7 +1167,8 @@ class DatasetClient(_SubClient):
         return self._instrument.term_series_batch(
             self.domain, self.dataset_id,
             types=types, entity=entity, dates=dates, weight=weight,
-            include=include, sparkline_dataset=sparkline_dataset, **filter_dims,
+            include=include, include_dates=include_dates,
+            sparkline_dataset=sparkline_dataset, **filter_dims,
         )
 
     def __getattr__(self, name: str):

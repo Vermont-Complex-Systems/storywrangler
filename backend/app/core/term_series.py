@@ -318,13 +318,18 @@ def _companion_covers(companion_obj, filter_vals: dict) -> bool:
     return all(dim in levels for dim in filter_vals)
 
 
-async def fetch_includes(db, domain, include, ctx, terms) -> dict:
+async def fetch_includes(db, domain, include, ctx, terms, include_dates=None) -> dict:
     """Resolve and fetch each ?include= provenance companion for *terms*.
 
     Returns ``{key: {(type, date): [[doc, score], ...]}}`` keyed by role (or
     dataset id for the deprecated raw-id form). *include* is a comma-separated
     list of provenance roles declared on the primary's lineage companions, or
     the literal ``all`` for every companion.
+
+    *include_dates* (comma-separated exact dates) narrows the provenance read
+    to those dates only, independent of the series range — a UI renders
+    documents for the hovered/comparison dates, not for every point of a
+    full-history sparkline. Omitted → the series' own date bounds apply.
 
     A companion that cannot express the request's filter dims as hive levels
     is skipped with a log line (its documents would come from the wrong slice)
@@ -335,6 +340,12 @@ async def fetch_includes(db, domain, include, ctx, terms) -> dict:
     # have no type-documents companions, so include is a no-op there.
     if not tokens or not terms or getattr(ctx, "is_mongo", False):
         return {}
+
+    date_condition, date_params = ctx.date_filter, ctx.date_params
+    dates = [d.strip() for d in (include_dates or "").split(",") if d.strip()]
+    if dates:
+        placeholders = ", ".join(["?"] * len(dates))
+        date_condition, date_params = f"{ctx.time_col} IN ({placeholders})", dates
 
     doc_companions = (getattr(ctx, "companions", None) or {}).get("documents", {})
     selected: dict = {}
@@ -361,7 +372,7 @@ async def fetch_includes(db, domain, include, ctx, terms) -> dict:
                 return fetch_provenance(
                     conn, prov_obj, sorted(terms),
                     entity_value=ctx.local_id, filter_vals=ctx.filter_vals,
-                    date_condition=ctx.date_filter, date_params=ctx.date_params,
+                    date_condition=date_condition, date_params=date_params,
                     label=f"{domain}/{prov_obj.dataset_id}", time_col=ctx.time_col,
                 )
         with timed("include", f"provenance {key}"):

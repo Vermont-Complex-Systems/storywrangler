@@ -186,7 +186,7 @@ STORYWRANGLER_TERM_SERIES = {
         "slow_fallback": "Types outside it fall back to a scan of the date-first tree (year-pruned where the tree has year/month levels) — minutes on large unsorted corpora, so the corpus should register a type-first companion. The scan requires dates=: an undated vocabulary miss on a sparkline-backed dataset is a teaching 400, never an unbounded scan. A dataset that is itself type-first (orientation:type-first, e.g. a term-bucketed tree) has no slow path: every request is a bucket point lookup and a miss is an empty series.",
         "mixed_batch": "Batch requests scan only the types the sparkline missed: vocabulary types return fast regardless, out-of-vocabulary types add one scan for just those.",
         "mongodb": "Pass-through datasets (twitter) serve the range as a plain find + time filter + sort — a range read, not an aggregation.",
-        "include": "?include= adds one bucket-routed read per provenance companion; omit it for the tidy counts/rank/freq series.",
+        "include": "?include= adds one bucket-routed read per provenance companion; omit it for the tidy counts/rank/freq series. include_dates= narrows the documents to specific dates (e.g. the two comparison dates a UI actually renders) without touching the series range.",
     },
     "x-frontend-notes": {
         "dataset": "Selected by ?domain=&dataset= (the caller-facing types-counts dataset). The type-first sparkline fast path is resolved automatically from lineage.derived_from + orientation:type-first — no param needed. ?sparkline_dataset= remains as a deprecated override. Filter dims (?n=&lang=, ?ngram_size=&granularity=) use the dataset's registered column names.",

@@ -177,6 +177,7 @@ async def term_series(
     weight: Optional[str] = Query(None, description="Count measure — one of the dataset's endpoint_schema.count_column entries. Defaults to the first."),
     sparkline_dataset: Optional[str] = Query(None, description="Deprecated. The type-first sparkline companion is resolved from lineage; pass a dataset_id only to override, or '' to disable the fast path (dist-tree scan only)."),
     include: Optional[str] = Query(None, description="Comma-separated provenance role(s) to attach per date (e.g. 'articles'), or 'all' for every declared companion. Roles are resolved from the primary's lineage; a raw type-documents dataset id also works (deprecated)."),
+    include_dates: Optional[str] = Query(None, description="Comma-separated exact dates to attach provenance for (e.g. the two comparison dates '2026-01-20,2026-01-21'). Narrows the ?include= documents only; the series itself keeps its dates range. Omit to attach documents for every date in range."),
     db: AsyncSession = Depends(get_session),
 ):
     """Per-date time series for a single type in any registered types-counts dataset.
@@ -193,7 +194,8 @@ async def term_series(
     ctx = await prepare_term_series(
         request, db, domain, dataset, entity, weight, dates, sparkline_dataset)
     rows = await term_series_rows(domain, ctx, [type])
-    includes = await fetch_includes(db, domain, include, ctx, {r[0] for r in rows})
+    includes = await fetch_includes(db, domain, include, ctx, {r[0] for r in rows},
+                                    include_dates=include_dates)
     return {
         "type": type,
         "latest_available_date": ctx.latest_date,
@@ -212,6 +214,7 @@ async def term_series_batch(
     weight: Optional[str] = Query(None, description="Count measure — defaults to the first registered."),
     sparkline_dataset: Optional[str] = Query(None, description="Deprecated. The type-first sparkline companion is resolved from lineage; pass a dataset_id only to override, or '' to disable the fast path."),
     include: Optional[str] = Query(None, description="Comma-separated provenance role(s) to attach per date, or 'all'. Resolved from the primary's lineage; a raw type-documents dataset id also works (deprecated)."),
+    include_dates: Optional[str] = Query(None, description="Comma-separated exact dates to attach provenance for (e.g. the two comparison dates '2026-01-20,2026-01-21'). Narrows the ?include= documents only; the series itself keeps its dates range. Omit to attach documents for every date in range."),
     db: AsyncSession = Depends(get_session),
 ):
     """Batch term-series — a map of type → series in one request."""
@@ -221,7 +224,8 @@ async def term_series_batch(
     ctx = await prepare_term_series(
         request, db, domain, dataset, entity, weight, dates, sparkline_dataset)
     rows = await term_series_rows(domain, ctx, type_list)
-    includes = await fetch_includes(db, domain, include, ctx, {r[0] for r in rows})
+    includes = await fetch_includes(db, domain, include, ctx, {r[0] for r in rows},
+                                    include_dates=include_dates)
     results = {t: [] for t in type_list}
     for r in rows:
         results[r[0]].append(series_row(r, ctx.cols, includes))

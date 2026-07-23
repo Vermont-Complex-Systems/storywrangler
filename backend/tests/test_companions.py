@@ -160,3 +160,59 @@ class TestFetchIncludesCoverage:
         )
         out = asyncio.run(fetch_includes(None, "wikimedia", "articles", ctx, {"trump"}))
         assert out == {}
+
+
+class TestIncludeDates:
+    def test_include_dates_narrows_provenance_read(self, monkeypatch):
+        # include_dates scopes the provenance query to exact dates (IN list)
+        # while the series keeps its own range.
+        import app.core.term_series as ts
+
+        prov = SimpleNamespace(
+            dataset_id="ngrams-articles",
+            endpoint_schema={"type": "type-documents", "role": "articles"},
+            level_order=[{"column": "ngram_size", "type": "partition"},
+                         {"column": "country", "type": "entity"},
+                         {"column": "bucket", "type": "hash_bucket"}],
+        )
+        ctx = SimpleNamespace(
+            is_mongo=False,
+            companions={"documents": {"articles": prov}},
+            filter_vals={"ngram_size": 1},
+            local_id="United States",
+            date_filter="date BETWEEN ? AND ?",
+            date_params=["2026-01-01", "2026-01-31"],
+            time_col="date",
+        )
+
+        seen = {}
+
+        def fake_fetch_provenance(conn, obj, terms, *, date_condition, date_params, **kw):
+            seen["condition"], seen["params"] = date_condition, date_params
+            return {}
+
+        class _Client:
+            def timed_connect(self):
+                from contextlib import contextmanager
+                @contextmanager
+                def cm():
+                    yield None
+                return cm()
+
+        async def fake_run_blocking(fn):
+            return fn()
+
+        monkeypatch.setattr(ts, "fetch_provenance", fake_fetch_provenance)
+        monkeypatch.setattr(ts, "get_duckdb_client", lambda: _Client())
+        monkeypatch.setattr(ts, "run_blocking", fake_run_blocking)
+
+        asyncio.run(ts.fetch_includes(
+            None, "wikimedia", "articles", ctx, {"trump"},
+            include_dates="2026-01-20,2026-01-21"))
+        assert seen["condition"] == "date IN (?, ?)"
+        assert seen["params"] == ["2026-01-20", "2026-01-21"]
+
+        # Omitted → the series' own bounds apply.
+        asyncio.run(ts.fetch_includes(None, "wikimedia", "articles", ctx, {"trump"}))
+        assert seen["condition"] == "date BETWEEN ? AND ?"
+        assert seen["params"] == ["2026-01-01", "2026-01-31"]
