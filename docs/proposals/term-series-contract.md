@@ -116,6 +116,54 @@ re-materialization.
 - New datasets (e.g. `bluesky/nfl-posts`) get term-series for free by declaring
   the companions, or a clean count-only series by declaring nothing.
 
+## Composition: declared provenance (`include=`)
+
+Beyond count/rank/freq, consumers often want *what explains* a type's signal —
+the underlying documents the type came from. Wikipedia has this today as a
+separate hash-bucketed dataset, `top_articles_ngrams`: `(type, date) → ranked
+[(article_url, score)]`. It is structurally a **type-first provenance dataset** —
+same access pattern as the sparklines (bucket by type), a different payload (a
+ranked document list rather than count/rank/freq). Example on disk:
+
+```
+top_articles/ngram_size=1/country=Canada/bucket=0/ducklake-*.parquet
+  columns: ngram, date, article_rank, article_url, score   (long: one row per (type, date, doc))
+```
+
+This is not a Wikipedia quirk — reddit already carries the same idea inline as a
+column (`top_subreddits STRUCT(subreddit, score_weighted)[]`), and twitter→top
+tweets / bluesky→top posts fit the same mould: *the sources that explain a
+type's signal.*
+
+The wrong way to compose is a join baked into term-series (which is what wiki's
+`include_articles` is today — bespoke, hardcoded, per-router). The right way,
+two parts:
+
+1. **Model provenance as its own generic type-first endpoint-type** — e.g.
+   `type-sources`: `(type, date) → ranked [(document, score)]`. It gets a
+   generic endpoint out of the box (queryable tidily on its own) and is reusable
+   across domains.
+2. **Compose via an opt-in, registry-*declared* `?include=`**, not a per-router
+   join. The `type-series` dataset declares its provenance companion in its
+   registration; `term-series?...&include=sources` resolves that companion and
+   nests it, `include=` absent returns the tidy count/rank/freq. The base
+   endpoint stays single-responsibility; the un-tidy nesting appears only when
+   asked for.
+
+This is the mainstream REST pattern for staying composable short of GraphQL —
+Stripe `?expand[]=`, JSON:API `?include=`, OData `$expand`: opt-in server-side
+expansion of *declared* relationships. It also extends an existing separation in
+storywrangler: the instruments (allotax/rtd/wordshift) are already a composition
+layer over the primitive "load a types-counts system," so `?include=` applies the
+same primitives-vs-compositions discipline to the type-series family rather than
+inventing a new concept.
+
+Consequence for this proposal: the generic `/storywrangler/term-series` (step 2)
+should carry a general, registry-declared `include=` hook rather than porting
+wiki's hardcoded articles join. Wiki's `top_articles` becomes the *reference
+instance* of the general mechanism; reddit's `top_subreddits` can migrate onto
+the same `type-sources` model or stay inline (small structs are fine).
+
 ## Open questions
 
 1. **Rename `counts` → `value`/`measure` in the response?** It is the accurate
@@ -139,4 +187,6 @@ re-materialization.
 2. Add `/storywrangler/term-series` + `/batch` (registry-driven), keeping the
    per-domain routers.
 3. Retire per-domain term-series once the generic endpoint is at parity,
-   leaving only bespoke enrichment routes (wikimedia articles).
+   with wiki's `top_articles` re-expressed as a declared `type-sources`
+   provenance dataset behind the general `?include=` mechanism (not a
+   bespoke join).
