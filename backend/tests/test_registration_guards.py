@@ -84,6 +84,37 @@ class TestValidateColumnIdentifiers:
     def test_no_optional_fields_passes(self):
         _validate_column_identifiers(make_dataset())  # must not raise
 
+    def test_rejects_injection_in_rank_and_freq_columns(self):
+        # rank/freq reach the term-series SELECT list unparameterized.
+        scalar = make_dataset(endpoint_schema={
+            "type": "types-counts", "count_column": "c", "rank_column": "r; DROP TABLE t--"})
+        with pytest.raises(HTTPException) as exc:
+            _validate_column_identifiers(scalar)
+        assert exc.value.status_code == 422
+        parallel = make_dataset(endpoint_schema={
+            "type": "types-counts", "count_column": ["a", "b"], "freq_column": ["fa", "f b"]})
+        with pytest.raises(HTTPException):
+            _validate_column_identifiers(parallel)
+
+    def test_rejects_injection_in_doc_and_score_columns(self):
+        for field in ("doc_column", "score_column"):
+            ds = make_dataset(endpoint_schema={"type": "type-documents", field: "x'); DROP--"})
+            with pytest.raises(HTTPException):
+                _validate_column_identifiers(ds)
+
+    def test_order_column_allows_direction_rejects_injection(self):
+        _validate_column_identifiers(make_dataset(endpoint_schema={
+            "type": "type-documents", "order_column": "article_rank DESC"}))  # must not raise
+        with pytest.raises(HTTPException) as exc:
+            _validate_column_identifiers(make_dataset(endpoint_schema={
+                "type": "type-documents", "order_column": "score; DELETE FROM t"}))
+        assert exc.value.status_code == 422
+
+    def test_valid_companions_pass(self):
+        _validate_column_identifiers(make_dataset(endpoint_schema={
+            "type": "types-counts", "count_column": ["a", "b"],
+            "rank_column": "rank", "freq_column": ["fa", "fb"]}))  # must not raise
+
 
 # ── run_blocking ──────────────────────────────────────────────────────────────
 

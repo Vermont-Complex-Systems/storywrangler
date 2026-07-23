@@ -400,7 +400,22 @@ async def prepare_term_series(request, db, domain, dataset, entity, weight, date
         return ctx
 
     select_cols, cols = _series_select(dataset_obj, weight, type_col, time_col)
+
+    # Companions are deduced from declared lineage: the type-first sparkline
+    # (fast path) and the type-documents provenance sets (?include=). Resolved
+    # here so the row scan and fetch_includes reuse them — and so latest date /
+    # the no-data 404 can consider the sparkline, which refreshes nightly and
+    # can run ahead of the primary's lagging manifest.
+    companions = await resolve_companions(db, domain, dataset)
+    sparkline_obj = await _resolve_sparkline_obj(db, domain, companions, sparkline_dataset)
+
+    # latest_available_date is the max of primary and sparkline availability
+    # (the two pipelines advance independently); the undated no-data 404 uses it
+    # too, so a fresh sparkline over a stale primary manifest does not false-404.
     latest_date = latest_available_for(dataset_obj, local_id, filter_vals)
+    if sparkline_obj is not None:
+        spark_latest = latest_available_for(sparkline_obj, local_id, filter_vals)
+        latest_date = max((d for d in (latest_date, spark_latest) if d), default=None)
     if date_range is None and not latest_date:
         raise HTTPException(status_code=404, detail="No data found for this dataset")
 
@@ -415,12 +430,6 @@ async def prepare_term_series(request, db, domain, dataset, entity, weight, date
     base_path = None
     if getattr(dataset_obj, "level_order", None):
         _, base_path = ngrams_context(dataset_obj, local_id, filter_vals)
-
-    # Companions are deduced from declared lineage: the type-first sparkline
-    # (fast path) and the type-documents provenance sets (?include=). Resolved
-    # once here so both the row scan and fetch_includes reuse them.
-    companions = await resolve_companions(db, domain, dataset)
-    sparkline_obj = await _resolve_sparkline_obj(db, domain, companions, sparkline_dataset)
 
     ctx = SimpleNamespace(
         dataset_obj=dataset_obj, is_mongo=False, select_cols=select_cols, cols=cols,
