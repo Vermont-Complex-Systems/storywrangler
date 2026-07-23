@@ -270,9 +270,17 @@ async def _prepare_term_series(request, db, domain, dataset, entity, weight, dat
 
     filter_vals = extract_filter_vals(dataset_obj, request.query_params)
     has_entity = bool((dataset_obj.entity_mapping or {}).get("local_id_column"))
+    # A term series is a single slice, and it cannot aggregate (rank/freq don't
+    # sum). So an entity-partitioned dataset needs the entity pinned — otherwise
+    # the scan spans every entity and returns duplicate-date rows.
+    if has_entity and not entity:
+        raise HTTPException(
+            status_code=400,
+            detail=f"'{domain}/{dataset}' is partitioned by entity — pass ?entity= "
+                   "(a term series is a single entity's trajectory).",
+        )
     local_id = (
-        (await resolve_entity(db, domain, dataset, entity)).local_id
-        if has_entity and entity else None
+        (await resolve_entity(db, domain, dataset, entity)).local_id if has_entity else None
     )
     date_range = parse_dates(dates)
 
