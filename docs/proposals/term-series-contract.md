@@ -1,7 +1,15 @@
 # Proposal: a declared term-series contract (rank/freq columns) toward a generic `/storywrangler/term-series`
 
-Status: draft / for discussion
+Status: partly shipped, partly draft.
 Follows: the generic `/storywrangler/top-ngrams` work (branch `generic-ngram-endpoints`).
+
+**Shipped** (branch `feat/generic-term-series`): the rank/freq companion columns
+(`resolve_series_columns`), the generic `/storywrangler/term-series` + `/batch`
+across parquet_hive / flat parquet / mongodb, and the `?include=` provenance
+mechanism (`type-documents` + `fetch_provenance`). **Not yet built**: the
+orientation / companion-resolution section below (it replaces the current
+`sparkline_dataset` param and `?include=<dataset_id>` naming), and the
+per-domain retirement.
 
 ## Problem
 
@@ -164,6 +172,93 @@ wiki's hardcoded articles join. Wiki's `top_articles` becomes the *reference
 instance* of the general mechanism; reddit's `top_subreddits` can migrate onto
 the same `type-sources` model or stay inline (small structs are fine).
 
+## Orientation and companion resolution (date-first ↔ type-first ↔ documents)
+
+This is the answer to open question 3, and it is worth getting right *now*: the
+current pairing is convention, and the convention leaks into the API surface
+(the `sparkline_dataset` param, `?include=<dataset_id>`). Once consumers depend
+on those, replacing them is a breaking change — so declare the relationship
+before that happens.
+
+### The problem
+
+A corpus (e.g. `wikimedia/ngrams`, or a hypothetical `twitter/nfl-tweets`) is
+served by several *physical* datasets:
+
+- a **time-first** `types-counts` tree (date-partitioned) — feeds top-ngrams,
+  allotax, rtd, wordshift, and the term-series *slow fallback*;
+- a **type-first** `types-counts` tree (hash-bucketed by type) — the sparkline,
+  the term-series *fast path*;
+- zero or more **`type-documents`** provenance sets (inherently type-first) —
+  the `?include=` sources.
+
+Today the platform does not *know* these are related. The generic term-series
+finds the type-first form via the `sparkline_dataset` query param (defaulting to
+the name `"sparklines"`), and the sparklines carry no `endpoint_schema` at all —
+they are invisible companions discovered by naming convention.
+
+### Model: separate datasets, declared orientation, paired via lineage
+
+These forms have **independent lifecycles** — the DuckLake sparklines refresh
+nightly while the raw ngrams sync lags — so they version and update separately.
+That rules out unifying them under one `dataset_id` (a `dataset_id` +
+orientation sub-key just becomes `(id, orientation, version)`, i.e. the current
+registry with a migrated primary key, for no gain). Keep them as **separate
+registry datasets**; the primary (time-first) `dataset_id` is the name callers
+use, and the platform resolves the other forms.
+
+Two declarations, one of which is already made:
+
+1. **`orientation: "time-first" | "type-first"`** on `types-counts`
+   (default `"time-first"`). The only genuinely new field. It makes "this is the
+   type-first form" explicit rather than sniffed from `transform.hash_bucket`
+   (structural sniffing is fragile — a small-vocabulary type-first dataset might
+   be a sorted flat file with no bucket). `type-documents` needs no orientation
+   (it is inherently type-first).
+
+2. **Pairing reuses `lineage.derived_from`** — which the sparkline and
+   `top_articles` *already declare* (`derived_from: ["wikimedia/ngrams"]`). So
+   companions are deduced from *declared provenance*, never from structure:
+   - term-series' fast path = the `types-counts` dataset with
+     `orientation: type-first` whose `derived_from` includes the primary;
+   - `?include=` sources = the `type-documents` datasets whose `derived_from`
+     includes the primary.
+
+   Resolution is a filter over the domain's datasets (a handful per domain), so
+   it is cheap. It is also **decoupled**: a sparkline or a provenance set is
+   added later by registering it with `derived_from`, with no change to the
+   primary — which matches the independent lifecycles.
+
+### API surface this replaces
+
+- term-series **drops `sparkline_dataset`**; it resolves the type-first
+  companion itself. The caller only names `dataset=<primary>`.
+- `?include=` stops naming raw dataset ids. Each `type-documents` companion
+  declares a **`role`** (e.g. `articles`, `subreddits`); the platform knows a
+  corpus's provenance companions, so `?include=articles` (or `include=all`)
+  reads cleanly and there is no leaky id in the surface. `role` is the one
+  remaining sub-decision — the alternative is `?include=<companion dataset_id>`,
+  which works but re-introduces the leak. Recommendation: `role`.
+
+### Registration shape
+
+`(twitter, nfl-tweets)` becomes three datasets, every endpoint routed off
+`dataset=nfl-tweets`:
+
+```
+nfl-tweets             types-counts   orientation=time-first     (caller names this)
+nfl-tweets-sparklines  types-counts   orientation=type-first     derived_from=[twitter/nfl-tweets]
+nfl-tweets-articles    type-documents role=articles              derived_from=[twitter/nfl-tweets]
+```
+
+### Migration
+
+Additive. `orientation` defaults to `time-first`, so existing time-first
+datasets need no change; sparklines re-register with `orientation: type-first`
+(they already declare `derived_from`); `type-documents` datasets add a `role`.
+Keep `sparkline_dataset`/`?include=<id>` working as deprecated aliases for one
+release, then remove.
+
 ## Open questions
 
 1. **Rename `counts` → `value`/`measure` in the response?** It is the accurate
@@ -175,9 +270,10 @@ the same `type-sources` model or stay inline (small structs are fine).
    (wikimedia, precise) vs all-or-nothing (reddit/bluesky, avoids triggering an
    expensive dist-tree scan for one rare term). Likely a `fallback=` knob tied
    to how costly the date-first scan is, rather than a single hardcoded choice.
-3. **Date-first ↔ type-first pairing.** Today the convention is `ngrams`
-   (date-first) + `sparklines` (type-first). Make this an explicit registration
-   field, or keep the naming convention?
+3. **Date-first ↔ type-first pairing.** *Resolved* — see "Orientation and
+   companion resolution": an explicit `orientation` field plus lineage-based
+   companion deduction, replacing the `sparkline_dataset` param and
+   `?include=<dataset_id>`.
 
 ## Rollout
 
