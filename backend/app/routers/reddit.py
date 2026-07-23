@@ -14,7 +14,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..core.database import get_session
 from ..core.duckdb_client import get_duckdb_client, run_blocking
 from ..core.duckdb_query import handle_query_error, is_data_missing
-from ..core.query_utils import latest_from_manifest, resolve_count_column
+from ..core.query_utils import (
+    latest_from_manifest, resolve_count_column, resolve_series_columns,
+)
 from ..core.registry_utils import get_latest_entry
 from ..core.term_series import (
     build_date_filter, fetch_sparkline_rows, ngrams_context, series_entry,
@@ -36,11 +38,17 @@ _WEIGHT_DESC = "Count measure (content type × weighting)."
 def _series_cols(ngrams_obj, weight) -> tuple:
     """SELECT columns for term-series rows under the chosen measure.
 
-    Returns (select_expr, count_col). The frequency companion follows the
-    dataset's naming convention ({x}_weighted → {x}_freq, else {col}_freq);
-    NULL when no such column exists. `rank` is the pipeline's canonical
-    ranking (score-weighted) and does not change with the measure.
+    Returns (select_expr, count_col). Prefers the registered rank_column/
+    freq_column (resolve_series_columns); falls back to reddit's naming
+    convention ({x}_weighted → {x}_freq, else {col}_freq; canonical `rank`)
+    until the dataset is re-registered with the columns declared.
     """
+    resolved = resolve_series_columns(ngrams_obj, weight)
+    if resolved is not None:
+        rank = resolved["rank"] or "NULL"
+        freq = resolved["freq"] or "NULL"
+        return f"ngram, date, {resolved['count']}, {rank}, {freq}", resolved["count"]
+
     count_col = resolve_count_column(ngrams_obj, weight)
     schema = ngrams_obj.data_schema or {}
     if count_col.endswith("_weighted"):

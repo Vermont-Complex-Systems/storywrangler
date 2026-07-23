@@ -173,6 +173,50 @@ def resolve_count_column(dataset_obj, weight: Optional[str] = None, default: str
     return weight
 
 
+def _pick_companion(companion, index: int) -> Optional[str]:
+    """Resolve a scalar-or-parallel-list companion column for one weight.
+
+    Scalar → the same column for every weight (a canonical rank/freq).
+    List → the entry parallel to the chosen count column (per-measure).
+    None → no companion declared.
+    """
+    if companion is None:
+        return None
+    if isinstance(companion, list):
+        return companion[index] if index < len(companion) else None
+    return companion
+
+
+def resolve_series_columns(dataset_obj, weight: Optional[str] = None) -> Optional[dict]:
+    """Resolve the per-type time-series measure columns for a request.
+
+    Returns ``{"count": ..., "rank": ... | None, "freq": ... | None}`` from the
+    registered ``endpoint_schema`` — the count via ``resolve_count_column`` (so
+    the ``weight`` allowlist still applies), and the rank/freq companions via
+    the declared ``rank_column`` / ``freq_column`` (scalar = canonical, list =
+    parallel to ``count_column``; see EndpointSchemaConfig).
+
+    Returns ``None`` when neither companion is declared — the signal that this
+    dataset predates the contract, so the caller should fall back to its legacy
+    per-router derivation. Once a dataset is (re-)registered with the columns,
+    the declared path takes over with no behaviour change.
+    """
+    ep = dataset_obj.endpoint_schema or {}
+    rank_decl = ep.get("rank_column")
+    freq_decl = ep.get("freq_column")
+    if rank_decl is None and freq_decl is None:
+        return None
+
+    count_col = resolve_count_column(dataset_obj, weight)
+    menu = get_count_columns(dataset_obj)
+    index = menu.index(count_col) if count_col in menu else 0
+    return {
+        "count": count_col,
+        "rank": _pick_companion(rank_decl, index),
+        "freq": _pick_companion(freq_decl, index),
+    }
+
+
 def _derive_local_id(namespace: Optional[str], canonical_id: str) -> Optional[str]:
     """Derive the stored local_id from a canonical entity_id.
 

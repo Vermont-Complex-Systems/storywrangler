@@ -18,7 +18,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..core.database import get_session
 from ..core.duckdb_client import get_duckdb_client, run_blocking
 from ..core.duckdb_query import handle_query_error, is_data_missing
-from ..core.query_utils import latest_from_manifest, resolve_count_column
+from ..core.query_utils import (
+    latest_from_manifest, resolve_count_column, resolve_series_columns,
+)
 from ..core.registry_utils import get_latest_entry
 from ..core.term_series import (
     build_date_filter, fetch_sparkline_rows, ngrams_context, series_entry,
@@ -40,10 +42,17 @@ _WEIGHT_DESC = "Count measure."
 def _series_cols(ngrams_obj, weight) -> str:
     """SELECT columns for term-series rows under the chosen measure.
 
-    The rank and freq companions share the measure's suffix (count → rank,
-    freq; count_all → rank_all, freq_all) — bluesky ranks are per-measure,
-    unlike reddit's single canonical rank. NULL when a companion is absent.
+    Prefers the registered rank_column/freq_column (resolve_series_columns);
+    falls back to bluesky's per-measure suffix convention (count → rank, freq;
+    count_all → rank_all, freq_all) until the dataset is re-registered with the
+    columns declared. NULL when a companion is absent.
     """
+    resolved = resolve_series_columns(ngrams_obj, weight)
+    if resolved is not None:
+        rank = resolved["rank"] or "NULL"
+        freq = resolved["freq"] or "NULL"
+        return f"ngram, date, {resolved['count']}, {rank}, {freq}"
+
     count_col = resolve_count_column(ngrams_obj, weight)
     schema = ngrams_obj.data_schema or {}
     suffix = count_col[len("count"):]

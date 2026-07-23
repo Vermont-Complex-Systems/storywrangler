@@ -257,6 +257,52 @@ class EndpointSchemaConfig(BaseModel):
             "unweighted columns)."
         ),
     )
+    rank_column: Optional[Union[str, List[str]]] = Field(
+        None,
+        description=(
+            "Companion rank column(s) a per-type time series returns alongside "
+            "the count. A scalar is one canonical rank used for every `weight` "
+            "(e.g. reddit's pipeline-side `rank`, which does not track the "
+            "selected measure). A list must be parallel to `count_column` — the "
+            "rank for each measure, indexed by the chosen `weight` (e.g. "
+            "bluesky's `rank`/`rank_all`). Omit when the dataset has no "
+            "precomputed rank; the series then carries counts only."
+        ),
+    )
+    freq_column: Optional[Union[str, List[str]]] = Field(
+        None,
+        description=(
+            "Companion normalized-frequency column(s), same scalar-or-parallel-"
+            "list rule as `rank_column`. A list is indexed by the chosen "
+            "`weight`. Omit when the dataset has no precomputed frequency."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def validate_companion_columns(self) -> "EndpointSchemaConfig":
+        """List-form rank/freq must be parallel to a list count_column.
+
+        A scalar companion is always allowed (one canonical column for every
+        weight). A list companion only makes sense per-measure, so it requires
+        count_column to be a list of the same length.
+        """
+        menu_len = len(self.count_column) if isinstance(self.count_column, list) else None
+        for name in ("rank_column", "freq_column"):
+            val = getattr(self, name)
+            if not isinstance(val, list):
+                continue
+            if menu_len is None:
+                raise ValueError(
+                    f"{name} is a list but count_column is not; a per-measure "
+                    f"{name} requires count_column to be a parallel list. Use a "
+                    "scalar for a single canonical column."
+                )
+            if len(val) != menu_len:
+                raise ValueError(
+                    f"{name} has {len(val)} entries but count_column has "
+                    f"{menu_len}; a list companion must be parallel to count_column."
+                )
+        return self
 
 
 class TransformConfig(BaseModel):
