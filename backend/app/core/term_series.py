@@ -609,10 +609,13 @@ async def term_series_rows(domain, ctx, terms):
     companion resolved from lineage, or the queried dataset itself when it
     declares ``orientation: type-first`` (bluesky-style term-bucketed trees).
     Slow path: a scan of the date-first tree (year/month pruned where the tree
-    has those levels) for terms outside the precomputed vocabulary. A
-    self-served type-first dataset has no date-first tree, so there is no slow
-    path: a bucket miss is an honest empty series, not a cue to re-read the
-    same bucket tree through a wildcard glob.
+    has those levels) for the terms the fast path did not find — per missing
+    term, so a batch mixing vocabulary and out-of-vocabulary terms returns
+    fast rows for the former and honest scan results for the latter (never a
+    silent empty because a sibling term hit the sparkline). A self-served
+    type-first dataset has no date-first tree, so there is no slow path: a
+    bucket miss is an honest empty series, not a cue to re-read the same
+    bucket tree through a wildcard glob.
 
     A term with no data on disk yields no rows — an empty series, the same
     whether one term or many was asked for. A *real* failure (a timeout, a
@@ -653,11 +656,20 @@ async def term_series_rows(domain, ctx, terms):
                 return await run_blocking(_only)
         with timed("fast_query", "sparkline bucket read"):
             rows = await run_blocking(_fast)
-    if rows:
+
+    # Per-missing-term fallback: scan only the terms the fast path did not
+    # find. A term absent from the sparkline vocabulary must not come back as
+    # a silent empty series just because a sibling term in the batch hit.
+    found = {r[0] for r in rows}
+    missing = [t for t in terms if t not in found]
+    if not missing:
         return rows
+    if rows:
+        log.info("%s: %d/%d terms missing from sparkline; scanning %s",
+                 label, len(missing), len(terms), missing)
 
     from_clause, extra_where, extra_params = _term_series_scan_target(ctx)
-    placeholders = ", ".join(["?"] * len(terms))
+    placeholders = ", ".join(["?"] * len(missing))
     where = [f"{ctx.type_col} IN ({placeholders})"]
     if ctx.date_filter != "1=1":
         where.append(ctx.date_filter)
@@ -666,7 +678,7 @@ async def term_series_rows(domain, ctx, terms):
         f"SELECT {ctx.select_cols} FROM {from_clause} "
         f"WHERE {' AND '.join(where)} ORDER BY {ctx.type_col}, {ctx.time_col}"
     )
-    params = [*terms, *ctx.date_params, *extra_params]
+    params = [*missing, *ctx.date_params, *extra_params]
 
     def _slow():
         with handle_query_error(f"{domain}/{ctx.dataset_obj.dataset_id}"):
@@ -678,9 +690,12 @@ async def term_series_rows(domain, ctx, terms):
                     # slice-level 404 is handled earlier in prepare_term_series);
                     # anything else re-raises for handle_query_error to classify.
                     if is_data_missing(exc):
-                        log.info("%s: no partition data for %s", label, terms)
+                        log.info("%s: no partition data for %s", label, missing)
                         return []
                     raise
 
     with timed("slow_query", "DuckDB partition scan"):
-        return await run_blocking(_slow)
+        scan_rows = await run_blocking(_slow)
+    # Each term's rows come whole from one source (time-sorted within it), so
+    # concatenation preserves per-term chronology for the response builders.
+    return [*rows, *scan_rows]

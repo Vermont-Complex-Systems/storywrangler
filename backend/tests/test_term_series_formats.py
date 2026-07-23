@@ -168,3 +168,73 @@ class TestCompanionCovers:
         from app.core.term_series import _companion_covers
         assert _companion_covers(self._companion(), {})
         assert _companion_covers(SimpleNamespace(level_order=None), {})
+
+
+class TestPerMissingTermFallback:
+    """A batch mixing vocabulary and out-of-vocabulary terms scans ONLY the
+    missing terms — a sparkline hit for one term must not suppress the scan
+    for its siblings (they'd read as silently empty series)."""
+
+    FLAT = SimpleNamespace(level_order=None, data_location="/d/x.parquet",
+                           entity_mapping=None, dataset_id="ngrams")
+
+    def _ctx(self, sparkline_rows):
+        return SimpleNamespace(
+            dataset_obj=self.FLAT, is_mongo=False,
+            sparkline_obj=SimpleNamespace(dataset_id="sparklines"),
+            select_cols="ngram, date, c, NULL, NULL",
+            filter_vals={}, local_id=None,
+            date_filter="1=1", date_params=[], base_path=None,
+            type_col="ngram", time_col="date",
+            _sparkline_rows=sparkline_rows,
+        )
+
+    def _run(self, monkeypatch, ctx, scan_rows):
+        import asyncio
+        import app.core.term_series as ts
+
+        seen = {"scan_params": None}
+
+        class _Conn:
+            def execute(self, sql, params):
+                seen["scan_params"] = params
+                return SimpleNamespace(fetchall=lambda: scan_rows)
+
+        class _Client:
+            def timed_connect(self):
+                from contextlib import contextmanager
+                @contextmanager
+                def cm():
+                    yield _Conn()
+                return cm()
+
+        async def fake_run_blocking(fn):
+            return fn()
+
+        monkeypatch.setattr(ts, "fetch_sparkline_rows",
+                            lambda conn, obj, terms, **kw: ctx._sparkline_rows)
+        monkeypatch.setattr(ts, "get_duckdb_client", lambda: _Client())
+        monkeypatch.setattr(ts, "run_blocking", fake_run_blocking)
+
+        rows = asyncio.run(ts.term_series_rows("wikimedia", ctx, ["the", "Zykov"]))
+        return rows, seen["scan_params"]
+
+    def test_missing_term_scanned_found_term_kept(self, monkeypatch):
+        fast = [("the", "2024-01-01", 5, None, None)]
+        scanned = [("Zykov", "2024-01-01", 1, None, None)]
+        rows, scan_params = self._run(monkeypatch, self._ctx(fast), scanned)
+        assert rows == [*fast, *scanned]
+        assert scan_params == ["Zykov"]  # only the missing term reaches the scan
+
+    def test_all_found_skips_scan(self, monkeypatch):
+        fast = [("the", "2024-01-01", 5, None, None),
+                ("Zykov", "2024-01-01", 1, None, None)]
+        rows, scan_params = self._run(monkeypatch, self._ctx(fast), [])
+        assert rows == fast
+        assert scan_params is None  # scan never ran
+
+    def test_none_found_scans_all(self, monkeypatch):
+        scanned = [("the", "2024-01-01", 5, None, None)]
+        rows, scan_params = self._run(monkeypatch, self._ctx([]), scanned)
+        assert rows == scanned
+        assert scan_params == ["the", "Zykov"]

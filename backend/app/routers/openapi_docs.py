@@ -184,6 +184,7 @@ STORYWRANGLER_TERM_SERIES = {
     "x-performance": {
         "fast_path": "Types in the sparkline vocabulary are a hash-bucket point lookup on the type-first companion (~tens of ms).",
         "slow_fallback": "Types outside it fall back to a scan of the date-first tree (year-pruned where the tree has year/month levels) — minutes on large unsorted corpora, so the corpus should register a type-first companion. A dataset that is itself type-first (orientation:type-first, e.g. a term-bucketed tree) has no slow path: every request is a bucket point lookup and a miss is an empty series.",
+        "mixed_batch": "Batch requests scan only the types the sparkline missed: vocabulary types return fast regardless, out-of-vocabulary types add one scan for just those.",
         "mongodb": "Pass-through datasets (twitter) serve the range as a plain find + time filter + sort — a range read, not an aggregation.",
         "include": "?include= adds one bucket-routed read per provenance companion; omit it for the tidy counts/rank/freq series.",
     },
