@@ -21,7 +21,7 @@
 		domain: string;
 		dataset_id: string;
 		description?: string;
-		endpoint_schema?: { type?: string };
+		endpoint_schema?: { type?: string; orientation?: string };
 		level_order?: LevelOrderEntry[];
 		filter_values?: Record<string, unknown[]>;
 	}
@@ -221,9 +221,14 @@
 			: false
 	);
 
+	// Only the caller-facing primaries. Exclude type-first companions (sparklines):
+	// they're registered types-counts for lineage resolution, but are internal
+	// fast-path datasets you never query directly.
 	const typesCountsDatasets = $derived(
 		(data.datasets as Dataset[]).filter(
-			(d) => d.endpoint_schema?.type === 'types-counts'
+			(d) =>
+				d.endpoint_schema?.type === 'types-counts' &&
+				d.endpoint_schema?.orientation !== 'type-first'
 		)
 	);
 
