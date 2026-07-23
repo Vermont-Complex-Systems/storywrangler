@@ -1016,13 +1016,20 @@ class DatasetClient(_SubClient):
             **filter_dims,
         )
 
-    def _validate_dates(self, dates, dates2) -> None:
+    def _validate_dates(self, dates, dates2, *, mongo_single: bool = True) -> None:
         """Pre-flight the dates contract against registry metadata.
 
         Derived the same way as the registry's `dates` field: no
         transform.time_dimension → dateless (omit dates entirely); mongodb
-        pass-through → single days only. Best-effort — skipped when metadata
-        can't be fetched, letting the server's 400 teach instead.
+        pass-through → single days only for the *instruments*. Best-effort —
+        skipped when metadata can't be fetched, letting the server's 400 teach
+        instead.
+
+        *mongo_single* enforces mongodb's single-date rule. The instruments load
+        a whole per-day distribution, so a range would mean aggregating across
+        days (not allowed on the pass-through). term_series passes False: a
+        per-term range is a plain range read (find + time filter + sort), which
+        mongo serves directly.
         """
         if dates is None and dates2 is None:
             return
@@ -1036,7 +1043,7 @@ class DatasetClient(_SubClient):
                 f"{label} has no time dimension — omit dates to load the "
                 f"full dataset. (.meta['dates'] shows each dataset's contract.)"
             )
-        if meta.get("data_format") == "mongodb":
+        if mongo_single and meta.get("data_format") == "mongodb":
             for name, val in (("dates", dates), ("dates2", dates2)):
                 if val and "," in str(val):
                     raise ValueError(
@@ -1121,7 +1128,7 @@ class DatasetClient(_SubClient):
         """
         self._resolve_dataset_id()
         self._validate_filters(filter_dims)
-        self._validate_dates(dates, None)
+        self._validate_dates(dates, None, mongo_single=False)
         return self._instrument.term_series(
             self.domain, self.dataset_id,
             type=type, entity=entity, dates=dates, weight=weight,
@@ -1147,7 +1154,7 @@ class DatasetClient(_SubClient):
         """
         self._resolve_dataset_id()
         self._validate_filters(filter_dims)
-        self._validate_dates(dates, None)
+        self._validate_dates(dates, None, mongo_single=False)
         return self._instrument.term_series_batch(
             self.domain, self.dataset_id,
             types=types, entity=entity, dates=dates, weight=weight,
