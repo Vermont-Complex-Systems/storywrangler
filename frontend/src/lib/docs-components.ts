@@ -6,6 +6,7 @@ import PipelineDiagram from '$lib/components/PipelineDiagram.svelte';
 import DemoVideo from '$lib/components/DemoVideo.svelte';
 import LiveDemo from '$lib/components/LiveDemo.svelte';
 import SkillViewer from '$lib/components/SkillViewer.svelte';
+import AllotaxDemo from '$lib/components/AllotaxDemo.svelte';
 
 /**
  * Components that doc markdown can embed via `<!-- Name -->` markers.
@@ -22,7 +23,8 @@ export const doc_components: Record<string, Component> = {
 	PipelineDiagram,
 	DemoVideo,
 	LiveDemo,
-	SkillViewer
+	SkillViewer,
+	AllotaxDemo
 };
 
 /** Split pattern matching only registered marker names (capturing the name). */
