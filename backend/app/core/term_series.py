@@ -167,6 +167,7 @@ def fetch_sparkline_rows(
     conn, sparkline_obj, terms: List[str],
     *, entity_value, filter_vals: dict, select_cols: str,
     date_condition: str, date_params: list, label: str,
+    type_col: str = "ngram", time_col: str = "date",
 ) -> list:
     """Bucket-routed sparkline lookup for *terms*.
 
@@ -174,9 +175,11 @@ def fetch_sparkline_rows(
     values ({"ngram_size": n} for wikimedia, {"n": n, "lang": lang} for
     reddit/bluesky), *entity_value* the entity level when one exists, and
     *select_cols* the SELECT list (columns vary per domain: pv_* for
-    wikimedia, count/rank/freq for reddit/bluesky). Rows come back ordered
-    by ngram, date — or [] with a classified log line on failure (missing
-    sparkline files are expected; anything else is a warning).
+    wikimedia, count/rank/freq for reddit/bluesky). *type_col*/*time_col* are
+    the registered type/time columns (default ngram/date — the per-domain
+    routers). Rows come back ordered by type, time — or [] with a classified
+    log line on failure (missing sparkline files are expected; anything else
+    is a warning).
     """
     files = bucket_files(sparkline_obj, terms, entity_value=entity_value, filter_vals=filter_vals)
     file_list = ", ".join(f"'{f}'" for f in files)
@@ -186,9 +189,9 @@ def fetch_sparkline_rows(
             f"""
             SELECT {select_cols}
             FROM read_parquet([{file_list}])
-            WHERE ngram IN ({placeholders})
+            WHERE {type_col} IN ({placeholders})
               AND {date_condition}
-            ORDER BY ngram, date
+            ORDER BY {type_col}, {time_col}
             """,
             [*terms, *date_params],
         ).fetchall()
@@ -201,14 +204,16 @@ def fetch_provenance(
     conn, prov_obj, terms: List[str],
     *, entity_value, filter_vals: dict,
     date_condition: str, date_params: list, label: str,
+    time_col: str = "date",
 ) -> dict:
     """Ranked source documents per (type, date) for *terms* — the include=.
 
     Reads a type-documents provenance dataset (doc/score/order columns from its
     endpoint_schema) via the same hash-bucket routing as the sparklines, and
     returns ``{(type, date): [[document, score], ...]}`` ordered by the declared
-    order_column (or score descending). Missing files or an undeclared doc/score
-    column yield ``{}`` (a classified log line, same as the sparkline path).
+    order_column (or score descending). *time_col* is the registered time column
+    (default 'date'). Missing files or an undeclared doc/score column yield
+    ``{}`` (a classified log line, same as the sparkline path).
     """
     ep = prov_obj.endpoint_schema or {}
     type_col = ep.get("type_column") or "ngram"
@@ -225,11 +230,11 @@ def fetch_provenance(
     try:
         rows = conn.execute(
             f"""
-            SELECT {type_col}, date, {doc_col}, {score_col}
+            SELECT {type_col}, {time_col}, {doc_col}, {score_col}
             FROM read_parquet([{file_list}])
             WHERE {type_col} IN ({placeholders})
               AND {date_condition}
-            ORDER BY {type_col}, date, {order_by}
+            ORDER BY {type_col}, {time_col}, {order_by}
             """,
             [*terms, *date_params],
         ).fetchall()

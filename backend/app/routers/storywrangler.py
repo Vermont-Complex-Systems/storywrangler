@@ -168,18 +168,22 @@ async def top_ngrams(
 
 # ── term-series (generic) ──────────────────────────────────────────────────────
 
-def _series_select(dataset_obj, weight) -> tuple:
+def _series_select(dataset_obj, weight, type_col, time_col) -> tuple:
     """(select_cols, cols) for a term-series row under the chosen weight.
 
     cols is {count, rank, freq} with None for companions the dataset did not
     declare (resolve_series_columns) — the response omits those. select_cols
-    keeps a fixed 5-column shape, NULL-filling undeclared companions so row
-    unpacking stays positional.
+    keeps a fixed 5-column shape (type, time, count, rank, freq), NULL-filling
+    undeclared companions so row unpacking stays positional. type_col/time_col
+    are the registered type/time columns.
     """
     cols = resolve_series_columns(dataset_obj, weight)
     if cols is None:
         cols = {"count": resolve_count_column(dataset_obj, weight), "rank": None, "freq": None}
-    select_cols = f"ngram, date, {cols['count']}, {cols['rank'] or 'NULL'}, {cols['freq'] or 'NULL'}"
+    select_cols = (
+        f"{type_col}, {time_col}, {cols['count']}, "
+        f"{cols['rank'] or 'NULL'}, {cols['freq'] or 'NULL'}"
+    )
     return select_cols, cols
 
 
@@ -229,7 +233,7 @@ async def _fetch_includes(db, domain, include, ctx, terms) -> dict:
                     conn, prov_obj, sorted(terms),
                     entity_value=ctx.local_id, filter_vals=ctx.filter_vals,
                     date_condition=ctx.date_filter, date_params=ctx.date_params,
-                    label=f"{domain}/{prov_id}",
+                    label=f"{domain}/{prov_id}", time_col=ctx.time_col,
                 )
         with timed("include", f"provenance {prov_id}"):
             out[prov_id] = await run_blocking(_fetch)
@@ -250,13 +254,16 @@ async def _prepare_term_series(request, db, domain, dataset, entity, weight, dat
             status_code=400,
             detail=f"'{domain}/{dataset}' has no time dimension — a term time series needs one.",
         )
-    if dataset_obj.data_format == "mongodb":
-        raise HTTPException(
-            status_code=400,
-            detail=f"generic term-series does not serve mongodb datasets; use /{domain}/term-series.",
-        )
 
-    select_cols, cols = _series_select(dataset_obj, weight)
+    # Type and time columns come from the registration (like load_system), not
+    # hardcoded — so term-series works for any types-counts dataset, not only
+    # the ngram/date ones. The response normalises to date/counts/rank/freq
+    # regardless of the source column names.
+    ep = dataset_obj.endpoint_schema or {}
+    type_col = ep.get("type_column") or "types"
+    time_col = (dataset_obj.transform or {}).get("time_dimension") or "date"
+
+    select_cols, cols = _series_select(dataset_obj, weight, type_col, time_col)
     filter_vals = extract_filter_vals(dataset_obj, request.query_params)
 
     has_entity = bool((dataset_obj.entity_mapping or {}).get("local_id_column"))
@@ -273,19 +280,61 @@ async def _prepare_term_series(request, db, domain, dataset, entity, weight, dat
             content={"detail": "No data found for this dataset", "latest_available_date": None},
         )
 
-    # Explicit range → BETWEEN; omitted → full history (no date bound).
+    # Explicit range → BETWEEN; omitted → full history (no time bound).
     if date_range:
-        date_filter, date_params = "date BETWEEN ? AND ?", [date_range[0], date_range[1]]
+        date_filter, date_params = f"{time_col} BETWEEN ? AND ?", [date_range[0], date_range[1]]
     else:
         date_filter, date_params = "1=1", []
-    _, base_path = ngrams_context(dataset_obj, local_id, filter_vals)
+
+    # base_path is the hive entity path (fallback for the dist-tree scan); flat
+    # parquet has no level_order and scans read_parquet(data_location) directly.
+    base_path = None
+    if getattr(dataset_obj, "level_order", None):
+        _, base_path = ngrams_context(dataset_obj, local_id, filter_vals)
 
     ctx = SimpleNamespace(
         dataset_obj=dataset_obj, select_cols=select_cols, cols=cols,
         filter_vals=filter_vals, local_id=local_id, latest_date=latest_date,
         date_filter=date_filter, date_params=date_params, base_path=base_path,
+        type_col=type_col, time_col=time_col,
     )
     return ctx, None
+
+
+def _term_series_scan_target(ctx) -> tuple:
+    """(from_clause, extra_where, extra_params) for the direct date-first scan.
+
+    parquet_hive pins entity / filter / single-valued time_partition components
+    in the hive path (derive_time_partitions), adding WHERE IN conditions for
+    multi-valued ones, so DuckDB prunes directories. Flat parquet has no hive
+    levels: it reads read_parquet(data_location) and expresses entity and filter
+    dimensions as in-file WHERE conditions.
+    """
+    obj = ctx.dataset_obj
+    if getattr(obj, "level_order", None):
+        tp_path_vals, tp_conditions, tp_params = derive_time_partitions(
+            ctx.date_params, obj.level_order)
+        path = build_hive_path(
+            obj, entity_value=ctx.local_id, filter_vals=ctx.filter_vals,
+            time_partition_vals=tp_path_vals, glob_suffix="/*.parquet",
+        ) or f"{ctx.base_path}/*.parquet"
+        return f"read_parquet('{path}', hive_partitioning=true)", tp_conditions, tp_params
+
+    # Flat parquet: entity + filter dims are in-file columns → WHERE conditions.
+    where, params = [], []
+    entity_col = (obj.entity_mapping or {}).get("local_id_column")
+    if entity_col and ctx.local_id is not None:
+        where.append(f"{entity_col} = ?")
+        params.append(ctx.local_id)
+    for col, val in ctx.filter_vals.items():
+        where.append(f"{col} = ?")
+        params.append(val)
+    loc = obj.data_location
+    from_clause = (
+        f"read_parquet('{loc}')" if isinstance(loc, str)
+        else "read_parquet([" + ", ".join(f"'{p}'" for p in loc) + "])"
+    )
+    return from_clause, where, params
 
 
 async def _term_series_rows(db, domain, ctx, terms, sparkline_dataset):
@@ -314,32 +363,24 @@ async def _term_series_rows(db, domain, ctx, terms, sparkline_dataset):
                     entity_value=ctx.local_id, filter_vals=ctx.filter_vals,
                     select_cols=ctx.select_cols, date_condition=ctx.date_filter,
                     date_params=ctx.date_params, label=label,
+                    type_col=ctx.type_col, time_col=ctx.time_col,
                 )
         with timed("fast_query", "sparkline bucket read"):
             rows = await run_blocking(_fast)
     if rows:
         return rows
 
-    # Turn the date range into time_partition predicates (pinned in the path
-    # when single-valued, else WHERE IN) via the same bridge load_system uses,
-    # so DuckDB prunes year/month directories. wikimedia has no time_partition
-    # (date is a hive level) → no predicates, and the date filter prunes it.
-    tp_path_vals, tp_conditions, tp_params = derive_time_partitions(
-        ctx.date_params, ctx.dataset_obj.level_order or [])
-    path = build_hive_path(
-        ctx.dataset_obj, entity_value=ctx.local_id, filter_vals=ctx.filter_vals,
-        time_partition_vals=tp_path_vals, glob_suffix="/*.parquet",
-    ) or f"{ctx.base_path}/*.parquet"
+    from_clause, extra_where, extra_params = _term_series_scan_target(ctx)
     placeholders = ", ".join(["?"] * len(terms))
-    where = [f"ngram IN ({placeholders})"]
+    where = [f"{ctx.type_col} IN ({placeholders})"]
     if ctx.date_filter != "1=1":
         where.append(ctx.date_filter)
-    where.extend(tp_conditions)
+    where.extend(extra_where)
     sql = (
-        f"SELECT {ctx.select_cols} FROM read_parquet('{path}', hive_partitioning=true) "
-        f"WHERE {' AND '.join(where)} ORDER BY ngram, date"
+        f"SELECT {ctx.select_cols} FROM {from_clause} "
+        f"WHERE {' AND '.join(where)} ORDER BY {ctx.type_col}, {ctx.time_col}"
     )
-    params = [*terms, *ctx.date_params, *tp_params]
+    params = [*terms, *ctx.date_params, *extra_params]
 
     def _slow():
         with handle_query_error(f"{domain}/{ctx.dataset_obj.dataset_id}"):
