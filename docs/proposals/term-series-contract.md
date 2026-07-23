@@ -15,7 +15,9 @@ sparkline (no `sparkline_dataset` needed), and role-based `?include=<role>` /
 sparkline must declare `orientation: type-first`, else the query uses the
 correct-but-slower date-first scan. The explicit deprecated aliases
 (`sparkline_dataset=<id>`, `include=<dataset_id>`) remain for one release.
-**Not yet built**: the per-domain retirement.
+The per-domain `/{domain}/term-series` routes are now **retired** (the
+`(babynames, reddit, bluesky, twitter, wikimedia)` bespoke handlers removed; all
+domains served through the generic endpoint). Fully shipped.
 
 ## Problem
 
@@ -291,7 +293,8 @@ by name.
    behavior change — they already return the same columns).
 2. Add `/storywrangler/term-series` + `/batch` (registry-driven), keeping the
    per-domain routers.
-3. Retire per-domain term-series once the generic endpoint is at parity,
-   with wiki's `top_articles` re-expressed as a declared `type-sources`
-   provenance dataset behind the general `?include=` mechanism (not a
-   bespoke join).
+3. Retire per-domain term-series once the generic endpoint is at parity, with
+   wiki's `top_articles` re-expressed as a declared `type-documents` provenance
+   dataset behind the general `?include=` mechanism (not a bespoke join).
+   **Done** — bespoke handlers removed; `wikimedia/ngrams-articles` (role
+   `articles`) is the reference `?include=` companion.
