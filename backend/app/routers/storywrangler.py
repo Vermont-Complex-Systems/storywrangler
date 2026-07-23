@@ -24,7 +24,10 @@ from ..core.database import get_session
 from ..core.duckdb_client import get_duckdb_client, run_blocking
 from ..core.mongo_client import run_blocking_mongo
 from ..core.mongo_query import load_instrument_system, require_single_dates
-from ..core.duckdb_query import handle_query_error, is_data_missing, load_system
+from ..core.duckdb_query import (
+    build_hive_path, derive_time_partitions, handle_query_error, is_data_missing,
+    load_system,
+)
 from ..core.query_utils import (
     dates_mode, extract_filter_vals, latest_available_for, latest_from_manifest,
     parse_dates, require_dates_supported, require_types_counts,
@@ -32,7 +35,7 @@ from ..core.query_utils import (
 )
 from ..core.registry_utils import get_latest_entry
 from ..core.term_series import (
-    fetch_sparkline_rows, ngrams_context, run_top_ngrams, year_pruning,
+    fetch_sparkline_rows, ngrams_context, run_top_ngrams,
 )
 from . import openapi_docs as docs
 from ..core.timing import timed
@@ -165,19 +168,6 @@ async def top_ngrams(
 
 # ── term-series (generic) ──────────────────────────────────────────────────────
 
-def _has_year_partition(dataset_obj) -> bool:
-    """True when the dist tree has a `year` hive level to prune the fallback scan.
-
-    reddit/bluesky store `date` inside the files with year/month hive levels, so
-    the fallback needs a year condition to prune directories; wikimedia stores
-    `date` as a hive level, so the date filter prunes it natively (no year level).
-    """
-    return any(
-        lv.get("column") == "year" and lv.get("type") == "time_partition"
-        for lv in (getattr(dataset_obj, "level_order", None) or [])
-    )
-
-
 def _series_select(dataset_obj, weight) -> tuple:
     """(select_cols, cols) for a term-series row under the chosen weight.
 
@@ -282,18 +272,26 @@ async def _term_series_rows(db, domain, ctx, terms, sparkline_dataset, *, batch)
     if rows:
         return rows
 
-    year_filter, year_params = (
-        year_pruning(ctx.date_params)
-        if ctx.date_params and _has_year_partition(ctx.dataset_obj) else ("1=1", [])
-    )
-    glob = f"{ctx.base_path}/*.parquet"
+    # Turn the date range into time_partition predicates (pinned in the path
+    # when single-valued, else WHERE IN) via the same bridge load_system uses,
+    # so DuckDB prunes year/month directories. wikimedia has no time_partition
+    # (date is a hive level) → no predicates, and the date filter prunes it.
+    tp_path_vals, tp_conditions, tp_params = derive_time_partitions(
+        ctx.date_params, ctx.dataset_obj.level_order or [])
+    path = build_hive_path(
+        ctx.dataset_obj, entity_value=ctx.local_id, filter_vals=ctx.filter_vals,
+        time_partition_vals=tp_path_vals, glob_suffix="/*.parquet",
+    ) or f"{ctx.base_path}/*.parquet"
     placeholders = ", ".join(["?"] * len(terms))
+    where = [f"ngram IN ({placeholders})"]
+    if ctx.date_filter != "1=1":
+        where.append(ctx.date_filter)
+    where.extend(tp_conditions)
     sql = (
-        f"SELECT {ctx.select_cols} FROM read_parquet('{glob}', hive_partitioning=true) "
-        f"WHERE ngram IN ({placeholders}) AND {ctx.date_filter} AND {year_filter} "
-        "ORDER BY ngram, date"
+        f"SELECT {ctx.select_cols} FROM read_parquet('{path}', hive_partitioning=true) "
+        f"WHERE {' AND '.join(where)} ORDER BY ngram, date"
     )
-    params = [*terms, *ctx.date_params, *year_params]
+    params = [*terms, *ctx.date_params, *tp_params]
 
     def _slow():
         with get_duckdb_client().timed_connect() as conn:
