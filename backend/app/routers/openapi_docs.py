@@ -438,6 +438,54 @@ STORYWRANGLER_TOP_NGRAMS = {
     },
 }
 
+STORYWRANGLER_TERM_SERIES = {
+    "responses": {
+        "200": {
+            "description": "Successful response",
+            "content": {
+                "application/json": {
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "type": {"type": "string", "description": "The type/term looked up (echoed back)."},
+                            "latest_available_date": {"type": "string", "format": "date", "description": "Most recent date with data for the resolved slice."},
+                            "series": {
+                                "type": "array",
+                                "description": "One entry per date, chronological. `rank` and `freq` appear only when the dataset declares rank_column/freq_column.",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "date": {"type": "string", "format": "date"},
+                                        "counts": {"type": "integer", "description": "The selected measure for this type on this date."},
+                                        "rank": {"type": "integer", "description": "Rank under the chosen measure (omitted when undeclared)."},
+                                        "freq": {"type": "number", "description": "Normalized frequency (omitted when undeclared)."},
+                                    },
+                                },
+                            },
+                        },
+                    },
+                    "example": {
+                        "type": "trump",
+                        "latest_available_date": "2026-01-04",
+                        "series": [
+                            {"date": "2025-12-05", "counts": 5352, "rank": 811, "freq": 0.000117},
+                            {"date": "2025-12-06", "counts": 4332, "rank": 847, "freq": 0.000112},
+                        ],
+                    },
+                }
+            },
+        }
+    },
+    "x-performance": {
+        "fast_path": "Types in the sparkline vocabulary are a hash-bucket point lookup on the type-first dataset (~tens of ms).",
+        "slow_fallback": "Types outside it fall back to a scan of the date-first tree (year-pruned where the tree has year/month levels).",
+    },
+    "x-frontend-notes": {
+        "dataset": "Selected by ?domain=&dataset= (the date-first types-counts dataset); the type-first fast path is ?sparkline_dataset= (default 'sparklines'). Filter dims (?n=&lang=, ?ngram_size=&granularity=) use the dataset's registered column names.",
+        "companions": "rank/freq are present only when the dataset registers rank_column/freq_column; otherwise the series is counts-only. mongodb datasets (twitter) keep their bespoke /{domain}/term-series.",
+    },
+}
+
 STORYWRANGLER_ALLOTAXONOMETER = {
     "x-powered-by": "rust",
     "responses": {

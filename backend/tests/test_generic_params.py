@@ -18,9 +18,41 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.core.mongo_query import require_single_dates
 from app.core.query_utils import (
-    dates_mode, extract_filter_vals, require_dates_supported, require_types_counts,
+    dates_mode, extract_filter_vals, latest_available_for, require_dates_supported,
+    require_types_counts,
 )
 from tests.conftest import make_dataset_obj
+
+
+def _with_availability(availability):
+    ds = make_dataset_obj("/data")
+    ds.manifest = {"availability": availability}
+    return ds
+
+
+class TestLatestAvailableFor:
+    def test_reddit_style_nlang(self):
+        # {n: {lang: {min, max}}} — navigate by filter values.
+        ds = _with_availability({"1": {"en": {"min": "2010-01-01", "max": "2022-12-31"},
+                                       "es": {"min": "2011-01-01", "max": "2023-06-30"}}})
+        assert latest_available_for(ds, None, {"n": 1, "lang": "es"}) == "2023-06-30"
+        assert latest_available_for(ds, None, {"n": 1, "lang": "en"}) == "2022-12-31"
+
+    def test_wikimedia_style_entity_first(self):
+        # {country: {ngram_size: {granularity: {min, max}}}} — entity + filters.
+        ds = _with_availability({
+            "United States": {"1": {"daily": {"min": "2015-01-01", "max": "2026-04-20"}}}})
+        assert latest_available_for(
+            ds, "United States", {"ngram_size": 1, "granularity": "daily"}) == "2026-04-20"
+
+    def test_no_match_falls_back_to_first_branch(self):
+        ds = _with_availability({"1": {"en": {"min": "2010-01-01", "max": "2022-12-31"}}})
+        # lang not present → first branch
+        assert latest_available_for(ds, None, {"n": 1, "lang": "zz"}) == "2022-12-31"
+
+    def test_empty_availability(self):
+        ds = _with_availability({})
+        assert latest_available_for(ds, None, {}) is None
 
 
 LEVEL_ORDER = [

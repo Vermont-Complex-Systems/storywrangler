@@ -8,9 +8,12 @@ Currently includes:
          Designed for on-the-fly date-vs-date comparisons within a single entity.
 """
 
+import logging
 import math
+from types import SimpleNamespace
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from ..core.allotax_utils import (
     sanitize_floats as _sanitize_floats,
@@ -21,18 +24,39 @@ from ..core.database import get_session
 from ..core.duckdb_client import get_duckdb_client, run_blocking
 from ..core.mongo_client import run_blocking_mongo
 from ..core.mongo_query import load_instrument_system, require_single_dates
-from ..core.duckdb_query import handle_query_error, load_system
+from ..core.duckdb_query import handle_query_error, is_data_missing, load_system
 from ..core.query_utils import (
-    extract_filter_vals, latest_from_manifest, parse_dates,
-    require_dates_supported, require_types_counts, resolve_count_column,
-    resolve_entity,
+    dates_mode, extract_filter_vals, latest_available_for, latest_from_manifest,
+    parse_dates, require_dates_supported, require_types_counts,
+    resolve_count_column, resolve_entity, resolve_series_columns,
 )
 from ..core.registry_utils import get_latest_entry
-from ..core.term_series import run_top_ngrams
+from ..core.term_series import (
+    build_date_filter, fetch_sparkline_rows, ngrams_context, run_top_ngrams,
+    year_pruning,
+)
 from . import openapi_docs as docs
 from ..core.timing import timed
 
+log = logging.getLogger(__name__)
+
 router = APIRouter()
+
+
+async def _resolve_types_counts(db, domain: str, dataset: str, dates=None, dates2=None):
+    """Shared instrument/endpoint preamble: resolve a dataset and gate it.
+
+    Every generic endpoint here (top-ngrams, allotax, rtd, wordshift,
+    term-series) begins the same way: fetch the latest registry entry, 404 if
+    absent, require the types-counts endpoint family, and reject dates on a
+    dateless dataset.
+    """
+    dataset_obj = await get_latest_entry(db, domain, dataset)
+    if not dataset_obj:
+        raise HTTPException(status_code=404, detail=f"Dataset '{domain}/{dataset}' not found")
+    require_types_counts(dataset_obj)
+    require_dates_supported(dataset_obj, f"{domain}/{dataset}", dates, dates2)
+    return dataset_obj
 
 
 def _parse_reference_value(rv: Optional[str]):
@@ -90,12 +114,7 @@ async def top_ngrams(
     if dates2 and not dates:
         raise HTTPException(status_code=400, detail="dates is required when dates2 is provided.")
 
-    dataset_obj = await get_latest_entry(db, domain, dataset)
-    if not dataset_obj:
-        raise HTTPException(status_code=404, detail=f"Dataset '{domain}/{dataset}' not found")
-
-    require_types_counts(dataset_obj)
-    require_dates_supported(dataset_obj, f"{domain}/{dataset}", dates, dates2)
+    dataset_obj = await _resolve_types_counts(db, domain, dataset, dates, dates2)
 
     filter_vals = extract_filter_vals(dataset_obj, request.query_params)
     count_col = resolve_count_column(dataset_obj, weight)
@@ -145,6 +164,209 @@ async def top_ngrams(
     )
 
 
+# ── term-series (generic) ──────────────────────────────────────────────────────
+
+def _has_year_partition(dataset_obj) -> bool:
+    """True when the dist tree has a `year` hive level to prune the fallback scan.
+
+    reddit/bluesky store `date` inside the files with year/month hive levels, so
+    the fallback needs a year condition to prune directories; wikimedia stores
+    `date` as a hive level, so the date filter prunes it natively (no year level).
+    """
+    return any(
+        lv.get("column") == "year" and lv.get("type") == "time_partition"
+        for lv in (getattr(dataset_obj, "level_order", None) or [])
+    )
+
+
+def _series_select(dataset_obj, weight) -> tuple:
+    """(select_cols, cols) for a term-series row under the chosen weight.
+
+    cols is {count, rank, freq} with None for companions the dataset did not
+    declare (resolve_series_columns) — the response omits those. select_cols
+    keeps a fixed 5-column shape, NULL-filling undeclared companions so row
+    unpacking stays positional.
+    """
+    cols = resolve_series_columns(dataset_obj, weight)
+    if cols is None:
+        cols = {"count": resolve_count_column(dataset_obj, weight), "rank": None, "freq": None}
+    select_cols = f"ngram, date, {cols['count']}, {cols['rank'] or 'NULL'}, {cols['freq'] or 'NULL'}"
+    return select_cols, cols
+
+
+def _series_row(row, cols) -> dict:
+    """Shape one term-series row, omitting companions the dataset didn't declare."""
+    entry = {"date": str(row[1]), "counts": int(row[2]) if row[2] else 0}
+    if cols["rank"] is not None:
+        entry["rank"] = int(row[3]) if row[3] else 0
+    if cols["freq"] is not None:
+        entry["freq"] = float(row[4]) if row[4] else 0.0
+    return entry
+
+
+async def _prepare_term_series(request, db, domain, dataset, entity, weight, date, window):
+    """Shared term-series setup — dataset, columns, entity, default date, path.
+
+    Returns (ctx, early) where early is a 404 JSONResponse when the dataset has
+    no data to default the date from, else None.
+    """
+    dataset_obj = await _resolve_types_counts(db, domain, dataset)
+    if dates_mode(dataset_obj) == "none":
+        raise HTTPException(
+            status_code=400,
+            detail=f"'{domain}/{dataset}' has no time dimension — a term time series needs one.",
+        )
+    if dataset_obj.data_format == "mongodb":
+        raise HTTPException(
+            status_code=400,
+            detail=f"generic term-series does not serve mongodb datasets; use /{domain}/term-series.",
+        )
+
+    select_cols, cols = _series_select(dataset_obj, weight)
+    filter_vals = extract_filter_vals(dataset_obj, request.query_params)
+
+    has_entity = bool((dataset_obj.entity_mapping or {}).get("local_id_column"))
+    local_id = (
+        (await resolve_entity(db, domain, dataset, entity)).local_id
+        if has_entity and entity else None
+    )
+
+    latest_date = latest_available_for(dataset_obj, local_id, filter_vals)
+    if not date:
+        if not latest_date:
+            return None, JSONResponse(
+                status_code=404,
+                content={"detail": "No data found for this dataset", "latest_available_date": None},
+            )
+        date = latest_date
+
+    date_filter, date_params = build_date_filter(date, window)
+    _, base_path = ngrams_context(dataset_obj, local_id, filter_vals)
+
+    ctx = SimpleNamespace(
+        dataset_obj=dataset_obj, select_cols=select_cols, cols=cols,
+        filter_vals=filter_vals, local_id=local_id, latest_date=latest_date,
+        date_filter=date_filter, date_params=date_params, base_path=base_path,
+    )
+    return ctx, None
+
+
+async def _term_series_rows(db, domain, ctx, terms, sparkline_dataset, *, batch):
+    """Fast sparkline bucket lookup, falling back to a dist-tree scan.
+
+    Fast path: hash-bucket point lookup on the type-first sparkline dataset.
+    Slow path: year-pruned (where applicable) scan of the date-first tree for
+    terms outside the precomputed vocabulary. In batch mode a scan failure
+    degrades to [] (missing terms return empty arrays); single mode raises.
+    """
+    label = f"{domain}/term-series"
+    rows = []
+    sparkline_obj = (
+        await get_latest_entry(db, domain, sparkline_dataset) if sparkline_dataset else None
+    )
+    if sparkline_obj:
+        def _fast():
+            with get_duckdb_client().timed_connect() as conn:
+                return fetch_sparkline_rows(
+                    conn, sparkline_obj, terms,
+                    entity_value=ctx.local_id, filter_vals=ctx.filter_vals,
+                    select_cols=ctx.select_cols, date_condition=ctx.date_filter,
+                    date_params=ctx.date_params, label=label,
+                )
+        with timed("fast_query", "sparkline bucket read"):
+            rows = await run_blocking(_fast)
+    if rows:
+        return rows
+
+    year_filter, year_params = (
+        year_pruning(ctx.date_params) if _has_year_partition(ctx.dataset_obj) else ("1=1", [])
+    )
+    glob = f"{ctx.base_path}/*.parquet"
+    placeholders = ", ".join(["?"] * len(terms))
+    sql = (
+        f"SELECT {ctx.select_cols} FROM read_parquet('{glob}', hive_partitioning=true) "
+        f"WHERE ngram IN ({placeholders}) AND {ctx.date_filter} AND {year_filter} "
+        "ORDER BY ngram, date"
+    )
+    params = [*terms, *ctx.date_params, *year_params]
+
+    def _slow():
+        with get_duckdb_client().timed_connect() as conn:
+            if batch:
+                try:
+                    return conn.execute(sql, params).fetchall()
+                except Exception as exc:
+                    if is_data_missing(exc):
+                        log.info("%s/batch: no partition data for %s", label, terms)
+                    else:
+                        log.warning("%s/batch: partition scan failed: %s", label, exc)
+                    return []
+            with handle_query_error(f"{domain}/{ctx.dataset_obj.dataset_id}"):
+                return conn.execute(sql, params).fetchall()
+
+    with timed("slow_query", "DuckDB partition scan"):
+        return await run_blocking(_slow)
+
+
+@router.get("/term-series", openapi_extra=docs.STORYWRANGLER_TERM_SERIES)
+async def term_series(
+    request: Request,
+    domain: str = Query("wikimedia", description="Domain owning the dataset"),
+    dataset: str = Query("ngrams", description="Dataset ID within the domain"),
+    type: str = Query(..., description="The type/term to look up. Case-sensitive."),
+    entity: Optional[str] = Query(None, description="Global entity ID (e.g. 'wikidata:Q30') or local ID. Omit for datasets without entity_mapping."),
+    date: Optional[str] = Query(None, description="End date (YYYY-MM-DD). Defaults to latest available."),
+    window: int = Query(0, description="Days to look back from date. 0 = full history."),
+    weight: Optional[str] = Query(None, description="Count measure — one of the dataset's endpoint_schema.count_column entries. Defaults to the first."),
+    sparkline_dataset: str = Query("sparklines", description="Registry dataset_id for the type-first sparkline precompute (default: 'sparklines'). Empty falls back to the dist-tree scan."),
+    db: AsyncSession = Depends(get_session),
+):
+    """Per-date time series for a single type in any registered types-counts dataset.
+
+    Returns counts, and rank/freq when the dataset declares `rank_column`/
+    `freq_column`. Fast path: hash-bucket lookup on the type-first sparkline
+    dataset; slow fallback: a scan of the date-first tree for types outside the
+    precomputed vocabulary. mongodb datasets are served by their bespoke
+    `/{domain}/term-series`.
+    """
+    ctx, early = await _prepare_term_series(request, db, domain, dataset, entity, weight, date, window)
+    if early is not None:
+        return early
+    rows = await _term_series_rows(db, domain, ctx, [type], sparkline_dataset, batch=False)
+    return {
+        "type": type,
+        "latest_available_date": ctx.latest_date,
+        "series": [_series_row(r, ctx.cols) for r in rows],
+    }
+
+
+@router.get("/term-series/batch", openapi_extra={"x-dataset": "ngrams"})
+async def term_series_batch(
+    request: Request,
+    domain: str = Query("wikimedia", description="Domain owning the dataset"),
+    dataset: str = Query("ngrams", description="Dataset ID within the domain"),
+    types: str = Query(..., description="Comma-separated types, e.g. 'trump,covid,the'. Case-sensitive."),
+    entity: Optional[str] = Query(None, description="Global entity ID or local ID. Omit for datasets without entity_mapping."),
+    date: Optional[str] = Query(None, description="End date (YYYY-MM-DD). Defaults to latest available."),
+    window: int = Query(0, description="Days to look back from date. 0 = full history."),
+    weight: Optional[str] = Query(None, description="Count measure — defaults to the first registered."),
+    sparkline_dataset: str = Query("sparklines", description="Type-first sparkline dataset_id (default: 'sparklines')."),
+    db: AsyncSession = Depends(get_session),
+):
+    """Batch term-series — a map of type → series in one request."""
+    type_list = [t.strip() for t in types.split(",") if t.strip()]
+    if not type_list:
+        raise HTTPException(status_code=400, detail="types parameter must contain at least one term")
+    ctx, early = await _prepare_term_series(request, db, domain, dataset, entity, weight, date, window)
+    if early is not None:
+        return early
+    rows = await _term_series_rows(db, domain, ctx, type_list, sparkline_dataset, batch=True)
+    results = {t: [] for t in type_list}
+    for r in rows:
+        results[r[0]].append(_series_row(r, ctx.cols))
+    return {"results": results, "latest_available_date": ctx.latest_date}
+
+
 # ── instruments ───────────────────────────────────────────────────────────────
 
 @router.get(
@@ -186,12 +408,7 @@ async def allotaxonometer(
     except ValueError:
         raise HTTPException(status_code=400, detail=f"Invalid alpha: {alpha!r}. Must be a number or 'inf'.")
 
-    dataset_obj = await get_latest_entry(db, domain, dataset)
-    if not dataset_obj:
-        raise HTTPException(status_code=404, detail=f"Dataset '{domain}/{dataset}' not found")
-
-    require_types_counts(dataset_obj)
-    require_dates_supported(dataset_obj, f"{domain}/{dataset}", dates, dates2)
+    dataset_obj = await _resolve_types_counts(db, domain, dataset, dates, dates2)
 
     # Any level_order column (partition/filter type) can be passed as
     # ?dim=val (system 1) or ?dim2=val (system 2), using actual column names
@@ -314,12 +531,7 @@ async def rank_turbulence_divergence(
         raise HTTPException(status_code=400, detail=f"Invalid alpha: {alpha!r}. Must be a number or 'inf'.")
 
     with timed("registry", "Registry lookup"):
-        dataset_obj = await get_latest_entry(db, domain, dataset)
-        if not dataset_obj:
-            raise HTTPException(status_code=404, detail=f"Dataset '{domain}/{dataset}' not found")
-
-    require_types_counts(dataset_obj)
-    require_dates_supported(dataset_obj, f"{domain}/{dataset}", dates, dates2)
+        dataset_obj = await _resolve_types_counts(db, domain, dataset, dates, dates2)
 
     if dates and not dates2:
         raise HTTPException(
@@ -469,12 +681,7 @@ async def weighted_avg_wordshift(
     > `GET /registry/{domain}/{dataset_id}` (`transform.filter_dimensions`) and
     > pass them with the `dim` / `dim2` suffix convention.
     """
-    dataset_obj = await get_latest_entry(db, domain, dataset)
-    if not dataset_obj:
-        raise HTTPException(status_code=404, detail=f"Dataset '{domain}/{dataset}' not found")
-
-    require_types_counts(dataset_obj)
-    require_dates_supported(dataset_obj, f"{domain}/{dataset}", dates, dates2)
+    dataset_obj = await _resolve_types_counts(db, domain, dataset, dates, dates2)
 
     ref_val = _parse_reference_value(reference_value)
 

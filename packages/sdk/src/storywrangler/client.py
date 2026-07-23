@@ -375,6 +375,73 @@ class InstrumentClient(_SubClient):
         params.update(filter_dims)
         return self._get_json("/storywrangler/top-ngrams", params)
 
+    def term_series(
+        self,
+        domain: str = "wikimedia",
+        dataset: str = "ngrams",
+        *,
+        type: str,
+        entity: str | None = None,
+        date: str | None = None,
+        window: int | None = None,
+        weight: str | None = None,
+        sparkline_dataset: str | None = None,
+        **filter_dims,
+    ) -> Dict[str, Any]:
+        """One type's series over time — GET /storywrangler/term-series.
+
+        Works for any registered types-counts dataset with a time dimension.
+        Returns counts, and rank/freq when the dataset declares them. mongodb
+        datasets (twitter) keep their bespoke ``/{domain}/term-series``.
+
+        Args:
+            domain/dataset: The date-first types-counts dataset.
+            type: The term to look up (case-sensitive).
+            entity: Global entity ID or local ID; omit when the dataset has no
+                entity_mapping.
+            date: Anchor date; defaults to the latest available.
+            window: Days of history back from the anchor (0 = full history).
+            weight: Count measure — one of the registered count_column entries.
+            sparkline_dataset: Type-first fast-path dataset id (default
+                'sparklines' server-side); pass '' to force the dist-tree scan.
+            **filter_dims: Dataset-specific filters by registered column name
+                (``n=1, lang="en"`` for reddit, ``ngram_size=1, granularity=
+                "daily"`` for wikimedia).
+        """
+        params: Dict[str, Any] = {"domain": domain, "dataset": dataset, "type": type}
+        optional = {"entity": entity, "date": date, "window": window,
+                    "weight": weight, "sparkline_dataset": sparkline_dataset}
+        params.update({k: v for k, v in optional.items() if v is not None})
+        params.update(filter_dims)
+        return self._get_json("/storywrangler/term-series", params)
+
+    def term_series_batch(
+        self,
+        domain: str = "wikimedia",
+        dataset: str = "ngrams",
+        *,
+        types: "str | List[str]",
+        entity: str | None = None,
+        date: str | None = None,
+        window: int | None = None,
+        weight: str | None = None,
+        sparkline_dataset: str | None = None,
+        **filter_dims,
+    ) -> Dict[str, Any]:
+        """Several types' series in one request — GET /storywrangler/term-series/batch.
+
+        Returns a map of type → series. ``types`` is a list or comma-separated
+        string; remaining args as in :meth:`term_series`.
+        """
+        if isinstance(types, (list, tuple)):
+            types = ",".join(types)
+        params: Dict[str, Any] = {"domain": domain, "dataset": dataset, "types": types}
+        optional = {"entity": entity, "date": date, "window": window,
+                    "weight": weight, "sparkline_dataset": sparkline_dataset}
+        params.update({k: v for k, v in optional.items() if v is not None})
+        params.update(filter_dims)
+        return self._get_json("/storywrangler/term-series/batch", params)
+
     def allotax(
         self,
         domain: str = "wikimedia",

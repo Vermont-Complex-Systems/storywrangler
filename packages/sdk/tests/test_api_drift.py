@@ -189,6 +189,8 @@ class TestRouteCoverage:
         "/admin/auth/users": ("UsersClient", "list"),  # + create() for POST
         "/admin/auth/users/{user_id}/role": ("UsersClient", "set_role"),
         "/storywrangler/top-ngrams": ("InstrumentClient", "top_ngrams"),
+        "/storywrangler/term-series": ("InstrumentClient", "term_series"),
+        "/storywrangler/term-series/batch": ("InstrumentClient", "term_series_batch"),
         "/storywrangler/allotax": ("InstrumentClient", "allotax"),
         "/storywrangler/rtd": ("InstrumentClient", "rtd"),
         "/storywrangler/wordshift": ("InstrumentClient", "wordshift"),

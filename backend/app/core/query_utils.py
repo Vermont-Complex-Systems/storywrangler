@@ -347,3 +347,24 @@ def latest_from_manifest(dataset_obj, local_id, granularity=None):
         return None
 
     return _find_max(entry, granularity)
+
+
+def latest_available_for(dataset_obj, local_id, filter_vals: Optional[dict] = None):
+    """Latest available date, navigating availability by a request's values.
+
+    Generalises latest_from_manifest for the generic term-series endpoint: the
+    availability tree nests differently per dataset (reddit `{n: {lang: ...}}`,
+    wikimedia `{country: {ngram_size: {granularity: ...}}}`), so rather than
+    matching a single key, descend preferring any level key that equals the
+    entity local_id or one of the request's filter values, falling back to the
+    first branch when nothing matches. Returns the leaf `max`, or None.
+    """
+    node = (dataset_obj.manifest or {}).get("availability", {})
+    targets = {str(local_id)} if local_id is not None else set()
+    targets.update(str(v) for v in (filter_vals or {}).values())
+    while isinstance(node, dict):
+        if "max" in node:
+            return node["max"]
+        match = next((node[k] for k in node if str(k) in targets), None)
+        node = match if match is not None else (next(iter(node.values()), None) if node else None)
+    return None
