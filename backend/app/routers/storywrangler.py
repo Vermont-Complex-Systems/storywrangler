@@ -288,13 +288,18 @@ async def _prepare_term_series(request, db, domain, dataset, entity, weight, dat
     return ctx, None
 
 
-async def _term_series_rows(db, domain, ctx, terms, sparkline_dataset, *, batch):
+async def _term_series_rows(db, domain, ctx, terms, sparkline_dataset):
     """Fast sparkline bucket lookup, falling back to a dist-tree scan.
 
     Fast path: hash-bucket point lookup on the type-first sparkline dataset.
-    Slow path: year-pruned (where applicable) scan of the date-first tree for
-    terms outside the precomputed vocabulary. In batch mode a scan failure
-    degrades to [] (missing terms return empty arrays); single mode raises.
+    Slow path: a scan of the date-first tree (year/month pruned where the tree
+    has those levels) for terms outside the precomputed vocabulary.
+
+    A term with no data on disk yields no rows — an empty series, the same
+    whether one term or many was asked for. A *real* failure (a timeout, a
+    genuine query error) raises through handle_query_error (504 / 500); it is
+    never swallowed into an empty result, so a slow scan that times out reads
+    as a timeout, not as "no data".
     """
     label = f"{domain}/term-series"
     rows = []
@@ -337,18 +342,18 @@ async def _term_series_rows(db, domain, ctx, terms, sparkline_dataset, *, batch)
     params = [*terms, *ctx.date_params, *tp_params]
 
     def _slow():
-        with get_duckdb_client().timed_connect() as conn:
-            if batch:
+        with handle_query_error(f"{domain}/{ctx.dataset_obj.dataset_id}"):
+            with get_duckdb_client().timed_connect() as conn:
                 try:
                     return conn.execute(sql, params).fetchall()
                 except Exception as exc:
+                    # A missing partition/file is a legitimate empty result (the
+                    # slice-level 404 is handled earlier in _prepare_term_series);
+                    # anything else re-raises for handle_query_error to classify.
                     if is_data_missing(exc):
-                        log.info("%s/batch: no partition data for %s", label, terms)
-                    else:
-                        log.warning("%s/batch: partition scan failed: %s", label, exc)
-                    return []
-            with handle_query_error(f"{domain}/{ctx.dataset_obj.dataset_id}"):
-                return conn.execute(sql, params).fetchall()
+                        log.info("%s: no partition data for %s", label, terms)
+                        return []
+                    raise
 
     with timed("slow_query", "DuckDB partition scan"):
         return await run_blocking(_slow)
@@ -381,7 +386,7 @@ async def term_series(
     ctx, early = await _prepare_term_series(request, db, domain, dataset, entity, weight, dates)
     if early is not None:
         return early
-    rows = await _term_series_rows(db, domain, ctx, [type], sparkline_dataset, batch=False)
+    rows = await _term_series_rows(db, domain, ctx, [type], sparkline_dataset)
     includes = await _fetch_includes(db, domain, include, ctx, {r[0] for r in rows})
     return {
         "type": type,
@@ -410,7 +415,7 @@ async def term_series_batch(
     ctx, early = await _prepare_term_series(request, db, domain, dataset, entity, weight, dates)
     if early is not None:
         return early
-    rows = await _term_series_rows(db, domain, ctx, type_list, sparkline_dataset, batch=True)
+    rows = await _term_series_rows(db, domain, ctx, type_list, sparkline_dataset)
     includes = await _fetch_includes(db, domain, include, ctx, {r[0] for r in rows})
     results = {t: [] for t in type_list}
     for r in rows:
