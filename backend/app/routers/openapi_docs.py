@@ -451,7 +451,7 @@ STORYWRANGLER_TERM_SERIES = {
                             "latest_available_date": {"type": "string", "format": "date", "description": "Most recent date with data for the resolved slice."},
                             "series": {
                                 "type": "array",
-                                "description": "One entry per date, chronological. `rank` and `freq` appear only when the dataset declares rank_column/freq_column.",
+                                "description": "One entry per date, chronological. `rank`/`freq` appear only when the dataset declares rank_column/freq_column. With `?include=`, each entry also carries a key named for the requested provenance role (e.g. `articles`) holding a ranked `[[document, score], ...]` list.",
                                 "items": {
                                     "type": "object",
                                     "properties": {
@@ -477,12 +477,15 @@ STORYWRANGLER_TERM_SERIES = {
         }
     },
     "x-performance": {
-        "fast_path": "Types in the sparkline vocabulary are a hash-bucket point lookup on the type-first dataset (~tens of ms).",
-        "slow_fallback": "Types outside it fall back to a scan of the date-first tree (year-pruned where the tree has year/month levels).",
+        "fast_path": "Types in the sparkline vocabulary are a hash-bucket point lookup on the type-first companion (~tens of ms).",
+        "slow_fallback": "Types outside it fall back to a scan of the date-first tree (year-pruned where the tree has year/month levels) — minutes on large unsorted corpora, so the corpus should register a type-first companion.",
+        "mongodb": "Pass-through datasets (twitter) serve the range as a plain find + time filter + sort — a range read, not an aggregation.",
+        "include": "?include= adds one bucket-routed read per provenance companion; omit it for the tidy counts/rank/freq series.",
     },
     "x-frontend-notes": {
-        "dataset": "Selected by ?domain=&dataset= (the date-first types-counts dataset); the type-first fast path is ?sparkline_dataset= (default 'sparklines'). Filter dims (?n=&lang=, ?ngram_size=&granularity=) use the dataset's registered column names.",
-        "companions": "rank/freq are present only when the dataset registers rank_column/freq_column; otherwise the series is counts-only. mongodb datasets (twitter) keep their bespoke /{domain}/term-series.",
+        "dataset": "Selected by ?domain=&dataset= (the caller-facing types-counts dataset). The type-first sparkline fast path is resolved automatically from lineage.derived_from + orientation:type-first — no param needed. ?sparkline_dataset= remains as a deprecated override. Filter dims (?n=&lang=, ?ngram_size=&granularity=) use the dataset's registered column names.",
+        "include": "?include=<role> (or include=all) attaches a type-documents companion's ranked source documents per date, nested under a key named for the role (e.g. 'articles': [[url, score], ...]). Roles are declared on the companion and resolved via lineage; a raw companion dataset id also works (deprecated).",
+        "formats": "Works across parquet_hive, flat parquet, and mongodb pass-through (per-term range reads). rank/freq are present only when the dataset registers rank_column/freq_column; otherwise the series is counts-only.",
     },
 }
 
