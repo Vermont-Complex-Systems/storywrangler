@@ -228,6 +228,12 @@ class EndpointSchemaConfig(BaseModel):
         type_column is not used.
         Requires transform.time_dimension and at least one filter_dimension.
 
+    ``type-documents``
+        Provenance: ``(type, date) → ranked [(document, score)]``. Not queried
+        on its own — attached to a term-series response via
+        ``?include=<dataset_id>``. Declares doc_column / score_column /
+        order_column (and type_column for the type it is keyed by).
+
     See [endpoint schema spec](/docs/specification#endpoint-schemas).
     """
 
@@ -275,6 +281,30 @@ class EndpointSchemaConfig(BaseModel):
             "Companion normalized-frequency column(s), same scalar-or-parallel-"
             "list rule as `rank_column`. A list is indexed by the chosen "
             "`weight`. Omit when the dataset has no precomputed frequency."
+        ),
+    )
+    doc_column: Optional[str] = Field(
+        None,
+        description=(
+            "type-documents only. Column holding the source-document identifier "
+            "(e.g. 'article_url'). A type-documents dataset maps (type, date) → a "
+            "ranked list of these documents; a term-series request attaches them "
+            "via `?include=<this dataset_id>`."
+        ),
+    )
+    score_column: Optional[str] = Field(
+        None,
+        description=(
+            "type-documents only. Column holding each document's contribution "
+            "score (e.g. 'score')."
+        ),
+    )
+    order_column: Optional[str] = Field(
+        None,
+        description=(
+            "type-documents only. Column the ranked documents are ordered by "
+            "within a (type, date) (e.g. 'article_rank'). Defaults to "
+            "`score_column` descending when omitted."
         ),
     )
 

@@ -80,6 +80,14 @@ class Standards:
             "response_format": "json_array_of_rows",
             "ordering": "time_dimension ASC",
         },
+        # Provenance: (type, date) -> ranked source documents. Attached to a
+        # term-series response via ?include=<dataset_id>; the doc/score/order
+        # columns are declared on doc_column/score_column/order_column.
+        "type-documents": {
+            "required_columns": {},
+            "response_format": "provenance",
+            "ordering": "order_column ASC",
+        },
     }
 
     @classmethod

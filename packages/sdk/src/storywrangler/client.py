@@ -385,6 +385,7 @@ class InstrumentClient(_SubClient):
         dates: str | None = None,
         weight: str | None = None,
         sparkline_dataset: str | None = None,
+        include: str | None = None,
         **filter_dims,
     ) -> Dict[str, Any]:
         """One type's series over time — GET /storywrangler/term-series.
@@ -403,13 +404,16 @@ class InstrumentClient(_SubClient):
             weight: Count measure — one of the registered count_column entries.
             sparkline_dataset: Type-first fast-path dataset id (default
                 'sparklines' server-side); pass '' to force the dist-tree scan.
+            include: Comma-separated type-documents dataset id(s) whose ranked
+                source documents to attach per date (e.g. 'top_articles_ngrams'),
+                added to each entry under its dataset id.
             **filter_dims: Dataset-specific filters by registered column name
                 (``n=1, lang="en"`` for reddit, ``ngram_size=1, granularity=
                 "daily"`` for wikimedia).
         """
         params: Dict[str, Any] = {"domain": domain, "dataset": dataset, "type": type}
-        optional = {"entity": entity, "dates": dates,
-                    "weight": weight, "sparkline_dataset": sparkline_dataset}
+        optional = {"entity": entity, "dates": dates, "weight": weight,
+                    "sparkline_dataset": sparkline_dataset, "include": include}
         params.update({k: v for k, v in optional.items() if v is not None})
         params.update(filter_dims)
         return self._get_json("/storywrangler/term-series", params)
@@ -424,6 +428,7 @@ class InstrumentClient(_SubClient):
         dates: str | None = None,
         weight: str | None = None,
         sparkline_dataset: str | None = None,
+        include: str | None = None,
         **filter_dims,
     ) -> Dict[str, Any]:
         """Several types' series in one request — GET /storywrangler/term-series/batch.
@@ -434,8 +439,8 @@ class InstrumentClient(_SubClient):
         if isinstance(types, (list, tuple)):
             types = ",".join(types)
         params: Dict[str, Any] = {"domain": domain, "dataset": dataset, "types": types}
-        optional = {"entity": entity, "dates": dates,
-                    "weight": weight, "sparkline_dataset": sparkline_dataset}
+        optional = {"entity": entity, "dates": dates, "weight": weight,
+                    "sparkline_dataset": sparkline_dataset, "include": include}
         params.update({k: v for k, v in optional.items() if v is not None})
         params.update(filter_dims)
         return self._get_json("/storywrangler/term-series/batch", params)

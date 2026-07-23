@@ -35,7 +35,7 @@ from ..core.query_utils import (
 )
 from ..core.registry_utils import get_latest_entry
 from ..core.term_series import (
-    fetch_sparkline_rows, ngrams_context, run_top_ngrams,
+    fetch_provenance, fetch_sparkline_rows, ngrams_context, run_top_ngrams,
 )
 from . import openapi_docs as docs
 from ..core.timing import timed
@@ -183,14 +183,57 @@ def _series_select(dataset_obj, weight) -> tuple:
     return select_cols, cols
 
 
-def _series_row(row, cols) -> dict:
-    """Shape one term-series row, omitting companions the dataset didn't declare."""
-    entry = {"date": str(row[1]), "counts": int(row[2]) if row[2] else 0}
+def _series_row(row, cols, includes=None) -> dict:
+    """Shape one term-series row, omitting companions the dataset didn't declare.
+
+    *includes* is ``{dataset_id: {(type, date): [[doc, score], ...]}}`` — each
+    requested ?include= provenance dataset's documents, attached under its id.
+    """
+    date_str = str(row[1])
+    entry = {"date": date_str, "counts": int(row[2]) if row[2] else 0}
     if cols["rank"] is not None:
         entry["rank"] = int(row[3]) if row[3] else 0
     if cols["freq"] is not None:
         entry["freq"] = float(row[4]) if row[4] else 0.0
+    for prov_id, prov in (includes or {}).items():
+        entry[prov_id] = prov.get((row[0], date_str), [])
     return entry
+
+
+async def _fetch_includes(db, domain, include, ctx, terms) -> dict:
+    """Resolve and fetch each ?include= provenance dataset for *terms*.
+
+    Returns ``{dataset_id: {(type, date): [[doc, score], ...]}}``. *include* is a
+    comma-separated list of provenance dataset ids in this domain; an unknown or
+    non-type-documents id is a 400 (rather than a silently empty field).
+    """
+    ids = [p.strip() for p in (include or "").split(",") if p.strip()]
+    if not ids or not terms:
+        return {}
+    out: dict = {}
+    for prov_id in ids:
+        prov_obj = await get_latest_entry(db, domain, prov_id)
+        if not prov_obj:
+            raise HTTPException(
+                status_code=400, detail=f"include dataset '{domain}/{prov_id}' not found")
+        if (prov_obj.endpoint_schema or {}).get("type") != "type-documents":
+            raise HTTPException(
+                status_code=400,
+                detail=f"include dataset '{domain}/{prov_id}' is not a type-documents "
+                       "dataset (register it with endpoint_schema.type='type-documents').",
+            )
+
+        def _fetch(prov_obj=prov_obj, prov_id=prov_id):
+            with get_duckdb_client().timed_connect() as conn:
+                return fetch_provenance(
+                    conn, prov_obj, sorted(terms),
+                    entity_value=ctx.local_id, filter_vals=ctx.filter_vals,
+                    date_condition=ctx.date_filter, date_params=ctx.date_params,
+                    label=f"{domain}/{prov_id}",
+                )
+        with timed("include", f"provenance {prov_id}"):
+            out[prov_id] = await run_blocking(_fetch)
+    return out
 
 
 async def _prepare_term_series(request, db, domain, dataset, entity, weight, dates):
@@ -321,6 +364,7 @@ async def term_series(
     dates: Optional[str] = Query(None, description="Date range: a single date '2024-06-01' or 'start,end' like '2024-01-01,2024-12-31'. Omit for full history."),
     weight: Optional[str] = Query(None, description="Count measure — one of the dataset's endpoint_schema.count_column entries. Defaults to the first."),
     sparkline_dataset: str = Query("sparklines", description="Registry dataset_id for the type-first sparkline precompute (default: 'sparklines'). Empty falls back to the dist-tree scan."),
+    include: Optional[str] = Query(None, description="Comma-separated type-documents dataset id(s) whose ranked source documents to attach per date (e.g. 'top_articles_ngrams'). Each is added to every entry under its dataset id."),
     db: AsyncSession = Depends(get_session),
 ):
     """Per-date time series for a single type in any registered types-counts dataset.
@@ -330,15 +374,19 @@ async def term_series(
     dataset; slow fallback: a scan of the date-first tree for types outside the
     precomputed vocabulary. mongodb datasets are served by their bespoke
     `/{domain}/term-series`.
+
+    `include=<type-documents dataset id>` attaches that dataset's ranked source
+    documents per date (the provenance behind each entry).
     """
     ctx, early = await _prepare_term_series(request, db, domain, dataset, entity, weight, dates)
     if early is not None:
         return early
     rows = await _term_series_rows(db, domain, ctx, [type], sparkline_dataset, batch=False)
+    includes = await _fetch_includes(db, domain, include, ctx, {r[0] for r in rows})
     return {
         "type": type,
         "latest_available_date": ctx.latest_date,
-        "series": [_series_row(r, ctx.cols) for r in rows],
+        "series": [_series_row(r, ctx.cols, includes) for r in rows],
     }
 
 
@@ -352,6 +400,7 @@ async def term_series_batch(
     dates: Optional[str] = Query(None, description="Date range: a single date or 'start,end'. Omit for full history."),
     weight: Optional[str] = Query(None, description="Count measure — defaults to the first registered."),
     sparkline_dataset: str = Query("sparklines", description="Type-first sparkline dataset_id (default: 'sparklines')."),
+    include: Optional[str] = Query(None, description="Comma-separated type-documents dataset id(s) whose ranked source documents to attach per date."),
     db: AsyncSession = Depends(get_session),
 ):
     """Batch term-series — a map of type → series in one request."""
@@ -362,9 +411,10 @@ async def term_series_batch(
     if early is not None:
         return early
     rows = await _term_series_rows(db, domain, ctx, type_list, sparkline_dataset, batch=True)
+    includes = await _fetch_includes(db, domain, include, ctx, {r[0] for r in rows})
     results = {t: [] for t in type_list}
     for r in rows:
-        results[r[0]].append(_series_row(r, ctx.cols))
+        results[r[0]].append(_series_row(r, ctx.cols, includes))
     return {"results": results, "latest_available_date": ctx.latest_date}
 
 

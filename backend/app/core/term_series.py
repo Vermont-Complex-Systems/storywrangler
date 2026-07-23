@@ -12,6 +12,7 @@ is not genuinely domain-specific lives here:
   series_entry()          — one time-series response row
   log_fast_path_miss()    — classify a sparkline failure before scan fallback
   fetch_sparkline_rows()  — bucket-routed sparkline lookup for a set of terms
+  fetch_provenance()      — bucket-routed source-document lookup (?include=)
   run_top_ngrams()        — the full top-ngrams endpoint body (off the event loop)
 """
 
@@ -194,6 +195,52 @@ def fetch_sparkline_rows(
     except Exception as exc:
         log_fast_path_miss(label, exc)
         return []
+
+
+def fetch_provenance(
+    conn, prov_obj, terms: List[str],
+    *, entity_value, filter_vals: dict,
+    date_condition: str, date_params: list, label: str,
+) -> dict:
+    """Ranked source documents per (type, date) for *terms* — the include=.
+
+    Reads a type-documents provenance dataset (doc/score/order columns from its
+    endpoint_schema) via the same hash-bucket routing as the sparklines, and
+    returns ``{(type, date): [[document, score], ...]}`` ordered by the declared
+    order_column (or score descending). Missing files or an undeclared doc/score
+    column yield ``{}`` (a classified log line, same as the sparkline path).
+    """
+    ep = prov_obj.endpoint_schema or {}
+    type_col = ep.get("type_column") or "ngram"
+    doc_col = ep.get("doc_column")
+    score_col = ep.get("score_column")
+    if not doc_col or not score_col:
+        return {}
+    order_by = ep.get("order_column") or f"{score_col} DESC"
+
+    terms = sorted(terms)
+    files = bucket_files(prov_obj, terms, entity_value=entity_value, filter_vals=filter_vals)
+    file_list = ", ".join(f"'{f}'" for f in files)
+    placeholders = ", ".join(["?"] * len(terms))
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT {type_col}, date, {doc_col}, {score_col}
+            FROM read_parquet([{file_list}])
+            WHERE {type_col} IN ({placeholders})
+              AND {date_condition}
+            ORDER BY {type_col}, date, {order_by}
+            """,
+            [*terms, *date_params],
+        ).fetchall()
+    except Exception as exc:
+        log_fast_path_miss(label, exc)
+        return {}
+
+    out: dict = {}
+    for term, dt, doc, score in rows:
+        out.setdefault((term, str(dt)), []).append([doc, float(score) if score else 0.0])
+    return out
 
 
 async def run_top_ngrams(

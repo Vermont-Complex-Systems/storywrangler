@@ -88,3 +88,22 @@ class TestCompanionValidation:
         with pytest.raises(ValueError, match="parallel to count_column"):
             self._validate({"type": "types-counts", "count_column": ["a", "b", "c"],
                             "freq_column": ["fa", "fb"]})
+
+
+class TestTypeDocuments:
+    """The type-documents provenance endpoint schema (?include=)."""
+
+    def test_accepts_doc_score_order(self):
+        from storywrangler_schemas.registry import EndpointSchemaConfig
+        ep = EndpointSchemaConfig.model_validate({
+            "type": "type-documents", "type_column": "ngram",
+            "doc_column": "article_url", "score_column": "score",
+            "order_column": "article_rank",
+        })
+        assert ep.doc_column == "article_url"
+        assert ep.score_column == "score"
+        assert ep.order_column == "article_rank"
+
+    def test_type_is_supported(self):
+        from storywrangler_schemas.registry import _SUPPORTED_ENDPOINT_TYPES
+        assert "type-documents" in _SUPPORTED_ENDPOINT_TYPES
