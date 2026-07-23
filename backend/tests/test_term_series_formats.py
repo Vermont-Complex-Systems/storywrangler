@@ -84,3 +84,58 @@ class TestMongoDateRangeFilter:
 
     def test_none_is_full_history(self):
         assert date_range_filter(self.STR_TIME, "time", None) is None
+
+
+class TestBucketReadStrict:
+    """The self-served bucket read: missing shards are an honest empty, but
+    real query errors re-raise (there is no fallback behind this read)."""
+
+    def _bucketed_obj(self, root, default_count=4):
+        return SimpleNamespace(
+            data_location=str(root), data_format="parquet_hive",
+            transform={"hash_bucket": {"column": "ngram_bucket",
+                                       "default_count": default_count}},
+            level_order=[
+                {"column": "n", "type": "partition", "default_value": 1},
+                {"column": "ngram_bucket", "type": "hash_bucket", "default_value": 0},
+            ],
+        )
+
+    def _read(self, conn, obj, select_cols, strict):
+        from app.core.term_series import fetch_sparkline_rows
+        return fetch_sparkline_rows(
+            conn, obj, ["trump"], entity_value=None, filter_vals={"n": 1},
+            select_cols=select_cols, date_condition="1=1", date_params=[],
+            label="t", strict=strict)
+
+    def _write_bucket(self, conn, tmp_path):
+        from storywrangler_schemas.hashing import assign_bucket
+        bucket = assign_bucket("trump", 4)
+        leaf = tmp_path / "tree" / "n=1" / f"ngram_bucket={bucket}"
+        leaf.mkdir(parents=True)
+        conn.execute(f"""
+            COPY (SELECT 'trump' AS ngram, DATE '2024-01-01' AS date, 5 AS count)
+            TO '{leaf / "data.parquet"}' (FORMAT PARQUET)
+        """)
+        return tmp_path / "tree"
+
+    def test_missing_shard_is_empty_even_strict(self, conn):
+        obj = self._bucketed_obj("/nonexistent/tree")
+        assert self._read(conn, obj, "ngram, date, count", strict=True) == []
+
+    def test_round_trip(self, conn, tmp_path):
+        obj = self._bucketed_obj(self._write_bucket(conn, tmp_path))
+        rows = self._read(conn, obj, "ngram, date, count", strict=True)
+        assert [(r[0], str(r[1]), r[2]) for r in rows] == [("trump", "2024-01-01", 5)]
+
+    def test_real_error_swallowed_when_lax(self, conn, tmp_path):
+        # A bad column is a Binder error, not data-missing: the companion fast
+        # path logs and returns [] (the scan fallback covers it).
+        obj = self._bucketed_obj(self._write_bucket(conn, tmp_path))
+        assert self._read(conn, obj, "ngram, date, missing_col", strict=False) == []
+
+    def test_real_error_raises_when_strict(self, conn, tmp_path):
+        import pytest
+        obj = self._bucketed_obj(self._write_bucket(conn, tmp_path))
+        with pytest.raises(Exception, match="missing_col"):
+            self._read(conn, obj, "ngram, date, missing_col", strict=True)

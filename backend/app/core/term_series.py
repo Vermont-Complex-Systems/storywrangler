@@ -93,6 +93,7 @@ def _bucket_read(
     conn, dataset_obj, terms: List[str], *, entity_value, filter_vals: dict,
     select_cols: str, date_condition: str, date_params: list, label: str,
     type_col: str, time_col: str, order_extra: Optional[str] = None,
+    strict: bool = False,
 ) -> list:
     """Bucket-routed read shared by the sparkline and provenance lookups.
 
@@ -100,6 +101,11 @@ def _bucket_read(
     the type is in *terms* and *date_condition* holds, ordered by (type, time)
     plus *order_extra* when given. Returns rows — or [] with a classified log
     line on failure (a missing shard is expected; anything else is warned).
+
+    *strict* is for reads with no fallback behind them (a type-first primary
+    serving itself): a missing shard still yields [], but any other failure
+    re-raises so the caller's handle_query_error classifies it as 504/500
+    instead of it reading as "no data".
     """
     files = bucket_files(dataset_obj, terms, entity_value=entity_value, filter_vals=filter_vals)
     file_list = ", ".join(f"'{f}'" for f in files)
@@ -117,6 +123,8 @@ def _bucket_read(
             [*terms, *date_params],
         ).fetchall()
     except Exception as exc:
+        if strict and not is_data_missing(exc):
+            raise
         log_fast_path_miss(label, exc)
         return []
 
@@ -126,6 +134,7 @@ def fetch_sparkline_rows(
     *, entity_value, filter_vals: dict, select_cols: str,
     date_condition: str, date_params: list, label: str,
     type_col: str = "ngram", time_col: str = "date",
+    strict: bool = False,
 ) -> list:
     """Bucket-routed sparkline lookup for *terms*.
 
@@ -140,7 +149,7 @@ def fetch_sparkline_rows(
     return _bucket_read(
         conn, sparkline_obj, terms, entity_value=entity_value, filter_vals=filter_vals,
         select_cols=select_cols, date_condition=date_condition, date_params=date_params,
-        label=label, type_col=type_col, time_col=time_col,
+        label=label, type_col=type_col, time_col=time_col, strict=strict,
     )
 
 
@@ -328,17 +337,22 @@ async def fetch_includes(db, domain, include, ctx, terms) -> dict:
     return out
 
 
-async def _resolve_sparkline_obj(db, domain, companions, sparkline_dataset):
-    """The type-first companion term-series' fast path reads.
+async def _resolve_sparkline_obj(db, domain, dataset_obj, companions, sparkline_dataset):
+    """The dataset term-series bucket-routes for its fast path reads.
 
-    Default (``sparkline_dataset is None``): the declared type-first companion
-    (lineage + ``orientation: type-first``). None → no fast path, so the query
-    uses the correct-but-slower date-first scan until a sparkline is registered
-    with that orientation. An explicit ``sparkline_dataset`` overrides by id
+    Default (``sparkline_dataset is None``): the queried dataset itself when it
+    declares ``orientation: type-first`` (it *is* the term-bucketed form — e.g.
+    bluesky/ngrams — so the bucket read is the read, not a fast path over
+    something slower), else the declared type-first companion (lineage +
+    ``orientation: type-first``). None → no fast path, so the query uses the
+    correct-but-slower date-first scan until a sparkline is registered with
+    that orientation. An explicit ``sparkline_dataset`` overrides by id
     (deprecated); ``""`` also disables the fast path.
     """
     if sparkline_dataset is not None:
         return await get_latest_entry(db, domain, sparkline_dataset) if sparkline_dataset else None
+    if (dataset_obj.endpoint_schema or {}).get("orientation") == "type-first":
+        return dataset_obj
     return companions["type_first"]
 
 
@@ -412,7 +426,8 @@ async def prepare_term_series(request, db, domain, dataset, entity, weight, date
     # the no-data 404 can consider the sparkline, which refreshes nightly and
     # can run ahead of the primary's lagging manifest.
     companions = await resolve_companions(db, domain, dataset)
-    sparkline_obj = await _resolve_sparkline_obj(db, domain, companions, sparkline_dataset)
+    sparkline_obj = await _resolve_sparkline_obj(
+        db, domain, dataset_obj, companions, sparkline_dataset)
 
     # latest_available_date is the max of primary and sparkline availability
     # (the two pipelines advance independently); the undated no-data 404 uses it
@@ -544,10 +559,14 @@ async def _mongo_term_series_rows(domain, ctx, terms) -> list:
 async def term_series_rows(domain, ctx, terms):
     """Fast sparkline bucket lookup, falling back to a dist-tree scan.
 
-    Fast path: hash-bucket point lookup on the type-first sparkline companion
-    (ctx.sparkline_obj, resolved from lineage in prepare_term_series).
+    Fast path: hash-bucket point lookup on the type-first form — the sparkline
+    companion resolved from lineage, or the queried dataset itself when it
+    declares ``orientation: type-first`` (bluesky-style term-bucketed trees).
     Slow path: a scan of the date-first tree (year/month pruned where the tree
-    has those levels) for terms outside the precomputed vocabulary.
+    has those levels) for terms outside the precomputed vocabulary. A
+    self-served type-first dataset has no date-first tree, so there is no slow
+    path: a bucket miss is an honest empty series, not a cue to re-read the
+    same bucket tree through a wildcard glob.
 
     A term with no data on disk yields no rows — an empty series, the same
     whether one term or many was asked for. A *real* failure (a timeout, a
@@ -561,6 +580,12 @@ async def term_series_rows(domain, ctx, terms):
     label = f"{domain}/term-series"
     rows = []
     sparkline_obj = ctx.sparkline_obj
+    # Self-served: the queried dataset is its own type-first form (compare ids,
+    # not identity — the deprecated ?sparkline_dataset= override re-fetches).
+    self_served = (
+        sparkline_obj is not None
+        and sparkline_obj.dataset_id == ctx.dataset_obj.dataset_id
+    )
     if sparkline_obj:
         def _fast():
             with get_duckdb_client().timed_connect() as conn:
@@ -570,7 +595,16 @@ async def term_series_rows(domain, ctx, terms):
                     select_cols=ctx.select_cols, date_condition=ctx.date_filter,
                     date_params=ctx.date_params, label=label,
                     type_col=ctx.type_col, time_col=ctx.time_col,
+                    strict=self_served,
                 )
+        if self_served:
+            # The bucket read is the only read: classify real errors (504/500)
+            # rather than falling back, and return the honest result as-is.
+            def _only():
+                with handle_query_error(f"{domain}/{ctx.dataset_obj.dataset_id}"):
+                    return _fast()
+            with timed("fast_query", "type-first bucket read"):
+                return await run_blocking(_only)
         with timed("fast_query", "sparkline bucket read"):
             rows = await run_blocking(_fast)
     if rows:

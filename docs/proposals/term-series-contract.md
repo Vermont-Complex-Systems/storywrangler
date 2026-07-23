@@ -13,7 +13,11 @@ sparkline (no `sparkline_dataset` needed), and role-based `?include=<role>` /
 `include=all`. The implicit `"sparklines"` naming-convention fallback was
 **not** kept (it was the structural sniffing this section argues against): a
 sparkline must declare `orientation: type-first`, else the query uses the
-correct-but-slower date-first scan. The explicit deprecated aliases
+correct-but-slower date-first scan. A dataset that *is itself* type-first
+(bluesky's term-bucketed tree) declares the orientation on its own
+registration and serves as its own fast path — the bucket read is the read,
+so there is no scan fallback and a bucket miss is an honest empty series.
+The explicit deprecated aliases
 (`sparkline_dataset=<id>`, `include=<dataset_id>`) remain for one release.
 The per-domain `/{domain}/term-series` routes are now **retired** (the
 `(babynames, reddit, bluesky, twitter, wikimedia)` bespoke handlers removed; all

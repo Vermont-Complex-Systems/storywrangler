@@ -108,3 +108,32 @@ class TestResolveCompanions:
     def test_no_companions(self):
         got = _resolve([_entry("ngrams", etype="types-counts")])
         assert got == {"type_first": None, "documents": {}}
+
+
+class TestSelfTypeFirst:
+    """A dataset that is itself type-first serves as its own fast path."""
+
+    def _resolve_sparkline(self, dataset_obj, companions):
+        from app.core.term_series import _resolve_sparkline_obj
+        return asyncio.run(
+            _resolve_sparkline_obj(None, "bluesky", dataset_obj, companions, None))
+
+    def test_type_first_primary_resolves_itself(self):
+        # bluesky/ngrams: the queried dataset IS the term-bucketed tree — no
+        # companion exists (a dataset cannot derive from itself), so the
+        # orientation on its own registration makes it the fast path.
+        primary = _entry("ngrams", etype="types-counts", orientation="type-first")
+        got = self._resolve_sparkline(primary, {"type_first": None, "documents": {}})
+        assert got is primary
+
+    def test_time_first_primary_uses_companion(self):
+        primary = _entry("ngrams", etype="types-counts")
+        sparkline = _entry("sparklines", etype="types-counts", orientation="type-first",
+                           derived=["wikimedia/ngrams"])
+        got = self._resolve_sparkline(primary, {"type_first": sparkline, "documents": {}})
+        assert got is sparkline
+
+    def test_undeclared_orientation_no_companion_no_fast_path(self):
+        primary = _entry("ngrams", etype="types-counts")
+        got = self._resolve_sparkline(primary, {"type_first": None, "documents": {}})
+        assert got is None

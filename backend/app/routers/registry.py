@@ -707,6 +707,9 @@ async def list_registered_datasets(db: AsyncSession = Depends(get_session)):
                 "data_format": ds.data_format,
                 "description": ds.description,
                 "endpoint_schema": ds.endpoint_schema,
+                # lineage distinguishes companion datasets (derived_from set)
+                # from self-serving type-first primaries in consumer listings.
+                "lineage": ds.lineage,
                 "level_order": ds.level_order,
                 "filter_values": ds.filter_values,
                 "created_at": ds.created_at,
