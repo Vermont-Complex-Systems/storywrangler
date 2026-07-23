@@ -202,6 +202,11 @@ def _validate_types_counts(dataset: DatasetCreate, derived: Dict[str, Any]) -> N
         count_cols = ep.count_column or "counts"
         count_cols = count_cols if isinstance(count_cols, list) else [count_cols]
         expected = [type_col, *count_cols]
+        # rank/freq companions (scalar or parallel list) reach the term-series
+        # SELECT too — every declared one must exist on disk.
+        for field in ("rank_column", "freq_column"):
+            val = getattr(ep, field, None)
+            expected += (val if isinstance(val, list) else [val] if val else [])
         if dataset.transform and dataset.transform.time_dimension:
             expected.append(dataset.transform.time_dimension)
         missing = [c for c in expected if c not in data_schema]

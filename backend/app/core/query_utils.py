@@ -14,6 +14,7 @@ from typing import List, Optional
 from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
+from sqlalchemy.orm import defer
 
 from storywrangler_schemas.coercion import coerce_scalar
 from storywrangler_schemas.standards import Standards
@@ -332,6 +333,12 @@ async def _domain_latest_entries(db: AsyncSession, domain: str) -> List[Registry
     """
     result = await db.execute(
         select(RegistryEntry)
+        # The returned entries are reused downstream (sparkline routing, the
+        # availability probe, provenance reads), so we can only defer the one
+        # deliberately-large column that is never read here or downstream —
+        # partition_index (registry.py excludes it from responses for the same
+        # reason). Deferring anything else triggers an async lazy-load.
+        .options(defer(RegistryEntry.partition_index))
         .where(RegistryEntry.domain == domain)
         .order_by(
             RegistryEntry.dataset_id,

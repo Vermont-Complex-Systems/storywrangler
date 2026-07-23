@@ -14,7 +14,7 @@ Usage::
 
     # Data endpoints — every response has a .df() accessor (pandas extra)
     wiki.top_ngrams(dates="2026-05-01", granularity="daily", ngram_size=1)
-    wiki.term_series("hello", entity="wikidata:Q30", window=30).df()
+    wiki.term_series("hello", entity="wikidata:Q30", dates="2026-05-01,2026-05-31").df()
     wiki.term_series_batch(["hello", "world"], entity="wikidata:Q30").df()
 
     result = wiki.allotax(
@@ -390,9 +390,9 @@ class InstrumentClient(_SubClient):
     ) -> Dict[str, Any]:
         """One type's series over time — GET /storywrangler/term-series.
 
-        Works for any registered types-counts dataset with a time dimension.
-        Returns counts, and rank/freq when the dataset declares them. mongodb
-        datasets (twitter) keep their bespoke ``/{domain}/term-series``.
+        Works for any registered types-counts dataset with a time dimension,
+        including mongodb (twitter) — served through this same endpoint as a
+        range read. Returns counts, and rank/freq when the dataset declares them.
 
         Args:
             domain/dataset: The date-first types-counts dataset.
@@ -1017,19 +1017,15 @@ class DatasetClient(_SubClient):
         )
 
     def _validate_dates(self, dates, dates2, *, mongo_single: bool = True) -> None:
-        """Pre-flight the dates contract against registry metadata.
+        """Pre-flight the dates contract against the registry's derived `dates`
+        field ('range' | 'single' | 'none') rather than re-deriving the rule —
+        so the SDK can't drift from the server's own classification.
 
-        Derived the same way as the registry's `dates` field: no
-        transform.time_dimension → dateless (omit dates entirely); mongodb
-        pass-through → single days only for the *instruments*. Best-effort —
-        skipped when metadata can't be fetched, letting the server's 400 teach
-        instead.
-
-        *mongo_single* enforces mongodb's single-date rule. The instruments load
-        a whole per-day distribution, so a range would mean aggregating across
-        days (not allowed on the pass-through). term_series passes False: a
-        per-term range is a plain range read (find + time filter + sort), which
-        mongo serves directly.
+        Best-effort — skipped when metadata can't be fetched (or predates the
+        derived field), letting the server's 400 teach instead. *mongo_single*
+        enforces the single-day rule for the instruments (a range there would
+        aggregate a per-day distribution across days); term_series passes False,
+        since a per-term range is a plain range read the pass-through serves.
         """
         if dates is None and dates2 is None:
             return
@@ -1038,12 +1034,13 @@ class DatasetClient(_SubClient):
         except Exception:
             return
         label = f"{self.domain}/{self.dataset_id}"
-        if not (meta.get("transform") or {}).get("time_dimension"):
+        mode = meta.get("dates")  # server-derived: 'range' | 'single' | 'none'
+        if mode == "none":
             raise ValueError(
                 f"{label} has no time dimension — omit dates to load the "
                 f"full dataset. (.meta['dates'] shows each dataset's contract.)"
             )
-        if mongo_single and meta.get("data_format") == "mongodb":
+        if mongo_single and mode == "single":
             for name, val in (("dates", dates), ("dates2", dates2)):
                 if val and "," in str(val):
                     raise ValueError(
@@ -1297,10 +1294,10 @@ class Storywrangler:
 
             wiki = client.dataset("wikimedia")        # domain-scoped
             wiki                                       # shows the endpoint list
-            wiki.term_series("hello", entity="wikidata:Q30", window=30)
-            wiki = client.dataset("wikimedia", "ngrams")   # dataset-scoped
-            wiki.filters   # see available filter dimensions
-            wiki.allotax(entity="wikidata:Q30", dates="2026-05-01", ngram_size=1)
+            ng = client.dataset("wikimedia", "ngrams")     # dataset-scoped
+            ng.filters   # see available filter dimensions
+            ng.term_series("hello", entity="wikidata:Q30", dates="2026-05-01,2026-05-31")
+            ng.allotax(entity="wikidata:Q30", dates="2026-05-01", ngram_size=1)
         """
         return DatasetClient(self._session, self._base_url, self._timeout, domain, dataset_id)
 

@@ -89,6 +89,38 @@ def bucket_files(dataset_obj, terms, *, entity_value=None, filter_vals=None) -> 
     ]
 
 
+def _bucket_read(
+    conn, dataset_obj, terms: List[str], *, entity_value, filter_vals: dict,
+    select_cols: str, date_condition: str, date_params: list, label: str,
+    type_col: str, time_col: str, order_extra: Optional[str] = None,
+) -> list:
+    """Bucket-routed read shared by the sparkline and provenance lookups.
+
+    Globs the hash buckets that can hold *terms*, selects *select_cols* where
+    the type is in *terms* and *date_condition* holds, ordered by (type, time)
+    plus *order_extra* when given. Returns rows — or [] with a classified log
+    line on failure (a missing shard is expected; anything else is warned).
+    """
+    files = bucket_files(dataset_obj, terms, entity_value=entity_value, filter_vals=filter_vals)
+    file_list = ", ".join(f"'{f}'" for f in files)
+    placeholders = ", ".join(["?"] * len(terms))
+    order_by = f"{type_col}, {time_col}" + (f", {order_extra}" if order_extra else "")
+    try:
+        return conn.execute(
+            f"""
+            SELECT {select_cols}
+            FROM read_parquet([{file_list}])
+            WHERE {type_col} IN ({placeholders})
+              AND {date_condition}
+            ORDER BY {order_by}
+            """,
+            [*terms, *date_params],
+        ).fetchall()
+    except Exception as exc:
+        log_fast_path_miss(label, exc)
+        return []
+
+
 def fetch_sparkline_rows(
     conn, sparkline_obj, terms: List[str],
     *, entity_value, filter_vals: dict, select_cols: str,
@@ -102,28 +134,14 @@ def fetch_sparkline_rows(
     reddit/bluesky), *entity_value* the entity level when one exists, and
     *select_cols* the SELECT list (columns vary per domain: pv_* for
     wikimedia, count/rank/freq for reddit/bluesky). *type_col*/*time_col* are
-    the registered type/time columns (default ngram/date — the per-domain
-    routers). Rows come back ordered by type, time — or [] with a classified
-    log line on failure (missing sparkline files are expected; anything else
-    is a warning).
+    the registered type/time columns (default ngram/date). Rows come back
+    ordered by type, time — or [] with a classified log line on failure.
     """
-    files = bucket_files(sparkline_obj, terms, entity_value=entity_value, filter_vals=filter_vals)
-    file_list = ", ".join(f"'{f}'" for f in files)
-    placeholders = ", ".join(["?"] * len(terms))
-    try:
-        return conn.execute(
-            f"""
-            SELECT {select_cols}
-            FROM read_parquet([{file_list}])
-            WHERE {type_col} IN ({placeholders})
-              AND {date_condition}
-            ORDER BY {type_col}, {time_col}
-            """,
-            [*terms, *date_params],
-        ).fetchall()
-    except Exception as exc:
-        log_fast_path_miss(label, exc)
-        return []
+    return _bucket_read(
+        conn, sparkline_obj, terms, entity_value=entity_value, filter_vals=filter_vals,
+        select_cols=select_cols, date_condition=date_condition, date_params=date_params,
+        label=label, type_col=type_col, time_col=time_col,
+    )
 
 
 def fetch_provenance(
@@ -149,25 +167,12 @@ def fetch_provenance(
         return {}
     order_by = ep.get("order_column") or f"{score_col} DESC"
 
-    terms = sorted(terms)
-    files = bucket_files(prov_obj, terms, entity_value=entity_value, filter_vals=filter_vals)
-    file_list = ", ".join(f"'{f}'" for f in files)
-    placeholders = ", ".join(["?"] * len(terms))
-    try:
-        rows = conn.execute(
-            f"""
-            SELECT {type_col}, {time_col}, {doc_col}, {score_col}
-            FROM read_parquet([{file_list}])
-            WHERE {type_col} IN ({placeholders})
-              AND {date_condition}
-            ORDER BY {type_col}, {time_col}, {order_by}
-            """,
-            [*terms, *date_params],
-        ).fetchall()
-    except Exception as exc:
-        log_fast_path_miss(label, exc)
-        return {}
-
+    rows = _bucket_read(
+        conn, prov_obj, sorted(terms), entity_value=entity_value, filter_vals=filter_vals,
+        select_cols=f"{type_col}, {time_col}, {doc_col}, {score_col}",
+        date_condition=date_condition, date_params=date_params, label=label,
+        type_col=type_col, time_col=time_col, order_extra=order_by,
+    )
     out: dict = {}
     for term, dt, doc, score in rows:
         out.setdefault((term, str(dt)), []).append([doc, float(score) if score else 0.0])
@@ -458,7 +463,21 @@ def _term_series_scan_target(ctx) -> tuple:
             obj, entity_value=ctx.local_id, filter_vals=ctx.filter_vals,
             time_partition_vals=tp_path_vals, glob_suffix="/*.parquet",
         ) or f"{ctx.base_path}/*.parquet"
-        return f"read_parquet('{path}', hive_partitioning=true)", tp_conditions, tp_params
+        # Columns that are not hive levels live inside the files — the pinned
+        # path can't encode them, so entity / filter dims absent from level_order
+        # still need WHERE clauses (mirrors load_system; latent while every dim
+        # is a hive level, but keeps the "any types-counts dataset" claim true).
+        conditions, params = list(tp_conditions), list(tp_params)
+        level_cols = {lv["column"] for lv in obj.level_order}
+        entity_col = (obj.entity_mapping or {}).get("local_id_column")
+        if entity_col and ctx.local_id is not None and entity_col not in level_cols:
+            conditions.append(f"{entity_col} = ?")
+            params.append(ctx.local_id)
+        for col, val in ctx.filter_vals.items():
+            if col not in level_cols:
+                conditions.append(f"{col} = ?")
+                params.append(val)
+        return f"read_parquet('{path}', hive_partitioning=true)", conditions, params
 
     # Flat parquet: entity + filter dims are in-file columns → WHERE conditions.
     where, params = [], []
