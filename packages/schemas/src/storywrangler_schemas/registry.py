@@ -429,6 +429,19 @@ class TransformConfig(BaseModel):
             "temporal components: year, month, day."
         ),
     )
+    defaults: Optional[Dict[str, object]] = Field(
+        None,
+        description=(
+            "Default value per queryable hive level, injected when the caller "
+            "omits the parameter — e.g. {'lang': 'en', 'n': 1}. Overrides the "
+            "auto-discovered default (the first on-disk value alphabetically — "
+            "right for ngram_size=1/granularity=daily, wrong for language "
+            "levels, where 'af' wins the alphabet). Each key must be a "
+            "partition/filter hive level and each value must exist on disk; "
+            "both are validated at registration. Undeclared levels keep the "
+            "auto-discovered default."
+        ),
+    )
     hash_bucket: Optional[str] = Field(
         None,
         description=(

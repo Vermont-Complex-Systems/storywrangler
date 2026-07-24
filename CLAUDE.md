@@ -119,9 +119,15 @@ All other hive levels are auto-discovered and classified:
 - Levels matching `hash_bucket` (string column name) → hash_bucket
 - Everything else → partition (gets auto-default from first on-disk value)
 
-Optional field:
+Optional fields:
 - `filter_dimensions`: non-hive columns inside parquet files where omitting = aggregate
   over all values. E.g. `["sex"]` — omitting sex returns all names.
+- `defaults`: declared default per queryable hive level, e.g. `{"lang": "en", "n": 1}`.
+  Overrides the auto-discovered default (first on-disk value alphabetically — right
+  for `ngram_size=1`, wrong for languages, where `af` wins). Validated at
+  registration: keys must be partition/filter levels, values must exist in the
+  introspected `filter_values` (422 otherwise). Stored in `level_order.default_value`
+  — the query layer is unchanged.
 
 Query-time defaults come from `level_order.default_value` (stored at registration).
 Helper functions `get_partition_defaults()` and `get_queryable_dims()` in

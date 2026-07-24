@@ -68,6 +68,9 @@ NGRAMS = {
         # year/month hive levels are path-pruning derivatives of `date`,
         # not independent query axes.
         "time_partitions": ["year", "month"],
+        # Without this, auto-discovery defaults lang to the first directory
+        # alphabetically — 'af' — so bare queries served Afrikaans.
+        "defaults": {"lang": "en", "n": 1},
     },
     "ownership": _OWNERSHIP,
     "lineage": {"repo": _REPO},
@@ -96,7 +99,8 @@ SPARKLINES = {
         "freq_column": ["freq", "freq_all"],
         "orientation": "type-first",
     },
-    "transform": {"time_dimension": "date", "hash_bucket": "ngram_bucket"},
+    "transform": {"time_dimension": "date", "hash_bucket": "ngram_bucket",
+                  "defaults": {"lang": "en", "n": 1}},
     "ownership": _OWNERSHIP,
     "lineage": {"derived_from": ["bluesky/ngrams"], "repo": _REPO},
 }
