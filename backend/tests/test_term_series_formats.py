@@ -178,18 +178,15 @@ class TestPerMissingTermFallback:
     FLAT = SimpleNamespace(level_order=None, data_location="/d/x.parquet",
                            entity_mapping=None, dataset_id="ngrams")
 
-    def _ctx(self, *, dated=True, type_first=True):
-        # dated by default: the undated+missing+sparkline combination is the
-        # teaching-400 case, tested separately below.
-        date_filter, date_params = (
-            ("date BETWEEN ? AND ?", ["2024-01-01", "2024-01-31"]) if dated
-            else ("1=1", []))
+    def _ctx(self, *, type_first=True):
+        # prepare_term_series always yields a bounded date range (undated
+        # requests are clamped to availability), so the ctx is always dated.
         return SeriesCtx(
             dataset_obj=self.FLAT,
             type_first_obj=SimpleNamespace(dataset_id="sparklines") if type_first else None,
             select_cols="ngram, date, c, NULL, NULL",
             latest_date="2024-01-31",
-            date_filter=date_filter, date_params=date_params,
+            date_filter="date BETWEEN ? AND ?", date_params=["2024-01-01", "2024-01-31"],
             type_col="ngram", time_col="date",
         )
 
@@ -234,9 +231,9 @@ class TestPerMissingTermFallback:
     def test_all_found_skips_scan(self, monkeypatch):
         fast = [("the", "2024-01-01", 5, None, None),
                 ("Zykov", "2024-01-01", 1, None, None)]
-        rows, scan_params = self._run(monkeypatch, self._ctx(dated=False), fast, [])
+        rows, scan_params = self._run(monkeypatch, self._ctx(), fast, [])
         assert rows == fast
-        assert scan_params is None  # scan never ran (undated is fine: no miss)
+        assert scan_params is None  # scan never ran — nothing missing
 
     def test_none_found_scans_all(self, monkeypatch):
         scanned = [("the", "2024-01-01", 5, None, None)]
@@ -244,21 +241,22 @@ class TestPerMissingTermFallback:
         assert rows == scanned
         assert scan_params == ["the", "Zykov", "2024-01-01", "2024-01-31"]
 
-    def test_undated_miss_on_sparkline_dataset_teaches_400(self, monkeypatch):
-        # Undated full history is a fast-path privilege: a vocabulary miss
-        # without dates= must not launch an unbounded scan of the raw tree.
-        import pytest
-        from fastapi import HTTPException
-        with pytest.raises(HTTPException) as exc:
-            self._run(monkeypatch, self._ctx(dated=False), [], [])
-        assert exc.value.status_code == 400
-        assert "Zykov" in exc.value.detail and "dates=" in exc.value.detail
+    def test_out_of_vocab_miss_falls_to_bounded_scan(self, monkeypatch):
+        # The simplified fallback: an out-of-vocabulary term (found by the fast
+        # path? no) is served by the scan, always bounded by the (possibly
+        # availability-clamped) range — no teaching 400, no unbounded walk.
+        fast = [("the", "2024-01-01", 5, None, None)]
+        scanned = [("Zykov", "2024-01-01", 1, None, None)]
+        rows, scan_params = self._run(monkeypatch, self._ctx(), fast, scanned)
+        assert rows == [*fast, *scanned]
+        # only the missing term reaches the scan, and it is date-bounded
+        assert scan_params == ["Zykov", "2024-01-01", "2024-01-31"]
 
-    def test_undated_scan_allowed_without_fast_path(self, monkeypatch):
-        # A dataset with no type-first form lives by the scan — undated
-        # full-history reads are its normal usage (babynames, scisciDB).
+    def test_no_fast_path_scans_directly(self, monkeypatch):
+        # A dataset with no type-first form (babynames, scisciDB) has no fast
+        # path — every term goes straight to the scan.
         scanned = [("the", "2024-01-01", 5, None, None)]
         rows, scan_params = self._run(
-            monkeypatch, self._ctx(dated=False, type_first=False), [], scanned)
+            monkeypatch, self._ctx(type_first=False), [], scanned)
         assert rows == scanned
-        assert scan_params == ["the", "Zykov"]
+        assert scan_params == ["the", "Zykov", "2024-01-01", "2024-01-31"]

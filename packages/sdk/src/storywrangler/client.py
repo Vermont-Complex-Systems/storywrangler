@@ -401,7 +401,7 @@ class InstrumentClient(_SubClient):
             entity: Global entity ID or local ID; omit when the dataset has no
                 entity_mapping.
             dates: A single date ('2024-06-01') or 'start,end' range
-                ('2024-01-01,2024-12-31'); omit for full history (fast-path types only; out-of-vocabulary types need dates= — the server 400s with instructions).
+                ('2024-01-01,2024-12-31'); omit for full history.
             weight: Count measure — one of the registered count_column entries.
             sparkline_dataset: Deprecated. The type-first fast-path companion is
                 resolved from lineage; pass a dataset_id only to override, or ''
@@ -1122,7 +1122,7 @@ class DatasetClient(_SubClient):
             entity: Entity ID (e.g. 'wikidata:Q30') or local ID, where the
                 dataset declares an entity_mapping.
             dates: A single date ('2024-06-01') or 'start,end' range
-                ('2024-01-01,2024-12-31'); omit for full history (fast-path types only; out-of-vocabulary types need dates= — the server 400s with instructions).
+                ('2024-01-01,2024-12-31'); omit for full history.
             weight: Count measure — one of the registered count_column entries.
             include: Provenance role(s) to attach per date (e.g. 'articles'), or
                 'all'; resolved from the dataset's lineage.

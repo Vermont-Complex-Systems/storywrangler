@@ -213,3 +213,52 @@ class TestRequireSingleDates:
 
     def test_missing_optional_passes(self):
         require_single_dates([("dates2", None)], required=False)
+
+
+class TestAvailabilityRangeFor:
+    """availability_range_for backs the undated-request clamp: (min, max) for a
+    slice so the fallback scan is bounded instead of walking the whole tree."""
+
+    def _ds(self, availability):
+        from tests.conftest import make_dataset_obj
+        ds = make_dataset_obj("/data")
+        ds.manifest = {"availability": availability}
+        return ds
+
+    def test_reddit_style_nlang(self):
+        from app.core.query_utils import availability_range_for
+        ds = self._ds({"1": {"en": {"min": "2010-01-01", "max": "2022-12-31"}}})
+        assert availability_range_for(ds, None, {"n": 1, "lang": "en"}) == (
+            "2010-01-01", "2022-12-31")
+
+    def test_wikimedia_style_entity_first(self):
+        from app.core.query_utils import availability_range_for
+        ds = self._ds({"United States": {"1": {"daily": {"min": "2015-01-01", "max": "2026-04-20"}}}})
+        assert availability_range_for(
+            ds, "United States", {"ngram_size": 1, "granularity": "daily"}) == (
+            "2015-01-01", "2026-04-20")
+
+    def test_absent_is_none_pair(self):
+        from app.core.query_utils import availability_range_for
+        assert availability_range_for(self._ds({}), None, {}) == (None, None)
+
+
+class TestWidestAvailability:
+    """_widest_availability spans primary + type-first form (independent
+    pipelines), so a fresh sparkline never truncates the clamp range."""
+
+    def _obj(self, lo, hi):
+        from types import SimpleNamespace
+        return SimpleNamespace(manifest={"availability": {"min": lo, "max": hi}})
+
+    def test_widest_across_both(self):
+        from app.core.term_series import _widest_availability
+        primary = self._obj("2015-01-01", "2026-01-01")   # lags
+        sparkline = self._obj("2015-06-01", "2026-04-20")  # fresher max
+        assert _widest_availability(primary, sparkline, None, {}) == (
+            "2015-01-01", "2026-04-20")
+
+    def test_primary_only(self):
+        from app.core.term_series import _widest_availability
+        assert _widest_availability(self._obj("2015-01-01", "2026-01-01"), None, None, {}) == (
+            "2015-01-01", "2026-01-01")

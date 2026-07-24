@@ -27,16 +27,17 @@ Contracts worth knowing (the why behind the branches):
   read as-is and mislabelled (a daily-only sparkline answering
   granularity=weekly). Such companions are skipped; the scan is correct.
 
-  Undated = fast-path privilege — full history is cheap on a bucket lookup
-  and ruinous on a big date-first scan; a corpus registers a type-first
-  companion precisely because its tree is too big to scan casually. So a
-  vocabulary miss without dates= is a teaching 400, while datasets with no
-  fast path (their scan IS the read) keep undated full history.
+  Bounded scan — the fallback scans only the terms the fast path missed, over
+  the request's date range. An undated request is clamped to the slice's
+  availability range in prepare_term_series, so the scan is always bounded
+  and directory-pruned — never an open walk of the whole date-first tree. A
+  self-served type-first dataset (bluesky) has no date-first tree behind it,
+  so its bucket read is final: a miss is an honest empty, no scan.
 
   Honest results — a term with no data yields an empty series; a real
   failure (timeout, query error) raises through handle_query_error as
-  504/500, never an empty result. A self-served type-first dataset has no
-  scan behind its bucket read, so that read runs strict.
+  504/500, never an empty result. A self-served type-first dataset runs its
+  bucket read strict (no fallback to absorb a real error).
 """
 
 import logging
@@ -55,7 +56,7 @@ from .mongo_query import (
     series_projection,
 )
 from .query_utils import (
-    dates_mode, extract_filter_vals, latest_available_for, parse_dates,
+    availability_range_for, dates_mode, extract_filter_vals, parse_dates,
     require_dates_supported, require_types_counts, resolve_companions,
     resolve_count_column, resolve_entity, resolve_series_columns,
 )
@@ -87,7 +88,7 @@ class SeriesCtx:
 
     # parquet path
     select_cols: Optional[str] = None      # fixed 5-column SELECT list (see _series_select)
-    date_filter: str = "1=1"               # SQL time condition; "1=1" == full history
+    date_filter: str = "1=1"               # SQL time condition (always a real range post-prepare)
     date_params: list = field(default_factory=list)
     companions: Optional[dict] = None      # resolve_companions() result (type_first + documents)
     type_first_obj: Any = None             # the fast path's dataset, None when there is none
@@ -95,10 +96,6 @@ class SeriesCtx:
 
     # mongo path
     date_range: Optional[list] = None      # [start, end] or None for full history
-
-    @property
-    def undated(self) -> bool:
-        return self.date_filter == "1=1"
 
 
 # ── 1. Request setup ──────────────────────────────────────────────────────────
@@ -177,20 +174,22 @@ async def prepare_term_series(request, db, domain, dataset, entity, weight, date
         )
         type_first_obj = None
 
-    # latest_available_date is the max of primary and sparkline availability —
-    # the two pipelines advance independently, and the undated no-data 404
-    # must not fire just because the primary's manifest lags a fresh sparkline.
-    latest_date = latest_available_for(dataset_obj, local_id, filter_vals)
-    if type_first_obj is not None:
-        spark_latest = latest_available_for(type_first_obj, local_id, filter_vals)
-        latest_date = max((d for d in (latest_date, spark_latest) if d), default=None)
-    if date_range is None and not latest_date:
-        raise HTTPException(status_code=404, detail="No data found for this dataset")
+    # Availability across primary + sparkline (the two pipelines advance
+    # independently). latest_date defaults the UI's date picker; the [min, max]
+    # range clamps an undated request so its fallback scan stays bounded.
+    lo, hi = _widest_availability(dataset_obj, type_first_obj, local_id, filter_vals)
+    latest_date = hi
+    if date_range is None:
+        if not hi:
+            raise HTTPException(status_code=404, detail="No data found for this dataset")
+        # Undated → the full available range: same series for an in-vocabulary
+        # term (its whole history is within [lo, hi]), but a fallback scan for
+        # an out-of-vocabulary term now prunes to those dates instead of
+        # walking the entire date-first tree.
+        date_range = [lo or hi, hi]
 
-    if date_range:
-        date_filter, date_params = f"{time_col} BETWEEN ? AND ?", [date_range[0], date_range[1]]
-    else:
-        date_filter, date_params = "1=1", []
+    date_filter = f"{time_col} BETWEEN ? AND ?"
+    date_params = [date_range[0], date_range[1]]
 
     return SeriesCtx(
         dataset_obj=dataset_obj,
@@ -243,6 +242,25 @@ def _series_select(dataset_obj, weight, type_col, time_col) -> tuple:
     return select_cols, cols
 
 
+def _widest_availability(dataset_obj, type_first_obj, local_id, filter_vals) -> tuple:
+    """(min, max) available dates across the primary and its type-first form.
+
+    The two are built by separate pipelines that advance independently, so the
+    widest span is the honest coverage — a fresh sparkline must not truncate a
+    request, nor a lagging primary manifest hide dates the sparkline has.
+    """
+    los, his = [], []
+    for obj in (dataset_obj, type_first_obj):
+        if obj is None:
+            continue
+        lo, hi = availability_range_for(obj, local_id, filter_vals)
+        if lo:
+            los.append(lo)
+        if hi:
+            his.append(hi)
+    return (min(los) if los else None, max(his) if his else None)
+
+
 def _companion_covers(companion_obj, filter_vals: dict) -> bool:
     """Can the companion express every request filter dim as a hive level?
 
@@ -265,11 +283,11 @@ def _uncovered_dims(companion_obj, filter_vals: dict) -> list:
 async def term_series_rows(domain: str, ctx: SeriesCtx, terms: List[str]) -> list:
     """(type, date, count, rank, freq) rows for *terms*, fast path first.
 
-    Bucket point lookup on the type-first form, then a date-first scan for
-    the terms it did not find — per missing term, so a batch mixing
+    Bucket point lookup on the type-first form, then a bounded date-first scan
+    for the terms it did not find — per missing term, so a batch mixing
     vocabulary and out-of-vocabulary terms never returns a silent empty
     because a sibling hit. A self-served type-first dataset has no date-first
-    tree, so its bucket read is final. Policy details: module docstring.
+    tree, so its bucket read is final. Details: module docstring.
     """
     if ctx.is_mongo:
         return await _mongo_rows(domain, ctx, terms)
@@ -281,7 +299,6 @@ async def term_series_rows(domain: str, ctx: SeriesCtx, terms: List[str]) -> lis
     missing = [t for t in terms if t not in {r[0] for r in rows}]
     if not missing:
         return rows
-    _require_dates_for_scan(domain, ctx, missing)
 
     if rows:
         log.info("%s/term-series: %d/%d terms missing from sparkline; scanning %s",
@@ -321,33 +338,16 @@ async def _fast_rows(domain: str, ctx: SeriesCtx, terms: List[str]) -> list:
         return await run_blocking(_read)
 
 
-def _require_dates_for_scan(domain: str, ctx: SeriesCtx, missing: List[str]) -> None:
-    """400 when an undated request needs the scan on a sparkline-backed dataset.
-
-    (Undated = fast-path privilege — see the module docstring.) Datasets with
-    no type-first form pass: the scan is their normal read.
-    """
-    if ctx.type_first_obj is None or not ctx.undated:
-        return
-    raise HTTPException(
-        status_code=400,
-        detail=(
-            f"{missing} not in the precomputed fast-path vocabulary of "
-            f"'{domain}/{ctx.dataset_obj.dataset_id}' — an undated request "
-            "would scan the full date-first history. Pass dates= to bound "
-            "the scan (e.g. dates=2024-01-01,2024-12-31; latest available: "
-            f"{ctx.latest_date}), or drop those types."
-        ),
-    )
-
-
 async def _scan_rows(domain: str, ctx: SeriesCtx, terms: List[str]) -> list:
-    """Date-first scan for *terms* (the terms the fast path did not find)."""
+    """Date-first scan for *terms* (the terms the fast path did not find).
+
+    Bounded by ctx.date_filter — always a real range, since prepare clamps an
+    undated request to the slice's availability — so DuckDB prunes to those
+    directories rather than walking the whole tree.
+    """
     from_clause, extra_where, extra_params = _scan_target(ctx)
     placeholders = ", ".join(["?"] * len(terms))
-    where = [f"{ctx.type_col} IN ({placeholders})"]
-    if not ctx.undated:
-        where.append(ctx.date_filter)
+    where = [f"{ctx.type_col} IN ({placeholders})", ctx.date_filter]
     where.extend(extra_where)
     sql = (
         f"SELECT {ctx.select_cols} FROM {from_clause} "

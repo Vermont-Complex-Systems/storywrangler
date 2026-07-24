@@ -441,22 +441,38 @@ def latest_from_manifest(dataset_obj, local_id, granularity=None):
     return _find_max(entry, granularity)
 
 
-def latest_available_for(dataset_obj, local_id, filter_vals: Optional[dict] = None):
-    """Latest available date, navigating availability by a request's values.
+def _availability_leaf_for(dataset_obj, local_id, filter_vals: Optional[dict] = None):
+    """The availability leaf (``{"min", "max", ...}``) for a request's slice.
 
-    Generalises latest_from_manifest for the generic term-series endpoint: the
-    availability tree nests differently per dataset (reddit `{n: {lang: ...}}`,
-    wikimedia `{country: {ngram_size: {granularity: ...}}}`), so rather than
-    matching a single key, descend preferring any level key that equals the
+    The availability tree nests differently per dataset (reddit `{n: {lang:
+    ...}}`, wikimedia `{country: {ngram_size: {granularity: ...}}}`), so rather
+    than matching a single key, descend preferring any level key that equals the
     entity local_id or one of the request's filter values, falling back to the
-    first branch when nothing matches. Returns the leaf `max`, or None.
+    first branch when nothing matches. Returns the leaf dict, or None.
     """
     node = (dataset_obj.manifest or {}).get("availability", {})
     targets = {str(local_id)} if local_id is not None else set()
     targets.update(str(v) for v in (filter_vals or {}).values())
     while isinstance(node, dict):
         if "max" in node:
-            return node["max"]
+            return node
         match = next((node[k] for k in node if str(k) in targets), None)
         node = match if match is not None else (next(iter(node.values()), None) if node else None)
     return None
+
+
+def latest_available_for(dataset_obj, local_id, filter_vals: Optional[dict] = None):
+    """Latest available date for a request's slice (the leaf `max`), or None."""
+    leaf = _availability_leaf_for(dataset_obj, local_id, filter_vals)
+    return leaf.get("max") if leaf else None
+
+
+def availability_range_for(dataset_obj, local_id, filter_vals: Optional[dict] = None):
+    """(min, max) available dates for a request's slice — (None, None) if absent.
+
+    The generic term-series endpoint clamps an undated request to this range so
+    the fallback scan is always bounded (and directory-pruned) instead of
+    walking the whole date-first tree.
+    """
+    leaf = _availability_leaf_for(dataset_obj, local_id, filter_vals)
+    return (leaf.get("min"), leaf.get("max")) if leaf else (None, None)
