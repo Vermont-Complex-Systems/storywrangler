@@ -82,6 +82,44 @@ def _parse_reference_value(rv: Optional[str]):
         )
 
 
+def _parse_stop_lens(s: Optional[str]):
+    """Coerce the ``stop_lens`` query param ``'lo,hi'`` into a ``(float, float)``.
+
+    Shifterator's neutral-word filter: words whose labMT score falls in the
+    closed interval ``[lo, hi]`` are dropped before the shift is computed.
+    Absent/blank → ``None`` (no lens). Bounds may be given in either order — the
+    wordshift binding normalizes them.
+    """
+    if s is None or s.strip() == "":
+        return None
+    parts = [p.strip() for p in s.split(",")]
+    if len(parts) != 2:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid stop_lens: {s!r}. Use two numbers 'lo,hi' (e.g. '4,6').",
+        )
+    try:
+        return (float(parts[0]), float(parts[1]))
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid stop_lens: {s!r}. Both bounds must be numbers (e.g. '4,6').",
+        )
+
+
+def _parse_stop_words(s: Optional[str]):
+    """Coerce the ``stop_words`` query param into a set of words to exclude.
+
+    Comma-separated; each word is excluded from the shift entirely regardless of
+    its score (Shifterator's ``stop_words``). Absent/blank → ``None`` (exclude
+    nothing).
+    """
+    if s is None or s.strip() == "":
+        return None
+    words = {w.strip() for w in s.split(",") if w.strip()}
+    return words or None
+
+
 # ── top-ngrams (generic) ──────────────────────────────────────────────────────
 
 async def run_top_ngrams(
@@ -573,6 +611,8 @@ async def weighted_avg_wordshift(
     weight: Optional[str] = Query(None, description="Count measure for both systems — one of the dataset's endpoint_schema.count_column entries. Defaults to the first registered measure."),
     ngram_limit: int = Query(10000, description="Max types to load per system before computing (0 = no limit)"),
     wordshift_limit: int = Query(200, description="Truncate per-word output to the top N by |shift| (0 = all). Component sums are always computed over the full vocabulary."),
+    stop_lens: Optional[str] = Query(None, description="Neutral-word filter 'lo,hi' (e.g. '4,6'): drop words whose labMT score falls in the closed interval [lo, hi] before computing the shift, renormalizing over the survivors. Omit to keep every scored word. Bounds may be given in either order."),
+    stop_words: Optional[str] = Query(None, description="Comma-separated words to exclude from the shift entirely regardless of score (e.g. 'rt,amp'). Omit to exclude nothing."),
     db: AsyncSession = Depends(get_session),
 ):
     """Weighted-average sentiment word shift between two type-frequency systems.
@@ -604,6 +644,8 @@ async def weighted_avg_wordshift(
     dataset_obj = await _resolve_types_counts(db, domain, dataset, dates, dates2)
 
     ref_val = _parse_reference_value(reference_value)
+    stop_lens_parsed = _parse_stop_lens(stop_lens)
+    stop_words_parsed = _parse_stop_words(stop_words)
 
     # ?dim=val → system 1, ?dim2=val → system 2 (same convention as /allotax):
     # system 2 inherits system 1's filters per dimension unless overridden.
@@ -666,6 +708,7 @@ async def weighted_avg_wordshift(
         try:
             result = wordshift.weighted_avg_shift(
                 t2f1, t2f2, lexicon=lexicon, reference_value=ref_val, top_n=wordshift_limit,
+                stop_lens=stop_lens_parsed, stop_words=stop_words_parsed,
             )
         except ValueError as e:
             raise HTTPException(status_code=400, detail=f"wordshift rejected input: {e}")
@@ -679,6 +722,8 @@ async def weighted_avg_wordshift(
                 "system2": {"entity": entity2, "dates": dates2, "filters": filter_vals2, "types": len(sys2["types"])},
                 "lexicon": lexicon,
                 "weight": count_col,
+                "stop_lens": list(stop_lens_parsed) if stop_lens_parsed else None,
+                "stop_words": sorted(stop_words_parsed) if stop_words_parsed else None,
                 "domain": domain,
                 "dataset": dataset,
                 "dataset_version": dataset_obj.version,
