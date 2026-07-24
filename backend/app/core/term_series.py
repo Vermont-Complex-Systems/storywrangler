@@ -1,33 +1,53 @@
-"""Shared helpers for the generic sparkline-backed endpoints (/storywrangler
-term-series and top-ngrams).
+"""The generic term-series query engine (/storywrangler/term-series [+ /batch]).
 
-These consume hive-partitioned ngram datasets with precomputed,
-hash-bucket-sharded sparkline files. Everything that is not genuinely
-endpoint-specific lives here:
+How a request flows — the endpoints in routers/storywrangler.py call exactly
+these four, in order:
 
-  ngrams_context()        — (filter_vals, entity base path) for partition scans
-  log_fast_path_miss()    — classify a sparkline failure before scan fallback
-  bucket_files()          — glob the hash-bucket dirs that can hold a set of terms
-  fetch_sparkline_rows()  — bucket-routed sparkline lookup for a set of terms
-  fetch_provenance()      — bucket-routed source-document lookup (?include=)
-  run_top_ngrams()        — the full top-ngrams endpoint body (off the event loop)
-  prepare_term_series()   — shared term-series setup (dataset, cols, entity, path)
-  term_series_rows()      — fast sparkline lookup / dist-tree scan for terms
-  fetch_includes()        — resolve and fetch ?include= provenance companions
-  series_row()            — shape one term-series row for the response
+  1. prepare_term_series()  — resolve the dataset and everything the query
+                              needs (columns, entity, date range, companions),
+                              validated; returns a SeriesCtx.
+  2. term_series_rows()     — load (type, date, count, rank, freq) rows:
+                              type-first bucket lookup first, then a
+                              date-first scan for the terms it missed
+                              (mongodb datasets take their own path).
+  3. fetch_includes()       — optional ?include= provenance documents.
+  4. series_row()           — shape each row for the response.
+
+Contracts worth knowing (the why behind the branches):
+
+  Declared companions — the fast path is the types-counts dataset with
+  ``orientation: type-first`` whose ``lineage.derived_from`` names the
+  primary, or the primary itself when it declares that orientation
+  (term-bucketed corpora with no date-first tree). ?include= sources are the
+  ``type-documents`` companions, addressed by their declared ``role``.
+  Nothing is sniffed from names or structure.
+
+  Coverage gate — a companion answers by pinning the request's filter dims
+  into its hive path, so a dim it has no level for means its files would be
+  read as-is and mislabelled (a daily-only sparkline answering
+  granularity=weekly). Such companions are skipped; the scan is correct.
+
+  Undated = fast-path privilege — full history is cheap on a bucket lookup
+  and ruinous on a big date-first scan; a corpus registers a type-first
+  companion precisely because its tree is too big to scan casually. So a
+  vocabulary miss without dates= is a teaching 400, while datasets with no
+  fast path (their scan IS the read) keep undated full history.
+
+  Honest results — a term with no data yields an empty series; a real
+  failure (timeout, query error) raises through handle_query_error as
+  504/500, never an empty result. A self-served type-first dataset has no
+  scan behind its bucket read, so that read runs strict.
 """
 
 import logging
-from types import SimpleNamespace
-from typing import List, Optional
+from dataclasses import dataclass, field
+from typing import Any, List, Optional
 
 from fastapi import HTTPException
 
 from .duckdb_client import get_duckdb_client, run_blocking
 from .duckdb_query import (
-    assign_bucket, bucket_override_key, build_hive_path, derive_time_partitions,
-    entity_base_path, get_bucket_config, handle_query_error, is_data_missing,
-    load_system, resolve_bucket_count,
+    build_hive_path, derive_time_partitions, handle_query_error, is_data_missing,
 )
 from .mongo_client import QUERY_TIMEOUT_S, handle_mongo_error, run_blocking_mongo
 from .mongo_query import (
@@ -35,383 +55,64 @@ from .mongo_query import (
     series_projection,
 )
 from .query_utils import (
-    dates_mode, extract_filter_vals, get_queryable_dims, latest_available_for,
-    parse_dates, require_dates_supported, require_types_counts, resolve_companions,
+    dates_mode, extract_filter_vals, latest_available_for, parse_dates,
+    require_dates_supported, require_types_counts, resolve_companions,
     resolve_count_column, resolve_entity, resolve_series_columns,
 )
 from .registry_utils import get_latest_entry
 from .timing import timed
+from .type_first import fetch_provenance, fetch_sparkline_rows
 
 log = logging.getLogger(__name__)
 
 
-def ngrams_context(ngrams_obj, local_id, dim_values: dict) -> tuple:
-    """Build (filter_vals, entity_base_path) for term-series partition scans."""
-    dims = get_queryable_dims(ngrams_obj)
-    filter_vals = {d: dim_values[d] for d in dims if d in dim_values}
-    return filter_vals, entity_base_path(ngrams_obj, local_id, filter_vals)
+@dataclass
+class SeriesCtx:
+    """One term-series request, resolved and validated.
 
-
-def log_fast_path_miss(label: str, exc: Exception) -> None:
-    """Classify a sparkline fast-path failure before falling back to the scan."""
-    if is_data_missing(exc):
-        log.info("%s: sparkline files missing; falling back to partition scan", label)
-    else:
-        log.warning(
-            "%s: sparkline fast path failed (%s); falling back to partition scan",
-            label, exc,
-        )
-
-
-def bucket_files(dataset_obj, terms, *, entity_value=None, filter_vals=None) -> List[str]:
-    """Glob paths of the hash-bucket directories that can contain *terms*.
-
-    Generic over the dataset's level layout: *filter_vals* holds the
-    partition-level values ({"ngram_size": 1} for wikimedia, {"n": 1,
-    "lang": "en"} for reddit), *entity_value* the entity level when one
-    exists. Each bucket is globbed with ``/*.parquet`` — never a pinned
-    filename: DuckLake-backed buckets hold several uniquely-named
-    ``ducklake-<uuid>.parquet`` files whose set changes on every compaction.
+    Built once by prepare_term_series(); read by term_series_rows() and
+    fetch_includes(). Two variants share it: parquet requests fill the
+    "parquet path" fields, mongodb pass-through requests the "mongo path"
+    ones (and set latest_date later, from a live probe).
     """
-    hb = get_bucket_config(dataset_obj)
-    key = bucket_override_key(dataset_obj, entity_value=entity_value, filter_vals=filter_vals)
-    n_buckets = resolve_bucket_count(hb, key)
-    buckets = {assign_bucket(t, n_buckets) for t in terms}
-    return [
-        build_hive_path(
-            dataset_obj,
-            filter_vals=filter_vals,
-            entity_value=entity_value,
-            bucket_value=b,
-            glob_suffix="/*.parquet",
-        )
-        for b in sorted(buckets)
-    ]
+
+    dataset_obj: Any                       # RegistryEntry of the queried primary
+    is_mongo: bool = False
+    filter_vals: dict = field(default_factory=dict)   # validated dims, defaults injected
+    local_id: Optional[str] = None         # resolved entity value (None: no entity_mapping)
+    type_col: str = "types"                # registered type column
+    time_col: str = "date"                 # registered time column
+    cols: dict = field(default_factory=dict)  # {"count","rank","freq"}; rank/freq None when undeclared
+    latest_date: Optional[str] = None      # max availability across primary + type-first form
+
+    # parquet path
+    select_cols: Optional[str] = None      # fixed 5-column SELECT list (see _series_select)
+    date_filter: str = "1=1"               # SQL time condition; "1=1" == full history
+    date_params: list = field(default_factory=list)
+    companions: Optional[dict] = None      # resolve_companions() result (type_first + documents)
+    type_first_obj: Any = None             # the fast path's dataset, None when there is none
+    serves_itself: bool = False            # the queried dataset IS its type-first form
+
+    # mongo path
+    date_range: Optional[list] = None      # [start, end] or None for full history
+
+    @property
+    def undated(self) -> bool:
+        return self.date_filter == "1=1"
 
 
-def _bucket_read(
-    conn, dataset_obj, terms: List[str], *, entity_value, filter_vals: dict,
-    select_cols: str, date_condition: str, date_params: list, label: str,
-    type_col: str, time_col: str, order_extra: Optional[str] = None,
-    strict: bool = False,
-) -> list:
-    """Bucket-routed read shared by the sparkline and provenance lookups.
-
-    Globs the hash buckets that can hold *terms*, selects *select_cols* where
-    the type is in *terms* and *date_condition* holds, ordered by (type, time)
-    plus *order_extra* when given. Returns rows — or [] with a classified log
-    line on failure (a missing shard is expected; anything else is warned).
-
-    *strict* is for reads with no fallback behind them (a type-first primary
-    serving itself): a missing shard still yields [], but any other failure
-    re-raises so the caller's handle_query_error classifies it as 504/500
-    instead of it reading as "no data".
-    """
-    files = bucket_files(dataset_obj, terms, entity_value=entity_value, filter_vals=filter_vals)
-    file_list = ", ".join(f"'{f}'" for f in files)
-    placeholders = ", ".join(["?"] * len(terms))
-    order_by = f"{type_col}, {time_col}" + (f", {order_extra}" if order_extra else "")
-    try:
-        return conn.execute(
-            f"""
-            SELECT {select_cols}
-            FROM read_parquet([{file_list}])
-            WHERE {type_col} IN ({placeholders})
-              AND {date_condition}
-            ORDER BY {order_by}
-            """,
-            [*terms, *date_params],
-        ).fetchall()
-    except Exception as exc:
-        if strict and not is_data_missing(exc):
-            raise
-        log_fast_path_miss(label, exc)
-        return []
-
-
-def fetch_sparkline_rows(
-    conn, sparkline_obj, terms: List[str],
-    *, entity_value, filter_vals: dict, select_cols: str,
-    date_condition: str, date_params: list, label: str,
-    type_col: str = "ngram", time_col: str = "date",
-    strict: bool = False,
-) -> list:
-    """Bucket-routed sparkline lookup for *terms*.
-
-    Generic over the dataset's layout: *filter_vals* holds the partition
-    values ({"ngram_size": n} for wikimedia, {"n": n, "lang": lang} for
-    reddit/bluesky), *entity_value* the entity level when one exists, and
-    *select_cols* the SELECT list (columns vary per domain: pv_* for
-    wikimedia, count/rank/freq for reddit/bluesky). *type_col*/*time_col* are
-    the registered type/time columns (default ngram/date). Rows come back
-    ordered by type, time — or [] with a classified log line on failure.
-    """
-    return _bucket_read(
-        conn, sparkline_obj, terms, entity_value=entity_value, filter_vals=filter_vals,
-        select_cols=select_cols, date_condition=date_condition, date_params=date_params,
-        label=label, type_col=type_col, time_col=time_col, strict=strict,
-    )
-
-
-def fetch_provenance(
-    conn, prov_obj, terms: List[str],
-    *, entity_value, filter_vals: dict,
-    date_condition: str, date_params: list, label: str,
-    time_col: str = "date",
-) -> dict:
-    """Ranked source documents per (type, date) for *terms* — the include=.
-
-    Reads a type-documents provenance dataset (doc/score/order columns from its
-    endpoint_schema) via the same hash-bucket routing as the sparklines, and
-    returns ``{(type, date): [[document, score], ...]}`` ordered by the declared
-    order_column (or score descending). *time_col* is the registered time column
-    (default 'date'). Missing files or an undeclared doc/score column yield
-    ``{}`` (a classified log line, same as the sparkline path).
-    """
-    ep = prov_obj.endpoint_schema or {}
-    type_col = ep.get("type_column") or "ngram"
-    doc_col = ep.get("doc_column")
-    score_col = ep.get("score_column")
-    if not doc_col or not score_col:
-        return {}
-    order_by = ep.get("order_column") or f"{score_col} DESC"
-
-    rows = _bucket_read(
-        conn, prov_obj, sorted(terms), entity_value=entity_value, filter_vals=filter_vals,
-        select_cols=f"{type_col}, {time_col}, {doc_col}, {score_col}",
-        date_condition=date_condition, date_params=date_params, label=label,
-        type_col=type_col, time_col=time_col, order_extra=order_by,
-    )
-    out: dict = {}
-    for term, dt, doc, score in rows:
-        out.setdefault((term, str(dt)), []).append([doc, float(score) if score else 0.0])
-    return out
-
-
-async def run_top_ngrams(
-    dataset_obj,
-    label: str,
-    local_id: Optional[str],
-    dates: Optional[str],
-    dates2: Optional[str],
-    filter_vals: dict,
-    limit: int,
-    metadata: dict,
-    count_col: Optional[str] = None,
-) -> dict:
-    """The generic top-ngrams endpoint body, executed off the event loop.
-
-    Loads one types-counts system (or two for a temporal comparison keyed
-    by date range, start/end joined with "_") and formats the response.
-    *dates* may be None for all-time / dateless datasets. *count_col*
-    selects a measure from the registered count-column menu (resolve via
-    resolve_count_column); None uses the dataset default.
-    """
-    if dates2 and parse_dates(dates) == parse_dates(dates2):
-        # Identical ranges collide into one JSON key and silently drop system 1
-        # — reject rather than return half the comparison with HTTP 200.
-        raise HTTPException(
-            status_code=400,
-            detail="dates and dates2 resolve to the same range; "
-                   "use different dates to compare two systems.",
-        )
-
-    def _query():
-        with handle_query_error(label):
-            with get_duckdb_client().timed_connect() as conn:
-                dr1 = parse_dates(dates)
-                sys1 = load_system(conn, dataset_obj, local_id, dr1, filter_vals, limit, count_col=count_col)
-                formatted1 = [{"types": t, "counts": c} for t, c in zip(sys1["types"], sys1["counts"])]
-
-                if dates2:
-                    dr2 = parse_dates(dates2)
-                    sys2 = load_system(conn, dataset_obj, local_id, dr2, filter_vals, limit, count_col=count_col)
-                    formatted2 = [{"types": t, "counts": c} for t, c in zip(sys2["types"], sys2["counts"])]
-                    key1 = dr1[0] if dr1[0] == dr1[1] else f"{dr1[0]}_{dr1[1]}"
-                    key2 = dr2[0] if dr2[0] == dr2[1] else f"{dr2[0]}_{dr2[1]}"
-                    return {key1: formatted1, key2: formatted2, "metadata": metadata}
-
-                return {"data": formatted1, "metadata": metadata}
-
-    return await run_blocking(_query)
-
-
-def _series_select(dataset_obj, weight, type_col, time_col) -> tuple:
-    """(select_cols, cols) for a term-series row under the chosen weight.
-
-    cols is {count, rank, freq} with None for companions the dataset did not
-    declare (resolve_series_columns) — the response omits those. select_cols
-    keeps a fixed 5-column shape (type, time, count, rank, freq), NULL-filling
-    undeclared companions so row unpacking stays positional. type_col/time_col
-    are the registered type/time columns.
-    """
-    cols = resolve_series_columns(dataset_obj, weight)
-    if cols is None:
-        cols = {"count": resolve_count_column(dataset_obj, weight), "rank": None, "freq": None}
-    select_cols = (
-        f"{type_col}, {time_col}, {cols['count']}, "
-        f"{cols['rank'] or 'NULL'}, {cols['freq'] or 'NULL'}"
-    )
-    return select_cols, cols
-
-
-def series_row(row, cols, includes=None) -> dict:
-    """Shape one term-series row, omitting companions the dataset didn't declare.
-
-    *includes* is ``{dataset_id: {(type, date): [[doc, score], ...]}}`` — each
-    requested ?include= provenance dataset's documents, attached under its id.
-    """
-    date_str = str(row[1])
-    entry = {"date": date_str, "counts": int(row[2]) if row[2] else 0}
-    if cols["rank"] is not None:
-        entry["rank"] = int(row[3]) if row[3] else 0
-    if cols["freq"] is not None:
-        entry["freq"] = float(row[4]) if row[4] else 0.0
-    for prov_id, prov in (includes or {}).items():
-        entry[prov_id] = prov.get((row[0], date_str), [])
-    return entry
-
-
-async def _resolve_include(db, domain, token, doc_companions) -> tuple:
-    """Resolve one ?include= token → (key, prov_obj).
-
-    A token is a declared provenance *role* (the clean surface — resolved from
-    the primary's lineage companions), falling back to a raw type-documents
-    dataset id (deprecated alias). Unknown or non-type-documents tokens are a
-    400, not a silently empty field. The returned *key* is the token as asked,
-    so the response nests under the role (or id) the caller used.
-    """
-    if token in doc_companions:
-        return token, doc_companions[token]
-    prov_obj = await get_latest_entry(db, domain, token)
-    if not prov_obj:
-        raise HTTPException(
-            status_code=400,
-            detail=f"include '{token}' is not a known provenance role or dataset "
-                   f"in '{domain}'. Available roles: {sorted(doc_companions)}",
-        )
-    if (prov_obj.endpoint_schema or {}).get("type") != "type-documents":
-        raise HTTPException(
-            status_code=400,
-            detail=f"include '{domain}/{token}' is not a type-documents dataset "
-                   "(register it with endpoint_schema.type='type-documents').",
-        )
-    return token, prov_obj
-
-
-def _companion_covers(companion_obj, filter_vals: dict) -> bool:
-    """Can the companion express every request filter dim as a hive level?
-
-    A bucket-routed companion answers a request by pinning the filter dims
-    into its hive path. A dim it has no level for would be silently ignored —
-    the read would return rows from whatever slice its files hold, mislabelled
-    as the requested one (a daily-only sparkline answering granularity=weekly).
-    Not expressible → no bucket read; the date-first scan serves the request
-    correctly. A self-served type-first dataset covers by construction (the
-    request dims come from its own level_order).
-
-    A dim the companion *does* level on but holds no data for (granularity=
-    weekly pinned into a daily-only tree) needs no check: the path misses,
-    the read returns [], and the scan takes over.
-    """
-    levels = {lv["column"] for lv in (getattr(companion_obj, "level_order", None) or [])}
-    return all(dim in levels for dim in filter_vals)
-
-
-async def fetch_includes(db, domain, include, ctx, terms, include_dates=None) -> dict:
-    """Resolve and fetch each ?include= provenance companion for *terms*.
-
-    Returns ``{key: {(type, date): [[doc, score], ...]}}`` keyed by role (or
-    dataset id for the deprecated raw-id form). *include* is a comma-separated
-    list of provenance roles declared on the primary's lineage companions, or
-    the literal ``all`` for every companion.
-
-    *include_dates* (comma-separated exact dates) narrows the provenance read
-    to those dates only, independent of the series range — a UI renders
-    documents for the hovered/comparison dates, not for every point of a
-    full-history sparkline. Omitted → the series' own date bounds apply.
-
-    A companion that cannot express the request's filter dims as hive levels
-    is skipped with a log line (its documents would come from the wrong slice)
-    — same sparse-result semantics as a companion with no data.
-    """
-    tokens = [p.strip() for p in (include or "").split(",") if p.strip()]
-    # Provenance is a bucket-routed parquet read; mongodb pass-through datasets
-    # have no type-documents companions, so include is a no-op there.
-    if not tokens or not terms or getattr(ctx, "is_mongo", False):
-        return {}
-
-    date_condition, date_params = ctx.date_filter, ctx.date_params
-    dates = [d.strip() for d in (include_dates or "").split(",") if d.strip()]
-    if dates:
-        placeholders = ", ".join(["?"] * len(dates))
-        date_condition, date_params = f"{ctx.time_col} IN ({placeholders})", dates
-
-    doc_companions = (getattr(ctx, "companions", None) or {}).get("documents", {})
-    selected: dict = {}
-    for token in tokens:
-        if token == "all":
-            selected.update(doc_companions)
-            continue
-        key, prov_obj = await _resolve_include(db, domain, token, doc_companions)
-        selected[key] = prov_obj
-
-    out: dict = {}
-    for key, prov_obj in selected.items():
-        if not _companion_covers(prov_obj, ctx.filter_vals):
-            log.info(
-                "include %r (%s/%s): companion has no hive level for dims %s; "
-                "skipping (its documents would come from the wrong slice)",
-                key, domain, prov_obj.dataset_id,
-                sorted(set(ctx.filter_vals)
-                       - {lv["column"] for lv in (getattr(prov_obj, "level_order", None) or [])}),
-            )
-            continue
-        def _fetch(prov_obj=prov_obj):
-            with get_duckdb_client().timed_connect() as conn:
-                return fetch_provenance(
-                    conn, prov_obj, sorted(terms),
-                    entity_value=ctx.local_id, filter_vals=ctx.filter_vals,
-                    date_condition=date_condition, date_params=date_params,
-                    label=f"{domain}/{prov_obj.dataset_id}", time_col=ctx.time_col,
-                )
-        with timed("include", f"provenance {key}"):
-            out[key] = await run_blocking(_fetch)
-    return out
-
-
-async def _resolve_sparkline_obj(db, domain, dataset_obj, companions, sparkline_dataset):
-    """The dataset term-series bucket-routes for its fast path reads.
-
-    Default (``sparkline_dataset is None``): the queried dataset itself when it
-    declares ``orientation: type-first`` (it *is* the term-bucketed form — e.g.
-    bluesky/ngrams — so the bucket read is the read, not a fast path over
-    something slower), else the declared type-first companion (lineage +
-    ``orientation: type-first``). None → no fast path, so the query uses the
-    correct-but-slower date-first scan until a sparkline is registered with
-    that orientation. An explicit ``sparkline_dataset`` overrides by id
-    (deprecated); ``""`` also disables the fast path.
-    """
-    if sparkline_dataset is not None:
-        return await get_latest_entry(db, domain, sparkline_dataset) if sparkline_dataset else None
-    if (dataset_obj.endpoint_schema or {}).get("orientation") == "type-first":
-        return dataset_obj
-    return companions["type_first"]
-
+# ── 1. Request setup ──────────────────────────────────────────────────────────
 
 async def prepare_term_series(request, db, domain, dataset, entity, weight, dates,
-                              sparkline_dataset=None):
-    """Shared term-series setup — dataset, columns, entity, date range, path.
+                              sparkline_dataset=None) -> SeriesCtx:
+    """Resolve and validate everything a term-series request needs.
 
-    *dates* is a single date or a 'start,end' range (parse_dates, same as the
-    other generic endpoints); omit for full history. *sparkline_dataset* is the
-    deprecated fast-path override (default None → resolve via lineage). Returns
-    the request ctx; raises 404 when an undated request hits a slice with no
-    data at all.
+    *dates* is a single date or a 'start,end' range; omit for full history.
+    *sparkline_dataset* is the deprecated fast-path override (None → resolve
+    from lineage/orientation; '' → disable). Raises 404/400 on an unknown
+    dataset, a non-types-counts dataset, a dateless dataset, a missing
+    entity, or an undated request against a slice with no data at all.
     """
-    # Same preamble as the router's other generic endpoints: resolve the latest
-    # registry entry, 404 if absent, require types-counts, reject dates on a
-    # dateless dataset.
     dataset_obj = await get_latest_entry(db, domain, dataset)
     if not dataset_obj:
         raise HTTPException(status_code=404, detail=f"Dataset '{domain}/{dataset}' not found")
@@ -423,19 +124,17 @@ async def prepare_term_series(request, db, domain, dataset, entity, weight, date
             detail=f"'{domain}/{dataset}' has no time dimension — a term time series needs one.",
         )
 
-    # Type and time columns come from the registration (like load_system), not
-    # hardcoded — so term-series works for any types-counts dataset, not only
-    # the ngram/date ones. The response normalises to date/counts/rank/freq
-    # regardless of the source column names.
+    # Columns come from the registration, never hardcoded; the response
+    # normalises to date/counts/rank/freq whatever the source names are.
     ep = dataset_obj.endpoint_schema or {}
     type_col = ep.get("type_column") or "types"
     time_col = (dataset_obj.transform or {}).get("time_dimension") or "date"
 
     filter_vals = extract_filter_vals(dataset_obj, request.query_params)
+
+    # A term series is one slice and cannot aggregate (rank/freq don't sum),
+    # so an entity-partitioned dataset needs the entity pinned.
     has_entity = bool((dataset_obj.entity_mapping or {}).get("local_id_column"))
-    # A term series is a single slice, and it cannot aggregate (rank/freq don't
-    # sum). So an entity-partitioned dataset needs the entity pinned — otherwise
-    # the scan spans every entity and returns duplicate-date rows.
     if has_entity and not entity:
         raise HTTPException(
             status_code=400,
@@ -447,101 +146,253 @@ async def prepare_term_series(request, db, domain, dataset, entity, weight, date
     )
     date_range = parse_dates(dates)
 
-    # mongodb pass-through: a different backend (find, not read_parquet). Its
-    # cols come from resolve_measures and its latest date from a live probe in
-    # _mongo_term_series_rows; no sparkline/include/hive machinery applies.
+    # mongodb pass-through: a different backend (find, not read_parquet); its
+    # latest date comes from a live probe in _mongo_rows, and no
+    # sparkline/include/hive machinery applies.
     if dataset_obj.data_format == "mongodb":
-        count_col = resolve_count_column(dataset_obj, weight)
-        count_col, rank_f, freq_f = resolve_measures(dataset_obj, count_col)
-        ctx = SimpleNamespace(
+        count_col, rank_f, freq_f = resolve_measures(
+            dataset_obj, resolve_count_column(dataset_obj, weight))
+        return SeriesCtx(
             dataset_obj=dataset_obj, is_mongo=True,
+            filter_vals=filter_vals, local_id=local_id,
+            type_col=type_col, time_col=time_col,
             cols={"count": count_col, "rank": rank_f, "freq": freq_f},
-            filter_vals=filter_vals, local_id=local_id, date_range=date_range,
-            type_col=type_col, time_col=time_col, latest_date=None,
+            date_range=date_range,
         )
-        return ctx
 
     select_cols, cols = _series_select(dataset_obj, weight, type_col, time_col)
 
-    # Companions are deduced from declared lineage: the type-first sparkline
-    # (fast path) and the type-documents provenance sets (?include=). Resolved
-    # here so the row scan and fetch_includes reuse them — and so latest date /
-    # the no-data 404 can consider the sparkline, which refreshes nightly and
-    # can run ahead of the primary's lagging manifest.
+    # Companions come from declared lineage — resolved once, for both the
+    # fast path here and the ?include= documents in fetch_includes.
     companions = await resolve_companions(db, domain, dataset)
-    sparkline_obj = await _resolve_sparkline_obj(
+    type_first_obj = await _resolve_type_first(
         db, domain, dataset_obj, companions, sparkline_dataset)
-    # Coverage gate: a companion that has no hive level for one of the
-    # request's filter dims cannot answer for that slice — its files would be
-    # read as-is and mislabelled (a daily-only sparkline answering
-    # granularity=weekly). Drop the fast path; the date-first scan is correct.
-    if sparkline_obj is not None and not _companion_covers(sparkline_obj, filter_vals):
+    if type_first_obj is not None and not _companion_covers(type_first_obj, filter_vals):
         log.info(
             "%s/%s: sparkline %r has no hive level for dims %s; using the "
             "date-first scan (re-register the companion with those levels "
             "to restore the fast path)",
-            domain, dataset, sparkline_obj.dataset_id,
-            sorted(set(filter_vals)
-                   - {lv["column"] for lv in (getattr(sparkline_obj, "level_order", None) or [])}),
+            domain, dataset, type_first_obj.dataset_id,
+            _uncovered_dims(type_first_obj, filter_vals),
         )
-        sparkline_obj = None
+        type_first_obj = None
 
-    # latest_available_date is the max of primary and sparkline availability
-    # (the two pipelines advance independently); the undated no-data 404 uses it
-    # too, so a fresh sparkline over a stale primary manifest does not false-404.
+    # latest_available_date is the max of primary and sparkline availability —
+    # the two pipelines advance independently, and the undated no-data 404
+    # must not fire just because the primary's manifest lags a fresh sparkline.
     latest_date = latest_available_for(dataset_obj, local_id, filter_vals)
-    if sparkline_obj is not None:
-        spark_latest = latest_available_for(sparkline_obj, local_id, filter_vals)
+    if type_first_obj is not None:
+        spark_latest = latest_available_for(type_first_obj, local_id, filter_vals)
         latest_date = max((d for d in (latest_date, spark_latest) if d), default=None)
     if date_range is None and not latest_date:
         raise HTTPException(status_code=404, detail="No data found for this dataset")
 
-    # Explicit range → BETWEEN; omitted → full history (no time bound).
     if date_range:
         date_filter, date_params = f"{time_col} BETWEEN ? AND ?", [date_range[0], date_range[1]]
     else:
         date_filter, date_params = "1=1", []
 
-    # base_path is the hive entity path (fallback for the dist-tree scan); flat
-    # parquet has no level_order and scans read_parquet(data_location) directly.
-    base_path = None
-    if getattr(dataset_obj, "level_order", None):
-        _, base_path = ngrams_context(dataset_obj, local_id, filter_vals)
-
-    ctx = SimpleNamespace(
-        dataset_obj=dataset_obj, is_mongo=False, select_cols=select_cols, cols=cols,
-        filter_vals=filter_vals, local_id=local_id, latest_date=latest_date,
-        date_filter=date_filter, date_params=date_params, base_path=base_path,
+    return SeriesCtx(
+        dataset_obj=dataset_obj,
+        filter_vals=filter_vals, local_id=local_id,
         type_col=type_col, time_col=time_col,
-        companions=companions, sparkline_obj=sparkline_obj,
+        cols=cols, latest_date=latest_date,
+        select_cols=select_cols,
+        date_filter=date_filter, date_params=date_params,
+        companions=companions,
+        type_first_obj=type_first_obj,
+        serves_itself=(
+            type_first_obj is not None
+            and type_first_obj.dataset_id == dataset_obj.dataset_id
+        ),
     )
-    return ctx
 
 
-def _term_series_scan_target(ctx) -> tuple:
-    """(from_clause, extra_where, extra_params) for the direct date-first scan.
+async def _resolve_type_first(db, domain, dataset_obj, companions, sparkline_dataset):
+    """The dataset whose buckets term-series point-looks-up — or None.
 
-    parquet_hive pins entity / filter / single-valued time_partition components
-    in the hive path (derive_time_partitions), adding WHERE IN conditions for
-    multi-valued ones, so DuckDB prunes directories. Flat parquet has no hive
-    levels: it reads read_parquet(data_location) and expresses entity and filter
-    dimensions as in-file WHERE conditions.
+    Default (``sparkline_dataset is None``): the queried dataset itself when
+    it declares ``orientation: type-first`` (it *is* the term-bucketed form),
+    else the declared type-first companion from lineage. None means no fast
+    path — the date-first scan serves everything, correct but slower. An
+    explicit ``sparkline_dataset`` overrides by id (deprecated); ``""``
+    disables the fast path.
+    """
+    if sparkline_dataset is not None:
+        return await get_latest_entry(db, domain, sparkline_dataset) if sparkline_dataset else None
+    if (dataset_obj.endpoint_schema or {}).get("orientation") == "type-first":
+        return dataset_obj
+    return companions["type_first"]
+
+
+def _series_select(dataset_obj, weight, type_col, time_col) -> tuple:
+    """(select_cols, cols) for a term-series row under the chosen weight.
+
+    cols is {count, rank, freq} with None for companions the dataset did not
+    declare — the response omits those. select_cols keeps a fixed 5-column
+    shape (type, time, count, rank, freq), NULL-filling undeclared companions
+    so row unpacking stays positional.
+    """
+    cols = resolve_series_columns(dataset_obj, weight)
+    if cols is None:
+        cols = {"count": resolve_count_column(dataset_obj, weight), "rank": None, "freq": None}
+    select_cols = (
+        f"{type_col}, {time_col}, {cols['count']}, "
+        f"{cols['rank'] or 'NULL'}, {cols['freq'] or 'NULL'}"
+    )
+    return select_cols, cols
+
+
+def _companion_covers(companion_obj, filter_vals: dict) -> bool:
+    """Can the companion express every request filter dim as a hive level?
+
+    (The coverage gate — see the module docstring.) A dim the companion
+    levels on but holds no data for needs no check here: the pinned path
+    misses, the read returns [], and the scan takes over.
+    """
+    levels = {lv["column"] for lv in (getattr(companion_obj, "level_order", None) or [])}
+    return all(dim in levels for dim in filter_vals)
+
+
+def _uncovered_dims(companion_obj, filter_vals: dict) -> list:
+    """The request dims the companion has no hive level for (for log lines)."""
+    levels = {lv["column"] for lv in (getattr(companion_obj, "level_order", None) or [])}
+    return sorted(set(filter_vals) - levels)
+
+
+# ── 2. Row loading ────────────────────────────────────────────────────────────
+
+async def term_series_rows(domain: str, ctx: SeriesCtx, terms: List[str]) -> list:
+    """(type, date, count, rank, freq) rows for *terms*, fast path first.
+
+    Bucket point lookup on the type-first form, then a date-first scan for
+    the terms it did not find — per missing term, so a batch mixing
+    vocabulary and out-of-vocabulary terms never returns a silent empty
+    because a sibling hit. A self-served type-first dataset has no date-first
+    tree, so its bucket read is final. Policy details: module docstring.
+    """
+    if ctx.is_mongo:
+        return await _mongo_rows(domain, ctx, terms)
+
+    rows = await _fast_rows(domain, ctx, terms) if ctx.type_first_obj else []
+    if ctx.serves_itself:
+        return rows  # the bucket read IS the read; a miss is an honest empty
+
+    missing = [t for t in terms if t not in {r[0] for r in rows}]
+    if not missing:
+        return rows
+    _require_dates_for_scan(domain, ctx, missing)
+
+    if rows:
+        log.info("%s/term-series: %d/%d terms missing from sparkline; scanning %s",
+                 domain, len(missing), len(terms), missing)
+    scan_rows = await _scan_rows(domain, ctx, missing)
+    # Each term's rows come whole from one source (time-sorted within it), so
+    # concatenation preserves per-term chronology for the response builders.
+    return [*rows, *scan_rows]
+
+
+async def _fast_rows(domain: str, ctx: SeriesCtx, terms: List[str]) -> list:
+    """Hash-bucket point lookup on the type-first form.
+
+    Self-served datasets read strict under handle_query_error — with no scan
+    behind the read, a real failure must classify as 504/500, not as "no
+    data". Companion reads stay lax: a failure logs and the scan covers it.
+    """
+    def _read():
+        with get_duckdb_client().timed_connect() as conn:
+            return fetch_sparkline_rows(
+                conn, ctx.type_first_obj, terms,
+                entity_value=ctx.local_id, filter_vals=ctx.filter_vals,
+                select_cols=ctx.select_cols, date_condition=ctx.date_filter,
+                date_params=ctx.date_params, label=f"{domain}/term-series",
+                type_col=ctx.type_col, time_col=ctx.time_col,
+                strict=ctx.serves_itself,
+            )
+
+    if ctx.serves_itself:
+        def _classified():
+            with handle_query_error(f"{domain}/{ctx.dataset_obj.dataset_id}"):
+                return _read()
+        with timed("fast_query", "type-first bucket read"):
+            return await run_blocking(_classified)
+
+    with timed("fast_query", "sparkline bucket read"):
+        return await run_blocking(_read)
+
+
+def _require_dates_for_scan(domain: str, ctx: SeriesCtx, missing: List[str]) -> None:
+    """400 when an undated request needs the scan on a sparkline-backed dataset.
+
+    (Undated = fast-path privilege — see the module docstring.) Datasets with
+    no type-first form pass: the scan is their normal read.
+    """
+    if ctx.type_first_obj is None or not ctx.undated:
+        return
+    raise HTTPException(
+        status_code=400,
+        detail=(
+            f"{missing} not in the precomputed fast-path vocabulary of "
+            f"'{domain}/{ctx.dataset_obj.dataset_id}' — an undated request "
+            "would scan the full date-first history. Pass dates= to bound "
+            "the scan (e.g. dates=2024-01-01,2024-12-31; latest available: "
+            f"{ctx.latest_date}), or drop those types."
+        ),
+    )
+
+
+async def _scan_rows(domain: str, ctx: SeriesCtx, terms: List[str]) -> list:
+    """Date-first scan for *terms* (the terms the fast path did not find)."""
+    from_clause, extra_where, extra_params = _scan_target(ctx)
+    placeholders = ", ".join(["?"] * len(terms))
+    where = [f"{ctx.type_col} IN ({placeholders})"]
+    if not ctx.undated:
+        where.append(ctx.date_filter)
+    where.extend(extra_where)
+    sql = (
+        f"SELECT {ctx.select_cols} FROM {from_clause} "
+        f"WHERE {' AND '.join(where)} ORDER BY {ctx.type_col}, {ctx.time_col}"
+    )
+    params = [*terms, *ctx.date_params, *extra_params]
+
+    def _run():
+        with handle_query_error(f"{domain}/{ctx.dataset_obj.dataset_id}"):
+            with get_duckdb_client().timed_connect() as conn:
+                try:
+                    return conn.execute(sql, params).fetchall()
+                except Exception as exc:
+                    # A missing partition/file is a legitimate empty result
+                    # (the slice-level 404 fired in prepare_term_series if due);
+                    # anything else classifies via handle_query_error.
+                    if is_data_missing(exc):
+                        log.info("%s/term-series: no partition data for %s", domain, terms)
+                        return []
+                    raise
+
+    with timed("slow_query", "DuckDB partition scan"):
+        return await run_blocking(_run)
+
+
+def _scan_target(ctx: SeriesCtx) -> tuple:
+    """(from_clause, extra_where, extra_params) for the date-first scan.
+
+    parquet_hive pins entity / filter / single-valued time_partition levels
+    into the hive path (derive_time_partitions) so DuckDB prunes directories,
+    with WHERE IN for multi-valued ones. Columns that are not hive levels
+    live inside the files and get plain WHERE clauses — on flat parquet that
+    is all of them.
     """
     obj = ctx.dataset_obj
+    entity_col = (obj.entity_mapping or {}).get("local_id_column")
+
     if getattr(obj, "level_order", None):
-        tp_path_vals, tp_conditions, tp_params = derive_time_partitions(
+        tp_path_vals, conditions, params = derive_time_partitions(
             ctx.date_params, obj.level_order)
         path = build_hive_path(
             obj, entity_value=ctx.local_id, filter_vals=ctx.filter_vals,
             time_partition_vals=tp_path_vals, glob_suffix="/*.parquet",
-        ) or f"{ctx.base_path}/*.parquet"
-        # Columns that are not hive levels live inside the files — the pinned
-        # path can't encode them, so entity / filter dims absent from level_order
-        # still need WHERE clauses (mirrors load_system; latent while every dim
-        # is a hive level, but keeps the "any types-counts dataset" claim true).
-        conditions, params = list(tp_conditions), list(tp_params)
+        )
         level_cols = {lv["column"] for lv in obj.level_order}
-        entity_col = (obj.entity_mapping or {}).get("local_id_column")
         if entity_col and ctx.local_id is not None and entity_col not in level_cols:
             conditions.append(f"{entity_col} = ?")
             params.append(ctx.local_id)
@@ -551,9 +402,7 @@ def _term_series_scan_target(ctx) -> tuple:
                 params.append(val)
         return f"read_parquet('{path}', hive_partitioning=true)", conditions, params
 
-    # Flat parquet: entity + filter dims are in-file columns → WHERE conditions.
     where, params = [], []
-    entity_col = (obj.entity_mapping or {}).get("local_id_column")
     if entity_col and ctx.local_id is not None:
         where.append(f"{entity_col} = ?")
         params.append(ctx.local_id)
@@ -568,16 +417,15 @@ def _term_series_scan_target(ctx) -> tuple:
     return from_clause, where, params
 
 
-async def _mongo_term_series_rows(domain, ctx, terms) -> list:
-    """Per-(type, date) rows for *terms* from a mongodb pass-through dataset.
+async def _mongo_rows(domain: str, ctx: SeriesCtx, terms: List[str]) -> list:
+    """Rows for *terms* from a mongodb pass-through dataset.
 
     The mongo analogue of the parquet path: resolve the collection (routing
-    hook), find ``{type: {$in: terms}, time: range}`` (a plain range read, no
-    aggregation — the pass-through guardrail), and return rows in the same
-    ``(type, time, count, rank, freq)`` tuple shape the parquet scan yields, so
-    series_row handles both. Duplicate (type, day) rows in the source are
-    collapsed (some corpora re-ingest whole days). Sets ctx.latest_date from a
-    live max-time probe.
+    hook), find ``{type: {$in: terms}, time: range}`` — a plain range read,
+    no aggregation (the pass-through guardrail) — and return the same
+    ``(type, time, count, rank, freq)`` tuples the parquet path yields.
+    Duplicate (type, day) source rows are collapsed; ctx.latest_date is set
+    from a live max-time probe.
     """
     obj = ctx.dataset_obj
     count_col = ctx.cols["count"]
@@ -613,122 +461,106 @@ async def _mongo_term_series_rows(domain, ctx, terms) -> list:
     return rows
 
 
-async def term_series_rows(domain, ctx, terms):
-    """Fast sparkline bucket lookup, falling back to a dist-tree scan.
+# ── 3. ?include= provenance ───────────────────────────────────────────────────
 
-    Fast path: hash-bucket point lookup on the type-first form — the sparkline
-    companion resolved from lineage, or the queried dataset itself when it
-    declares ``orientation: type-first`` (bluesky-style term-bucketed trees).
-    Slow path: a scan of the date-first tree (year/month pruned where the tree
-    has those levels) for the terms the fast path did not find — per missing
-    term, so a batch mixing vocabulary and out-of-vocabulary terms returns
-    fast rows for the former and honest scan results for the latter (never a
-    silent empty because a sibling term hit the sparkline). Undated full
-    history is a fast-path privilege: on a dataset with a type-first
-    companion, a vocabulary miss without dates= raises a teaching 400 instead
-    of an unbounded scan (datasets with no fast path keep undated scans — the
-    scan is their normal read). A self-served
-    type-first dataset has no date-first tree, so there is no slow path: a
-    bucket miss is an honest empty series, not a cue to re-read the same
-    bucket tree through a wildcard glob.
+async def fetch_includes(db, domain, include, ctx: SeriesCtx, terms,
+                         include_dates=None) -> dict:
+    """Resolve and fetch each ?include= provenance companion for *terms*.
 
-    A term with no data on disk yields no rows — an empty series, the same
-    whether one term or many was asked for. A *real* failure (a timeout, a
-    genuine query error) raises through handle_query_error (504 / 500); it is
-    never swallowed into an empty result, so a slow scan that times out reads
-    as a timeout, not as "no data".
+    Returns ``{key: {(type, date): [[doc, score], ...]}}`` keyed by role (or
+    dataset id, deprecated). *include* is a comma-separated list of roles, or
+    ``all`` for every declared companion. *include_dates* (comma-separated
+    exact dates) narrows the provenance read independently of the series
+    range — a UI renders documents for the hovered/comparison dates, not for
+    every point of a full-history sparkline.
+
+    A companion that fails the coverage gate is skipped with a log line —
+    same sparse-result semantics as a companion with no data.
     """
-    if getattr(ctx, "is_mongo", False):
-        return await _mongo_term_series_rows(domain, ctx, terms)
+    tokens = [p.strip() for p in (include or "").split(",") if p.strip()]
+    # mongodb pass-through datasets have no type-documents companions.
+    if not tokens or not terms or ctx.is_mongo:
+        return {}
 
-    label = f"{domain}/term-series"
-    rows = []
-    sparkline_obj = ctx.sparkline_obj
-    # Self-served: the queried dataset is its own type-first form (compare ids,
-    # not identity — the deprecated ?sparkline_dataset= override re-fetches).
-    self_served = (
-        sparkline_obj is not None
-        and sparkline_obj.dataset_id == ctx.dataset_obj.dataset_id
-    )
-    if sparkline_obj:
-        def _fast():
+    date_condition, date_params = ctx.date_filter, ctx.date_params
+    dates = [d.strip() for d in (include_dates or "").split(",") if d.strip()]
+    if dates:
+        placeholders = ", ".join(["?"] * len(dates))
+        date_condition, date_params = f"{ctx.time_col} IN ({placeholders})", dates
+
+    doc_companions = (ctx.companions or {}).get("documents", {})
+    selected: dict = {}
+    for token in tokens:
+        if token == "all":
+            selected.update(doc_companions)
+            continue
+        key, prov_obj = await _resolve_include(db, domain, token, doc_companions)
+        selected[key] = prov_obj
+
+    out: dict = {}
+    for key, prov_obj in selected.items():
+        if not _companion_covers(prov_obj, ctx.filter_vals):
+            log.info(
+                "include %r (%s/%s): companion has no hive level for dims %s; "
+                "skipping (its documents would come from the wrong slice)",
+                key, domain, prov_obj.dataset_id,
+                _uncovered_dims(prov_obj, ctx.filter_vals),
+            )
+            continue
+
+        def _fetch(prov_obj=prov_obj):
             with get_duckdb_client().timed_connect() as conn:
-                return fetch_sparkline_rows(
-                    conn, sparkline_obj, terms,
+                return fetch_provenance(
+                    conn, prov_obj, sorted(terms),
                     entity_value=ctx.local_id, filter_vals=ctx.filter_vals,
-                    select_cols=ctx.select_cols, date_condition=ctx.date_filter,
-                    date_params=ctx.date_params, label=label,
-                    type_col=ctx.type_col, time_col=ctx.time_col,
-                    strict=self_served,
+                    date_condition=date_condition, date_params=date_params,
+                    label=f"{domain}/{prov_obj.dataset_id}", time_col=ctx.time_col,
                 )
-        if self_served:
-            # The bucket read is the only read: classify real errors (504/500)
-            # rather than falling back, and return the honest result as-is.
-            def _only():
-                with handle_query_error(f"{domain}/{ctx.dataset_obj.dataset_id}"):
-                    return _fast()
-            with timed("fast_query", "type-first bucket read"):
-                return await run_blocking(_only)
-        with timed("fast_query", "sparkline bucket read"):
-            rows = await run_blocking(_fast)
+        with timed("include", f"provenance {key}"):
+            out[key] = await run_blocking(_fetch)
+    return out
 
-    # Per-missing-term fallback: scan only the terms the fast path did not
-    # find. A term absent from the sparkline vocabulary must not come back as
-    # a silent empty series just because a sibling term in the batch hit.
-    found = {r[0] for r in rows}
-    missing = [t for t in terms if t not in found]
-    if not missing:
-        return rows
 
-    # Undated full history is a fast-path privilege. A dataset registers a
-    # type-first companion precisely because its date-first tree is too big to
-    # scan casually (reddit: minutes, past the proxy timeout) — so a miss on
-    # an undated request teaches instead of launching an unbounded scan.
-    # Datasets with no fast path at all live by the scan; their undated
-    # full-history reads stay allowed.
-    if sparkline_obj and ctx.date_filter == "1=1":
+async def _resolve_include(db, domain, token, doc_companions) -> tuple:
+    """Resolve one ?include= token → (key, prov_obj).
+
+    A token is a declared provenance *role*, falling back to a raw
+    type-documents dataset id (deprecated alias). Unknown or wrong-typed
+    tokens are a 400, not a silently empty field.
+    """
+    if token in doc_companions:
+        return token, doc_companions[token]
+    prov_obj = await get_latest_entry(db, domain, token)
+    if not prov_obj:
         raise HTTPException(
             status_code=400,
-            detail=(
-                f"{missing} not in the precomputed fast-path vocabulary of "
-                f"'{domain}/{ctx.dataset_obj.dataset_id}' — an undated request "
-                "would scan the full date-first history. Pass dates= to bound "
-                "the scan (e.g. dates=2024-01-01,2024-12-31; latest available: "
-                f"{ctx.latest_date}), or drop those types."
-            ),
+            detail=f"include '{token}' is not a known provenance role or dataset "
+                   f"in '{domain}'. Available roles: {sorted(doc_companions)}",
         )
-    if rows:
-        log.info("%s: %d/%d terms missing from sparkline; scanning %s",
-                 label, len(missing), len(terms), missing)
+    if (prov_obj.endpoint_schema or {}).get("type") != "type-documents":
+        raise HTTPException(
+            status_code=400,
+            detail=f"include '{domain}/{token}' is not a type-documents dataset "
+                   "(register it with endpoint_schema.type='type-documents').",
+        )
+    return token, prov_obj
 
-    from_clause, extra_where, extra_params = _term_series_scan_target(ctx)
-    placeholders = ", ".join(["?"] * len(missing))
-    where = [f"{ctx.type_col} IN ({placeholders})"]
-    if ctx.date_filter != "1=1":
-        where.append(ctx.date_filter)
-    where.extend(extra_where)
-    sql = (
-        f"SELECT {ctx.select_cols} FROM {from_clause} "
-        f"WHERE {' AND '.join(where)} ORDER BY {ctx.type_col}, {ctx.time_col}"
-    )
-    params = [*missing, *ctx.date_params, *extra_params]
 
-    def _slow():
-        with handle_query_error(f"{domain}/{ctx.dataset_obj.dataset_id}"):
-            with get_duckdb_client().timed_connect() as conn:
-                try:
-                    return conn.execute(sql, params).fetchall()
-                except Exception as exc:
-                    # A missing partition/file is a legitimate empty result (the
-                    # slice-level 404 is handled earlier in prepare_term_series);
-                    # anything else re-raises for handle_query_error to classify.
-                    if is_data_missing(exc):
-                        log.info("%s: no partition data for %s", label, missing)
-                        return []
-                    raise
+# ── 4. Response shaping ───────────────────────────────────────────────────────
 
-    with timed("slow_query", "DuckDB partition scan"):
-        scan_rows = await run_blocking(_slow)
-    # Each term's rows come whole from one source (time-sorted within it), so
-    # concatenation preserves per-term chronology for the response builders.
-    return [*rows, *scan_rows]
+def series_row(row, cols, includes=None) -> dict:
+    """Shape one (type, time, count, rank, freq) row for the response.
+
+    rank/freq are omitted (not zero-filled) when the dataset declared no such
+    column — "no rank" must stay distinguishable from "rank 0". *includes*
+    attaches each provenance set's documents under its role key.
+    """
+    date_str = str(row[1])
+    entry = {"date": date_str, "counts": int(row[2]) if row[2] else 0}
+    if cols["rank"] is not None:
+        entry["rank"] = int(row[3]) if row[3] else 0
+    if cols["freq"] is not None:
+        entry["freq"] = float(row[4]) if row[4] else 0.0
+    for prov_id, prov in (includes or {}).items():
+        entry[prov_id] = prov.get((row[0], date_str), [])
+    return entry

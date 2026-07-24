@@ -680,22 +680,3 @@ def load_time_series(
 # provides sparkline / partition-scan term lookups.
 
 
-def entity_base_path(dataset_obj, local_id, filter_vals):
-    """Build the Hive path up to the entity level (no date).
-
-    Used for DuckDB glob patterns in the slow-path daily partition fallback.
-    Uses build_hive_path with no time_value, so the time level becomes a
-    wildcard.
-    """
-    path = build_hive_path(
-        dataset_obj,
-        entity_value=local_id,
-        filter_vals=filter_vals,
-        glob_suffix="",
-    )
-    if path is None:
-        raise ValueError(
-            f"parquet_hive dataset '{dataset_obj.dataset_id}' has no level_order. "
-            "Re-register the dataset to populate level_order."
-        )
-    return path

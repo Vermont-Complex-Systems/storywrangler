@@ -33,7 +33,7 @@ from ..core.query_utils import (
 )
 from ..core.registry_utils import get_latest_entry
 from ..core.term_series import (
-    fetch_includes, prepare_term_series, run_top_ngrams, series_row, term_series_rows,
+    fetch_includes, prepare_term_series, series_row, term_series_rows,
 )
 from . import openapi_docs as docs
 from ..core.timing import timed
@@ -82,6 +82,54 @@ def _parse_reference_value(rv: Optional[str]):
 
 
 # ── top-ngrams (generic) ──────────────────────────────────────────────────────
+
+async def run_top_ngrams(
+    dataset_obj,
+    label: str,
+    local_id: Optional[str],
+    dates: Optional[str],
+    dates2: Optional[str],
+    filter_vals: dict,
+    limit: int,
+    metadata: dict,
+    count_col: Optional[str] = None,
+) -> dict:
+    """The parquet top-ngrams endpoint body, executed off the event loop.
+
+    Loads one types-counts system (or two for a temporal comparison keyed by
+    date range, start/end joined with "_") and formats the response. *dates*
+    may be None for all-time / dateless datasets. *count_col* selects a
+    measure from the registered count-column menu; None uses the default.
+    The mongodb variant lives inline in the endpoint below.
+    """
+    if dates2 and parse_dates(dates) == parse_dates(dates2):
+        # Identical ranges collide into one JSON key and silently drop system 1
+        # — reject rather than return half the comparison with HTTP 200.
+        raise HTTPException(
+            status_code=400,
+            detail="dates and dates2 resolve to the same range; "
+                   "use different dates to compare two systems.",
+        )
+
+    def _query():
+        with handle_query_error(label):
+            with get_duckdb_client().timed_connect() as conn:
+                dr1 = parse_dates(dates)
+                sys1 = load_system(conn, dataset_obj, local_id, dr1, filter_vals, limit, count_col=count_col)
+                formatted1 = [{"types": t, "counts": c} for t, c in zip(sys1["types"], sys1["counts"])]
+
+                if dates2:
+                    dr2 = parse_dates(dates2)
+                    sys2 = load_system(conn, dataset_obj, local_id, dr2, filter_vals, limit, count_col=count_col)
+                    formatted2 = [{"types": t, "counts": c} for t, c in zip(sys2["types"], sys2["counts"])]
+                    key1 = dr1[0] if dr1[0] == dr1[1] else f"{dr1[0]}_{dr1[1]}"
+                    key2 = dr2[0] if dr2[0] == dr2[1] else f"{dr2[0]}_{dr2[1]}"
+                    return {key1: formatted1, key2: formatted2, "metadata": metadata}
+
+                return {"data": formatted1, "metadata": metadata}
+
+    return await run_blocking(_query)
+
 
 @router.get(
     "/top-ngrams",

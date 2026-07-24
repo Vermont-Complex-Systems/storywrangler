@@ -114,9 +114,9 @@ class TestSelfTypeFirst:
     """A dataset that is itself type-first serves as its own fast path."""
 
     def _resolve_sparkline(self, dataset_obj, companions):
-        from app.core.term_series import _resolve_sparkline_obj
+        from app.core.term_series import _resolve_type_first
         return asyncio.run(
-            _resolve_sparkline_obj(None, "bluesky", dataset_obj, companions, None))
+            _resolve_type_first(None, "bluesky", dataset_obj, companions, None))
 
     def test_type_first_primary_resolves_itself(self):
         # bluesky/ngrams: the queried dataset IS the term-bucketed tree — no
@@ -151,12 +151,12 @@ class TestFetchIncludesCoverage:
                          {"column": "country", "type": "entity"},
                          {"column": "ngram_bucket", "type": "hash_bucket"}],
         )
-        ctx = SimpleNamespace(
-            is_mongo=False,
+        from app.core.term_series import SeriesCtx
+        ctx = SeriesCtx(
+            dataset_obj=None,
             companions={"documents": {"articles": prov}},
             filter_vals={"ngram_size": 1, "granularity": "weekly"},
-            local_id="United States", date_filter="1=1", date_params=[],
-            time_col="date",
+            local_id="United States", time_col="date",
         )
         out = asyncio.run(fetch_includes(None, "wikimedia", "articles", ctx, {"trump"}))
         assert out == {}
@@ -175,8 +175,9 @@ class TestIncludeDates:
                          {"column": "country", "type": "entity"},
                          {"column": "bucket", "type": "hash_bucket"}],
         )
-        ctx = SimpleNamespace(
-            is_mongo=False,
+        from app.core.term_series import SeriesCtx
+        ctx = SeriesCtx(
+            dataset_obj=None,
             companions={"documents": {"articles": prov}},
             filter_vals={"ngram_size": 1},
             local_id="United States",

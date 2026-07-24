@@ -12,14 +12,14 @@ from types import SimpleNamespace
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.core.mongo_query import date_range_filter
-from app.core.term_series import _term_series_scan_target
+from app.core.term_series import SeriesCtx, _scan_target
 
 
 def _ctx(dataset_obj, **kw):
-    base = dict(dataset_obj=dataset_obj, local_id=None, filter_vals={},
-                date_params=[], base_path=None, type_col="ngram", time_col="date")
+    base = dict(local_id=None, filter_vals={}, date_params=[],
+                type_col="ngram", time_col="date")
     base.update(kw)
-    return SimpleNamespace(**base)
+    return SeriesCtx(dataset_obj=dataset_obj, **base)
 
 
 class TestScanTargetHive:
@@ -36,14 +36,14 @@ class TestScanTargetHive:
     def test_narrow_range_pins_year(self):
         ctx = _ctx(self.HIVE, filter_vals={"n": 1, "lang": "en"},
                    date_params=["2022-06-01", "2022-06-20"], type_col="ngram", time_col="date")
-        frm, where, params = _term_series_scan_target(ctx)
+        frm, where, params = _scan_target(ctx)
         assert "year=2022" in frm and "hive_partitioning=true" in frm
         assert where == ["month IN (?,?)"] and params == [5, 6]
 
     def test_wide_range_wildcards(self):
         ctx = _ctx(self.HIVE, filter_vals={"n": 1, "lang": "en"},
                    date_params=["2021-06-01", "2022-05-31"])
-        frm, where, params = _term_series_scan_target(ctx)
+        frm, where, params = _scan_target(ctx)
         # year spans two → WHERE IN, path wildcards year/month
         assert "year IN (?,?)" in where and 2021 in params and 2022 in params
 
@@ -57,7 +57,7 @@ class TestScanTargetFlat:
     def test_flat_reads_location_with_where(self):
         ctx = _ctx(self.FLAT, local_id="United States", filter_vals={"sex": "M"},
                    date_params=["1990", "2000"], type_col="name", time_col="year")
-        frm, where, params = _term_series_scan_target(ctx)
+        frm, where, params = _scan_target(ctx)
         assert frm == "read_parquet('/data/babynames/names.parquet')"
         assert "country = ?" in where and "sex = ?" in where
         assert params == ["United States", "M"]
@@ -65,7 +65,7 @@ class TestScanTargetFlat:
     def test_flat_no_entity_no_filters(self):
         obj = SimpleNamespace(level_order=None, data_location="/d/x.parquet",
                               entity_mapping=None, dataset_id="ngrams")
-        frm, where, params = _term_series_scan_target(_ctx(obj))
+        frm, where, params = _scan_target(_ctx(obj))
         assert frm == "read_parquet('/d/x.parquet')" and where == [] and params == []
 
 
@@ -102,7 +102,7 @@ class TestBucketReadStrict:
         )
 
     def _read(self, conn, obj, select_cols, strict):
-        from app.core.term_series import fetch_sparkline_rows
+        from app.core.type_first import fetch_sparkline_rows
         return fetch_sparkline_rows(
             conn, obj, ["trump"], entity_value=None, filter_vals={"n": 1},
             select_cols=select_cols, date_condition="1=1", date_params=[],
@@ -178,23 +178,22 @@ class TestPerMissingTermFallback:
     FLAT = SimpleNamespace(level_order=None, data_location="/d/x.parquet",
                            entity_mapping=None, dataset_id="ngrams")
 
-    def _ctx(self, sparkline_rows, *, dated=True, sparkline=True):
+    def _ctx(self, *, dated=True, type_first=True):
         # dated by default: the undated+missing+sparkline combination is the
         # teaching-400 case, tested separately below.
         date_filter, date_params = (
             ("date BETWEEN ? AND ?", ["2024-01-01", "2024-01-31"]) if dated
             else ("1=1", []))
-        return SimpleNamespace(
-            dataset_obj=self.FLAT, is_mongo=False,
-            sparkline_obj=SimpleNamespace(dataset_id="sparklines") if sparkline else None,
+        return SeriesCtx(
+            dataset_obj=self.FLAT,
+            type_first_obj=SimpleNamespace(dataset_id="sparklines") if type_first else None,
             select_cols="ngram, date, c, NULL, NULL",
-            filter_vals={}, local_id=None, latest_date="2024-01-31",
-            date_filter=date_filter, date_params=date_params, base_path=None,
+            latest_date="2024-01-31",
+            date_filter=date_filter, date_params=date_params,
             type_col="ngram", time_col="date",
-            _sparkline_rows=sparkline_rows,
         )
 
-    def _run(self, monkeypatch, ctx, scan_rows):
+    def _run(self, monkeypatch, ctx, fast_rows, scan_rows):
         import asyncio
         import app.core.term_series as ts
 
@@ -217,7 +216,7 @@ class TestPerMissingTermFallback:
             return fn()
 
         monkeypatch.setattr(ts, "fetch_sparkline_rows",
-                            lambda conn, obj, terms, **kw: ctx._sparkline_rows)
+                            lambda conn, obj, terms, **kw: fast_rows)
         monkeypatch.setattr(ts, "get_duckdb_client", lambda: _Client())
         monkeypatch.setattr(ts, "run_blocking", fake_run_blocking)
 
@@ -227,7 +226,7 @@ class TestPerMissingTermFallback:
     def test_missing_term_scanned_found_term_kept(self, monkeypatch):
         fast = [("the", "2024-01-01", 5, None, None)]
         scanned = [("Zykov", "2024-01-01", 1, None, None)]
-        rows, scan_params = self._run(monkeypatch, self._ctx(fast), scanned)
+        rows, scan_params = self._run(monkeypatch, self._ctx(), fast, scanned)
         assert rows == [*fast, *scanned]
         # only the missing term reaches the scan (+ the date bounds)
         assert scan_params == ["Zykov", "2024-01-01", "2024-01-31"]
@@ -235,13 +234,13 @@ class TestPerMissingTermFallback:
     def test_all_found_skips_scan(self, monkeypatch):
         fast = [("the", "2024-01-01", 5, None, None),
                 ("Zykov", "2024-01-01", 1, None, None)]
-        rows, scan_params = self._run(monkeypatch, self._ctx(fast, dated=False), [])
+        rows, scan_params = self._run(monkeypatch, self._ctx(dated=False), fast, [])
         assert rows == fast
         assert scan_params is None  # scan never ran (undated is fine: no miss)
 
     def test_none_found_scans_all(self, monkeypatch):
         scanned = [("the", "2024-01-01", 5, None, None)]
-        rows, scan_params = self._run(monkeypatch, self._ctx([]), scanned)
+        rows, scan_params = self._run(monkeypatch, self._ctx(), [], scanned)
         assert rows == scanned
         assert scan_params == ["the", "Zykov", "2024-01-01", "2024-01-31"]
 
@@ -251,15 +250,15 @@ class TestPerMissingTermFallback:
         import pytest
         from fastapi import HTTPException
         with pytest.raises(HTTPException) as exc:
-            self._run(monkeypatch, self._ctx([], dated=False), [])
+            self._run(monkeypatch, self._ctx(dated=False), [], [])
         assert exc.value.status_code == 400
         assert "Zykov" in exc.value.detail and "dates=" in exc.value.detail
 
     def test_undated_scan_allowed_without_fast_path(self, monkeypatch):
-        # A dataset with no sparkline companion lives by the scan — undated
+        # A dataset with no type-first form lives by the scan — undated
         # full-history reads are its normal usage (babynames, scisciDB).
         scanned = [("the", "2024-01-01", 5, None, None)]
         rows, scan_params = self._run(
-            monkeypatch, self._ctx([], dated=False, sparkline=False), scanned)
+            monkeypatch, self._ctx(dated=False, type_first=False), [], scanned)
         assert rows == scanned
         assert scan_params == ["the", "Zykov"]
