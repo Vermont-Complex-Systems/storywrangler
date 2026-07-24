@@ -101,7 +101,7 @@ STORYWRANGLER_TOP_NGRAMS = {
                                     "type": "object",
                                     "properties": {
                                         "types": {"type": "string", "description": "The type (n-gram, name, ...)"},
-                                        "counts": {"type": "integer", "description": "Total count over the date range under the selected weight"},
+                                        "counts": {"type": "number", "description": "Total count over the date range under the selected weight. Matches the declared column type: integer for integer-counted datasets (wikimedia, bluesky, twitter), float for weighted measures (reddit)."},
                                     },
                                 },
                             },

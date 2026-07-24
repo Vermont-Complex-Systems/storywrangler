@@ -28,7 +28,7 @@ from ..core.duckdb_query import (
     handle_query_error, load_system,
 )
 from ..core.query_utils import (
-    availability_range_for, extract_filter_pair, extract_filter_vals,
+    availability_range_for, count_caster, extract_filter_pair, extract_filter_vals,
     latest_from_manifest, parse_dates, require_dates_supported, require_dates_within,
     require_types_counts, resolve_count_column, resolve_entity,
 )
@@ -112,17 +112,22 @@ async def run_top_ngrams(
                    "use different dates to compare two systems.",
         )
 
+    # load_system floats every count (the instruments' f64 contract); the
+    # response restores the declared column type — ints stay ints, weighted
+    # float measures stay floats.
+    cast = count_caster(dataset_obj, count_col or resolve_count_column(dataset_obj))
+
     def _query():
         with handle_query_error(label):
             with get_duckdb_client().timed_connect() as conn:
                 dr1 = parse_dates(dates)
                 sys1 = load_system(conn, dataset_obj, local_id, dr1, filter_vals, limit, count_col=count_col)
-                formatted1 = [{"types": t, "counts": c} for t, c in zip(sys1["types"], sys1["counts"])]
+                formatted1 = [{"types": t, "counts": cast(c)} for t, c in zip(sys1["types"], sys1["counts"])]
 
                 if dates2:
                     dr2 = parse_dates(dates2)
                     sys2 = load_system(conn, dataset_obj, local_id, dr2, filter_vals, limit, count_col=count_col)
-                    formatted2 = [{"types": t, "counts": c} for t, c in zip(sys2["types"], sys2["counts"])]
+                    formatted2 = [{"types": t, "counts": cast(c)} for t, c in zip(sys2["types"], sys2["counts"])]
                     key1 = dr1[0] if dr1[0] == dr1[1] else f"{dr1[0]}_{dr1[1]}"
                     key2 = dr2[0] if dr2[0] == dr2[1] else f"{dr2[0]}_{dr2[1]}"
                     return {key1: formatted1, key2: formatted2, "metadata": metadata}
@@ -198,11 +203,13 @@ async def top_ngrams(
                        "use different dates to compare two systems.",
             )
 
+        cast = count_caster(dataset_obj, count_col)
+
         def _query():
             def _load(date_str):
                 sys = load_instrument_system(
                     dataset_obj, domain, filter_vals, date_str, limit, count_col)
-                return [{"types": t, "counts": c} for t, c in zip(sys["types"], sys["counts"])]
+                return [{"types": t, "counts": cast(c)} for t, c in zip(sys["types"], sys["counts"])]
 
             formatted1 = _load(dates)
             if dates2:

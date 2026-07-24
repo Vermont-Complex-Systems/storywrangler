@@ -313,3 +313,34 @@ class TestRequireDatesWithin:
         self._check("1991,1993", lo=1880, hi=2018)
         with pytest.raises(HTTPException):
             self._check("2020,2024", lo=1880, hi=2018)
+
+
+class TestCountCaster:
+    """load_system floats every count (the instruments' f64 contract); the
+    top-ngrams response restores the declared column type."""
+
+    def _caster(self, schema, col="pv_count"):
+        from app.core.query_utils import count_caster
+        from types import SimpleNamespace
+        return count_caster(SimpleNamespace(data_schema=schema), col)
+
+    def test_integral_types_cast_back_to_int(self):
+        for t in ("BIGINT", "INTEGER", "int64", "HUGEINT", "UINTEGER"):
+            cast = self._caster({"pv_count": t})
+            assert cast(12345678.0) == 12345678
+            assert isinstance(cast(12345678.0), int)
+            assert cast(None) == 0
+
+    def test_float_measures_pass_through(self):
+        cast = self._caster({"all_score_weighted": "DOUBLE"}, "all_score_weighted")
+        assert cast(123.45) == 123.45
+
+    def test_unknown_schema_passes_through(self):
+        cast = self._caster({}, "pv_count")
+        assert cast(1.0) == 1.0
+        assert self._caster(None)(2.5) == 2.5
+
+    def test_parameterized_type_form(self):
+        # e.g. DECIMAL(18,0)-style strings never int-cast; INT-with-params do not occur,
+        # but the base-type split must not crash on parentheses.
+        assert self._caster({"pv_count": "DECIMAL(18,3)"})(1.5) == 1.5

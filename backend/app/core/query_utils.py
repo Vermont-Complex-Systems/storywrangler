@@ -176,6 +176,29 @@ def require_types_counts(dataset_obj) -> None:
         )
 
 
+_INTEGRAL_TYPES = {
+    "TINYINT", "SMALLINT", "INTEGER", "INT", "BIGINT", "HUGEINT",
+    "UTINYINT", "USMALLINT", "UINTEGER", "UBIGINT",
+    "INT8", "INT16", "INT32", "INT64", "LONG",
+}
+
+
+def count_caster(dataset_obj, count_col: str):
+    """Caster restoring a summed count to its declared type for responses.
+
+    load_system floats every count — its primary consumers are the
+    instruments, whose Rust bindings take f64 systems — so integer-counted
+    datasets would otherwise serialize as 12345678.0. An integral
+    data_schema type casts back to int; float measures (reddit's
+    score-weighted columns) and unknown schemas pass through unchanged.
+    """
+    col_type = str((dataset_obj.data_schema or {}).get(count_col) or "")
+    base = col_type.upper().split("(")[0].strip()
+    if base in _INTEGRAL_TYPES:
+        return lambda c: int(c) if c is not None else 0
+    return lambda c: c
+
+
 def get_count_columns(dataset_obj) -> list:
     """Registered count-column menu as a list (may be empty)."""
     cc = (dataset_obj.endpoint_schema or {}).get("count_column")
