@@ -1,13 +1,14 @@
-"""Shared helpers for sparkline-backed domain routers (wikimedia, reddit).
+"""Shared helpers for sparkline-backed domain routers (wikimedia, reddit, bluesky).
 
-Both routers expose the same endpoint family — top-ngrams, term-series, and
-term-series/batch — over hive-partitioned ngram datasets with precomputed,
-hash-bucket-sharded sparkline files. Everything that is not genuinely
-domain-specific lives here:
+These routers expose the same term-series endpoint family over hive-partitioned
+ngram datasets with precomputed, hash-bucket-sharded sparkline files (and, for
+reddit/bluesky, a date-sharded dist tree for the slow fallback). Everything that
+is not genuinely domain-specific lives here:
 
   validated_dims()        — validate query params against introspected filter_values
   ngrams_context()        — (filter_vals, entity base path) for partition scans
   build_date_filter()     — date/window → SQL condition + params
+  year_pruning()          — prune year=* dist-tree dirs from an in-file date filter
   series_entry()          — one time-series response row
   log_fast_path_miss()    — classify a sparkline failure before scan fallback
   fetch_sparkline_rows()  — bucket-routed sparkline lookup for a set of terms
@@ -15,7 +16,7 @@ domain-specific lives here:
 """
 
 import logging
-from datetime import datetime, timedelta
+from datetime import date as dt_date, datetime, timedelta
 from typing import List, Optional
 
 from fastapi import HTTPException
@@ -144,23 +145,45 @@ def bucket_files(dataset_obj, terms, *, entity_value=None, filter_vals=None) -> 
     ]
 
 
+def year_pruning(date_params: list) -> tuple:
+    """Prune year=* hive directories from an in-file date filter's bounds.
+
+    For dist trees whose ``date`` column lives inside the files while
+    ``year`` is a hive partition (reddit, bluesky): this condition lets
+    DuckDB drop whole year directories from directory names alone, without
+    reading file footers. Bounds are padded by one week so weekly files
+    bucketed under the year their ISO week starts in stay reachable (a
+    no-op for daily trees).
+    """
+    pad = timedelta(days=6)
+    bounds = [dt_date.fromisoformat(str(p)[:10]) for p in date_params]
+    if len(bounds) == 2:
+        return "year BETWEEN ? AND ?", [(bounds[0] - pad).year, (bounds[1] + pad).year]
+    return "year <= ?", [(bounds[0] + pad).year]
+
+
 def fetch_sparkline_rows(
-    conn, sparkline_obj, terms: List[str], local_id, n: int,
+    conn, sparkline_obj, terms: List[str],
+    *, entity_value, filter_vals: dict, select_cols: str,
     date_condition: str, date_params: list, label: str,
 ) -> list:
     """Bucket-routed sparkline lookup for *terms*.
 
-    Returns rows of (ngram, date, pv_count, pv_rank, pv_freq) ordered by
-    ngram, date — or [] with a classified log line on failure (missing
+    Generic over the dataset's layout: *filter_vals* holds the partition
+    values ({"ngram_size": n} for wikimedia, {"n": n, "lang": lang} for
+    reddit/bluesky), *entity_value* the entity level when one exists, and
+    *select_cols* the SELECT list (columns vary per domain: pv_* for
+    wikimedia, count/rank/freq for reddit/bluesky). Rows come back ordered
+    by ngram, date — or [] with a classified log line on failure (missing
     sparkline files are expected; anything else is a warning).
     """
-    files = bucket_files(sparkline_obj, terms, entity_value=local_id, filter_vals={"ngram_size": n})
+    files = bucket_files(sparkline_obj, terms, entity_value=entity_value, filter_vals=filter_vals)
     file_list = ", ".join(f"'{f}'" for f in files)
     placeholders = ", ".join(["?"] * len(terms))
     try:
         return conn.execute(
             f"""
-            SELECT ngram, date, pv_count, pv_rank, pv_freq
+            SELECT {select_cols}
             FROM read_parquet([{file_list}])
             WHERE ngram IN ({placeholders})
               AND {date_condition}
@@ -177,21 +200,20 @@ async def run_top_ngrams(
     dataset_obj,
     label: str,
     local_id: Optional[str],
-    dates: str,
+    dates: Optional[str],
     dates2: Optional[str],
     filter_vals: dict,
     limit: int,
     metadata: dict,
-    range_sep: str = "_",
     count_col: Optional[str] = None,
 ) -> dict:
-    """Shared top-ngrams endpoint body, executed off the event loop.
+    """The generic top-ngrams endpoint body, executed off the event loop.
 
     Loads one types-counts system (or two for a temporal comparison keyed
-    by date range) and formats the response. *range_sep* joins start/end
-    in the comparison keys (wikimedia/reddit use "_", babynames "-").
-    *count_col* selects a measure from the registered count-column menu
-    (resolve via resolve_count_column); None uses the dataset default.
+    by date range, start/end joined with "_") and formats the response.
+    *dates* may be None for all-time / dateless datasets. *count_col*
+    selects a measure from the registered count-column menu (resolve via
+    resolve_count_column); None uses the dataset default.
     """
     if dates2 and parse_dates(dates) == parse_dates(dates2):
         # Identical ranges collide into one JSON key and silently drop system 1
@@ -213,8 +235,8 @@ async def run_top_ngrams(
                     dr2 = parse_dates(dates2)
                     sys2 = load_system(conn, dataset_obj, local_id, dr2, filter_vals, limit, count_col=count_col)
                     formatted2 = [{"types": t, "counts": c} for t, c in zip(sys2["types"], sys2["counts"])]
-                    key1 = dr1[0] if dr1[0] == dr1[1] else f"{dr1[0]}{range_sep}{dr1[1]}"
-                    key2 = dr2[0] if dr2[0] == dr2[1] else f"{dr2[0]}{range_sep}{dr2[1]}"
+                    key1 = dr1[0] if dr1[0] == dr1[1] else f"{dr1[0]}_{dr1[1]}"
+                    key2 = dr2[0] if dr2[0] == dr2[1] else f"{dr2[0]}_{dr2[1]}"
                     return {key1: formatted1, key2: formatted2, "metadata": metadata}
 
                 return {"data": formatted1, "metadata": metadata}

@@ -11,6 +11,8 @@
 	"manifesto": "motivation, why storywrangler, academic data commons, collective attention, background",
 	"specification": "entity standards, entity identifier systems, wikidata namespace, field taxonomies, entity mapping requirements",
 	"roadmap": "current gaps, planned features, ownership succession, lineage, S3 migration, frozen ducklake, open policy questions",
+	"tools/allotaxonometer": "allotaxonometer, allotaxonometry, allotaxonograph, rank-turbulence divergence, RTD, compare two ranked lists, diamond plot, mirror plot, instruments, allotaxonometer-ui, allotaxonometer-core, divergence",
+	"tools/wordshift": "wordshift, word shift, shift graph, sentiment analysis, labMT, happiness lexicon, per-word contributions, weighted average shift, average word score, wordshift-core, instruments",
 	"case-studies/wikimedia": "wikimedia pipeline example, parquet_hive submission, entity mapping benefits, large-scale ngrams",
 	"case-studies/scisciDB": "scisciDB pipeline example, time-series endpoint, pre-aggregation, group_by queries, semantic scholar"
 }

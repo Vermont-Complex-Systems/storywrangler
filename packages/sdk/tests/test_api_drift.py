@@ -188,6 +188,7 @@ class TestRouteCoverage:
         "/auth/me": ("UsersClient", "whoami"),
         "/admin/auth/users": ("UsersClient", "list"),  # + create() for POST
         "/admin/auth/users/{user_id}/role": ("UsersClient", "set_role"),
+        "/storywrangler/top-ngrams": ("InstrumentClient", "top_ngrams"),
         "/storywrangler/allotax": ("InstrumentClient", "allotax"),
         "/storywrangler/rtd": ("InstrumentClient", "rtd"),
         "/storywrangler/wordshift": ("InstrumentClient", "wordshift"),
@@ -201,7 +202,6 @@ class TestRouteCoverage:
         "/twitter": ("DatasetClient", "endpoints"),
         "/vt-zoning-atlas": ("DatasetClient", "endpoints"),
         # Twitter (mongodb pass-through, bespoke router mirroring the generic shapes)
-        "/twitter/top-ngrams": ("DatasetClient", "top_ngrams"),
         "/twitter/term-series": ("DatasetClient", "term_series"),
         "/twitter/term-series/batch": ("DatasetClient", "term_series_batch"),
         # Platform
@@ -210,17 +210,14 @@ class TestRouteCoverage:
         "/health/status/history": ("HealthClient", "history"),
         "/health/status/{domain}/{dataset_id}": ("HealthClient", "dataset"),
         # Data endpoints — generic DatasetClient methods, domain-bound
-        "/wikimedia/top-ngrams": ("DatasetClient", "top_ngrams"),
+        # (top-ngrams is served by the generic /storywrangler/top-ngrams for
+        # every domain; babynames and vt-zoning-atlas have no bespoke routes)
         "/wikimedia/term-series": ("DatasetClient", "term_series"),
         "/wikimedia/term-series/batch": ("DatasetClient", "term_series_batch"),
-        "/reddit/top-ngrams": ("DatasetClient", "top_ngrams"),
         "/reddit/term-series": ("DatasetClient", "term_series"),
         "/reddit/term-series/batch": ("DatasetClient", "term_series_batch"),
-        # bluesky: term-bucketed sparkline tree, term-series only (no top-ngrams yet)
         "/bluesky/term-series": ("DatasetClient", "term_series"),
         "/bluesky/term-series/batch": ("DatasetClient", "term_series_batch"),
-        "/babynames/top-ngrams": ("DatasetClient", "top_ngrams"),
-        "/vt-zoning-atlas/top-ngrams": ("DatasetClient", "top_ngrams"),
         # Bespoke routes — served via the escape hatch for now
         "/wikimedia/precomputed-rtd": ("Storywrangler", "get"),
         "/wikimedia/revisions": ("Storywrangler", "get"),

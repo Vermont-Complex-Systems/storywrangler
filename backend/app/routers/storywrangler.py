@@ -12,7 +12,6 @@ import math
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
-from storywrangler_schemas.coercion import coerce_scalar
 from ..core.allotax_utils import (
     sanitize_floats as _sanitize_floats,
     allotax_version as _allotax_version,
@@ -21,49 +20,19 @@ from ..core.allotax_utils import (
 from ..core.database import get_session
 from ..core.duckdb_client import get_duckdb_client, run_blocking
 from ..core.mongo_client import run_blocking_mongo
-from ..core.mongo_query import load_instrument_system
+from ..core.mongo_query import load_instrument_system, require_single_dates
 from ..core.duckdb_query import handle_query_error, load_system
 from ..core.query_utils import (
-    get_partition_defaults, get_queryable_dims, latest_from_manifest,
-    parse_dates, resolve_count_column, resolve_entity,
+    extract_filter_vals, latest_from_manifest, parse_dates,
+    require_dates_supported, require_types_counts, resolve_count_column,
+    resolve_entity,
 )
 from ..core.registry_utils import get_latest_entry
+from ..core.term_series import run_top_ngrams
 from . import openapi_docs as docs
 from ..core.timing import timed
 
 router = APIRouter()
-
-
-def _apply_defaults(filter_vals: dict, defaults: dict) -> None:
-    """Inject defaults for missing partition dimensions (mutates filter_vals).
-
-    *defaults* comes from ``get_partition_defaults()`` — values are already
-    resolved scalars (no list handling needed).
-    """
-    for dim, default_val in defaults.items():
-        filter_vals.setdefault(dim, default_val)
-
-
-def _validate_and_coerce_filters(filter_dicts: list, filter_values: dict) -> None:
-    """Validate filter values against introspected filter_values, with type coercion.
-
-    Query params arrive as strings but filter_values stores typed values
-    (ints, floats). Coerces string → int → float before checking membership.
-    Raises 400 if a value is not in the valid set.
-    """
-    for vals_dict in filter_dicts:
-        for dim, val in list(vals_dict.items()):
-            valid = filter_values.get(dim, [])
-            if not valid:
-                continue
-            if val not in valid:
-                coerced = coerce_scalar(val)
-                if coerced not in valid:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"{dim} must be one of {sorted(map(str, valid))}",
-                    )
-                vals_dict[dim] = coerced
 
 
 def _parse_reference_value(rv: Optional[str]):
@@ -87,6 +56,96 @@ def _parse_reference_value(rv: Optional[str]):
                    "(e.g. 5.0 for labMT's neutral midpoint).",
         )
 
+
+# ── top-ngrams (generic) ──────────────────────────────────────────────────────
+
+@router.get(
+    "/top-ngrams",
+    openapi_extra=docs.STORYWRANGLER_TOP_NGRAMS,
+)
+async def top_ngrams(
+    request: Request,
+    domain: str = Query("wikimedia", description="Domain owning the dataset"),
+    dataset: str = Query("ngrams", description="Dataset ID within the domain"),
+    dates: Optional[str] = Query(None, description="Date/year range for system 1. Single value '2024-10-01' or range '2024-10-01,2024-10-31'. Omit to load all time (datasets without a time dimension take no dates; mongodb datasets require a single date)."),
+    dates2: Optional[str] = Query(None, description="Optional second range for a temporal comparison."),
+    entity: Optional[str] = Query(None, description="Global entity ID (e.g. 'wikidata:Q30') or local ID. Omit for datasets without entity_mapping."),
+    weight: Optional[str] = Query(None, description="Count measure — one of the dataset's endpoint_schema.count_column entries. Defaults to the first registered measure."),
+    limit: int = Query(100, description="Max types per system (0 = no limit). manifest.availability's `types` gives the vocabulary ceiling."),
+    db: AsyncSession = Depends(get_session),
+):
+    """Top types by count for any registered types-counts dataset.
+
+    The generic form of the per-domain `/{domain}/top-ngrams` endpoints: the
+    dataset is selected by query params and filter dimensions are passed by
+    their registered column names — `?ngram_size=1&granularity=daily` for
+    wikimedia, `?n=1&lang=en` for reddit, `?sex=M` for babynames. Discover
+    them via `GET /registry/{domain}/{dataset_id}`; missing partition dims
+    get the dataset's registered defaults.
+
+    With `dates2`, returns two systems keyed by date range for a temporal
+    comparison (same shape as the per-domain endpoints). mongodb pass-through
+    datasets accept single dates only.
+    """
+    if dates2 and not dates:
+        raise HTTPException(status_code=400, detail="dates is required when dates2 is provided.")
+
+    dataset_obj = await get_latest_entry(db, domain, dataset)
+    if not dataset_obj:
+        raise HTTPException(status_code=404, detail=f"Dataset '{domain}/{dataset}' not found")
+
+    require_types_counts(dataset_obj)
+    require_dates_supported(dataset_obj, f"{domain}/{dataset}", dates, dates2)
+
+    filter_vals = extract_filter_vals(dataset_obj, request.query_params)
+    count_col = resolve_count_column(dataset_obj, weight)
+
+    has_entity_mapping = bool((dataset_obj.entity_mapping or {}).get("local_id_column"))
+    if has_entity_mapping and entity:
+        local_id = (await resolve_entity(db, domain, dataset, entity)).local_id
+    else:
+        local_id = None
+
+    metadata = {
+        "domain": domain,
+        "dataset": dataset,
+        "dataset_version": dataset_obj.version,
+        "entity": entity,
+        "filters": filter_vals,
+        "weight": count_col,
+    }
+
+    if dataset_obj.data_format == "mongodb":
+        require_single_dates([("dates", dates)])
+        require_single_dates([("dates2", dates2)], required=False)
+        if dates2 == dates:
+            raise HTTPException(
+                status_code=400,
+                detail="dates and dates2 resolve to the same range; "
+                       "use different dates to compare two systems.",
+            )
+
+        def _query():
+            def _load(date_str):
+                sys = load_instrument_system(
+                    dataset_obj, domain, filter_vals, date_str, limit, count_col)
+                return [{"types": t, "counts": c} for t, c in zip(sys["types"], sys["counts"])]
+
+            formatted1 = _load(dates)
+            if dates2:
+                return {dates: formatted1, dates2: _load(dates2), "metadata": metadata}
+            return {"data": formatted1, "metadata": metadata}
+
+        with timed("query", "MongoDB find"):
+            return await run_blocking_mongo(_query)
+
+    return await run_top_ngrams(
+        dataset_obj, f"{domain}/{dataset}", local_id, dates, dates2,
+        filter_vals, limit, metadata=metadata, count_col=count_col,
+    )
+
+
+# ── instruments ───────────────────────────────────────────────────────────────
 
 @router.get(
     "/allotax",
@@ -131,44 +190,21 @@ async def allotaxonometer(
     if not dataset_obj:
         raise HTTPException(status_code=404, detail=f"Dataset '{domain}/{dataset}' not found")
 
-    ep = dataset_obj.endpoint_schema
-    if not ep or ep.get("type") != "types-counts":
-        raise HTTPException(
-            status_code=400,
-            detail="Dataset does not support the types-counts endpoint. Register with endpoint_schema.type='types-counts'.",
-        )
+    require_types_counts(dataset_obj)
+    require_dates_supported(dataset_obj, f"{domain}/{dataset}", dates, dates2)
 
-    fv = dataset_obj.filter_values or {}
-    all_dims = get_queryable_dims(dataset_obj)
-    defaults = get_partition_defaults(dataset_obj)
-
-    # Extract declared filter dimensions from query params.
-    # Any column in level_order (partition/filter type) can be passed as
-    # ?dim=val (system 1) or ?dim2=val (system 2). Use actual column names
+    # Any level_order column (partition/filter type) can be passed as
+    # ?dim=val (system 1) or ?dim2=val (system 2), using actual column names
     # from the dataset — e.g. ?ngram_size=1 for wikimedia, ?n=1 for reddit.
-    qp = request.query_params
-    filter_vals1 = {dim: qp[dim]       for dim in all_dims if dim in qp}
-    filter_vals2 = {dim: qp[f"{dim}2"] for dim in all_dims if f"{dim}2" in qp}
-
-    # Inject defaults from level_order for any partition dim still missing.
-    _apply_defaults(filter_vals1, defaults)
-    _apply_defaults(filter_vals2, defaults)
-
-    # Validate and coerce filter values against introspected distinct values.
-    _validate_and_coerce_filters([filter_vals1, filter_vals2], fv)
+    filter_vals1 = extract_filter_vals(dataset_obj, request.query_params)
+    filter_vals2 = extract_filter_vals(dataset_obj, request.query_params, suffix="2")
 
     # mongodb pass-through datasets load systems via the router-registered
     # hook (host-form data_location keeps db/collection routing in the bespoke
     # router). Single dates only: range aggregation is parquet territory.
     is_mongo = dataset_obj.data_format == "mongodb"
     if is_mongo:
-        for label, val in (("dates", dates), ("dates2", dates2)):
-            if not val or "," in val:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"{label} must be a single YYYY-MM-DD date for mongodb datasets — "
-                           "range aggregation is not supported on the pass-through path.",
-                )
+        require_single_dates([("dates", dates), ("dates2", dates2)])
         # System 2 inherits system 1's routing/filters unless overridden (?lang2=...)
         filter_vals2 = {**filter_vals1, **filter_vals2}
 
@@ -282,12 +318,8 @@ async def rank_turbulence_divergence(
         if not dataset_obj:
             raise HTTPException(status_code=404, detail=f"Dataset '{domain}/{dataset}' not found")
 
-    ep = dataset_obj.endpoint_schema
-    if not ep or ep.get("type") != "types-counts":
-        raise HTTPException(
-            status_code=400,
-            detail="Dataset does not support the types-counts endpoint.",
-        )
+    require_types_counts(dataset_obj)
+    require_dates_supported(dataset_obj, f"{domain}/{dataset}", dates, dates2)
 
     if dates and not dates2:
         raise HTTPException(
@@ -296,29 +328,12 @@ async def rank_turbulence_divergence(
         )
 
     # Build filter vals from query params (same pattern as /allotax)
-    all_dims = get_queryable_dims(dataset_obj)
-    defaults = get_partition_defaults(dataset_obj)
-
-    fv = dataset_obj.filter_values or {}
-    qp = request.query_params
-    filter_vals = {dim: qp[dim] for dim in all_dims if dim in qp}
-    filter_vals2 = {dim: qp[f"{dim}2"] for dim in all_dims if f"{dim}2" in qp}
-
-    _apply_defaults(filter_vals, defaults)
-    _apply_defaults(filter_vals2, defaults)
-
-    _validate_and_coerce_filters([filter_vals, filter_vals2], fv)
+    filter_vals = extract_filter_vals(dataset_obj, request.query_params)
+    filter_vals2 = extract_filter_vals(dataset_obj, request.query_params, suffix="2")
 
     is_mongo = dataset_obj.data_format == "mongodb"
     if is_mongo:
-        for label, val in (("dates", dates), ("dates2", dates2)):
-            if not val or "," in val:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"{label} is required and must be a single YYYY-MM-DD date for "
-                           "mongodb datasets — range aggregation is not supported on the "
-                           "pass-through path.",
-                )
+        require_single_dates([("dates", dates), ("dates2", dates2)])
         filter_vals2 = {**filter_vals, **filter_vals2}
 
     # Same entity for both systems (date-vs-date comparison)
@@ -447,7 +462,8 @@ async def weighted_avg_wordshift(
 
     > **Lexicon** — wikipedia ngrams are English (enwiki), so `labMT_English`
     > is correct for every entity. Override `lexicon` only for corpora in
-    > another language.
+    > another language. labMT scores single words, so keep `ngram_size=1`
+    > (the default); higher n-gram sizes match nothing and return an empty shift.
 
     > **Filter dimensions** — look up available filters via
     > `GET /registry/{domain}/{dataset_id}` (`transform.filter_dimensions`) and
@@ -457,38 +473,18 @@ async def weighted_avg_wordshift(
     if not dataset_obj:
         raise HTTPException(status_code=404, detail=f"Dataset '{domain}/{dataset}' not found")
 
-    ep = dataset_obj.endpoint_schema
-    if not ep or ep.get("type") != "types-counts":
-        raise HTTPException(
-            status_code=400,
-            detail="Dataset does not support the types-counts endpoint. Register with endpoint_schema.type='types-counts'.",
-        )
+    require_types_counts(dataset_obj)
+    require_dates_supported(dataset_obj, f"{domain}/{dataset}", dates, dates2)
 
     ref_val = _parse_reference_value(reference_value)
 
-    fv = dataset_obj.filter_values or {}
-    all_dims = get_queryable_dims(dataset_obj)
-    defaults = get_partition_defaults(dataset_obj)
-
     # ?dim=val → system 1, ?dim2=val → system 2 (same convention as /allotax).
-    qp = request.query_params
-    filter_vals1 = {dim: qp[dim]       for dim in all_dims if dim in qp}
-    filter_vals2 = {dim: qp[f"{dim}2"] for dim in all_dims if f"{dim}2" in qp}
-
-    _apply_defaults(filter_vals1, defaults)
-    _apply_defaults(filter_vals2, defaults)
-
-    _validate_and_coerce_filters([filter_vals1, filter_vals2], fv)
+    filter_vals1 = extract_filter_vals(dataset_obj, request.query_params)
+    filter_vals2 = extract_filter_vals(dataset_obj, request.query_params, suffix="2")
 
     is_mongo = dataset_obj.data_format == "mongodb"
     if is_mongo:
-        for label, val in (("dates", dates), ("dates2", dates2)):
-            if not val or "," in val:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"{label} must be a single YYYY-MM-DD date for mongodb datasets — "
-                           "range aggregation is not supported on the pass-through path.",
-                )
+        require_single_dates([("dates", dates), ("dates2", dates2)])
         # System 2 inherits system 1's routing/filters unless overridden (?lang2=...)
         filter_vals2 = {**filter_vals1, **filter_vals2}
 

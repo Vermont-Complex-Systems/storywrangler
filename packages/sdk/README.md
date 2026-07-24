@@ -93,11 +93,11 @@ follow the URL, so you can guess them without docs:
 | `GET /admin/auth/users` | `client.users.list()` |
 | `POST /admin/auth/users` | `client.users.create(username, email, password, role=)` |
 | `PUT /admin/auth/users/{id}/role` | `client.users.set_role(user_id, role)` |
+| `GET /storywrangler/top-ngrams` | `client.instrument.top_ngrams(...)` or `client.dataset(domain, id).top_ngrams(...)` |
 | `GET /storywrangler/allotax` | `client.instrument.allotax(...)` |
 | `GET /storywrangler/rtd` | `client.instrument.rtd(...)` |
 | `GET /storywrangler/wordshift` | `client.instrument.wordshift(...)` |
 | `GET /{domain}` | `client.dataset(domain)` — repr lists endpoints; `.endpoints` / `.datasets` |
-| `GET /{domain}/top-ngrams` | `client.dataset(domain, id).top_ngrams(...)` |
 | `GET /{domain}/term-series` | `client.dataset(domain, id).term_series(type, ...)` |
 | `GET /{domain}/term-series/batch` | `client.dataset(domain, id).term_series_batch(types, ...)` |
 | `GET /health/status` | `client.health.status()` |
@@ -284,11 +284,12 @@ result = client.instrument.wordshift(
     entity="wikidata:Q30",
     dates="2026-02-10", dates2="2026-02-17",
     lexicon="labMT_English",
+    ngram_size=1,   # labMT scores single words; bigrams score as neutral
 )
 # result keys: entries, component_sums, s_avg_1, s_avg_2, reference_value, meta
 ```
 
-System 1 is the baseline; system 2 is read as a shift away from it. Omit `entity2` for a date-vs-date shift, or set it to compare two entities. For the underlying computation without the platform, use the [`wordshift`](https://pypi.org/project/wordshift/) package directly.
+System 1 is the baseline; system 2 is read as a shift away from it. Omit `entity2` for a date-vs-date shift, or set it to compare two entities. Keep `ngram_size=1` (the default): labMT is a unigram lexicon, so higher n-gram sizes match nothing and return an empty shift. For the underlying computation without the platform, use the [`wordshift`](https://pypi.org/project/wordshift/) package directly.
 
 ## Hash Bucket Assignment
 

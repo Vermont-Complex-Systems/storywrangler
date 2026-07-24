@@ -22,7 +22,10 @@ export const nav = [
 	},
 	{
 		title: 'Instruments',
-		items: [{ label: 'Allotaxonometry', href: '/tools/allotaxonometer' }]
+		items: [
+			{ label: 'Allotaxonometer', href: '/tools/allotaxonometer' },
+			{ label: 'Wordshift', href: '/tools/wordshift' }
+		]
 	},
 	{
 		title: 'Case Studies',
