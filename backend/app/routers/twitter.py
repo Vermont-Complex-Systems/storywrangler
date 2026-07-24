@@ -30,9 +30,12 @@ that slice of the data wants to be parquet.
 """
 
 import logging
+import time
 
 from fastapi import APIRouter, HTTPException
+from pymongo.errors import PyMongoError
 
+from ..core.mongo_client import INTROSPECT_TIMEOUT_S, _iso
 from ..core.mongo_query import register_mongo_routing
 
 log = logging.getLogger(__name__)
@@ -43,6 +46,7 @@ _DOMAIN = "twitter"
 _DATASET_ID = "ngrams"
 _LABEL = f"{_DOMAIN}/{_DATASET_ID}"
 _NGRAM_SIZES = (1, 2, 3)  # the {n}grams databases that exist on the server
+_AVAILABILITY_BUDGET_S = 120  # cap the registration walk (~500 collections)
 
 
 # ── routing resolution ────────────────────────────────────────────────────────
@@ -78,4 +82,65 @@ def _instrument_routing(filter_vals: dict) -> tuple:
     return _route(int(filter_vals.get("ngram_size", 1)), str(filter_vals.get("lang", "en")))
 
 
-register_mongo_routing(_DOMAIN, _instrument_routing)
+def _introspect(client, dataset) -> dict:
+    """Per-(ngram_size, lang) availability + filter_values for the host form.
+
+    The mongo analogue of parquet's per-slice availability walk: generic
+    mongo_introspect can't derive these for a host-form dataset (no single
+    collection to sample, and the {n}grams→size / collection→lang layout lives
+    here), so the router owns the walk — the same place it owns routing.
+
+    For each {n}grams database and each language collection, MIN/MAX of the
+    time column is a first/last ``find_one`` on the time index (not an
+    aggregation — the pass-through guardrail holds). Produces the entity-less
+    ``{ngram_size: {lang: {min, max}}}`` tree the query layer already navigates
+    (availability_range_for), and filter_values for the two routing dims so
+    ``?lang=`` validates and ``.filters`` lists the languages. Best-effort and
+    bounded: a per-probe maxTimeMS plus an overall budget, logging if the walk
+    is truncated rather than silently returning partial coverage.
+    """
+    time_col = (dataset.transform.time_dimension if dataset.transform else None) or "time"
+    max_ms = INTROSPECT_TIMEOUT_S * 1000
+    deadline = time.monotonic() + _AVAILABILITY_BUDGET_S
+
+    availability: dict = {}
+    langs: set = set()
+    truncated = False
+    for n in _NGRAM_SIZES:
+        db = client[f"{n}grams"]
+        try:
+            names = db.list_collection_names()
+        except PyMongoError as e:
+            log.warning("twitter introspect: list_collection_names(%sgrams) failed: %s", n, e)
+            continue
+        for lang in names:
+            if time.monotonic() > deadline:
+                truncated = True
+                break
+            coll = db[lang]
+            try:
+                lo = coll.find_one({time_col: {"$ne": None}}, {time_col: True},
+                                   sort=[(time_col, 1)], max_time_ms=max_ms)
+                hi = coll.find_one({time_col: {"$ne": None}}, {time_col: True},
+                                   sort=[(time_col, -1)], max_time_ms=max_ms)
+            except PyMongoError:
+                continue
+            if lo and hi:
+                availability.setdefault(str(n), {})[lang] = {
+                    "min": _iso(lo[time_col]), "max": _iso(hi[time_col])}
+                langs.add(lang)
+        if truncated:
+            break
+    if truncated:
+        log.warning(
+            "twitter introspect: hit the %ds budget; availability covers %d "
+            "languages so far (re-register to extend)", _AVAILABILITY_BUDGET_S, len(langs))
+
+    derived: dict = {}
+    if availability:
+        derived["availability"] = availability
+        derived["filter_values"] = {"lang": sorted(langs), "ngram_size": list(_NGRAM_SIZES)}
+    return derived
+
+
+register_mongo_routing(_DOMAIN, _instrument_routing, introspect=_introspect)
