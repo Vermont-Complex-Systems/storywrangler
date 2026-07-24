@@ -36,11 +36,18 @@ _IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _ORDER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*( +(ASC|DESC))?$", re.IGNORECASE)
 _SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+$")
 
-_ENDPOINT_SCHEMA_KEYS = {"type", "type_column", "count_column"}
+_ENDPOINT_SCHEMA_KEYS = {
+    "type", "type_column", "count_column",
+    # term-series companions + companion resolution (schemas 0.3.0)
+    "rank_column", "freq_column", "orientation", "role",
+    # type-documents provenance columns
+    "doc_column", "score_column", "order_column",
+}
 _TRANSFORM_KEYS = {
     "time_dimension",
     "filter_dimensions",
     "time_partitions",
+    "defaults",
     "hash_bucket",
     "hash_algorithm",
     "hash_seed",
@@ -75,6 +82,7 @@ def validate_submission(payload: dict[str, Any], check_disk: bool = True) -> dic
     _check_stray_keys(payload, warnings)
     _check_column_identifiers(payload, errors)
     _check_hash_bucket_form(payload, errors)
+    _check_declared_defaults(payload, errors, notes)
     _check_version(payload, warnings)
     _check_auto_derived_fields(payload, notes)
     _check_endpoint_type_requirements(payload, errors)
@@ -153,6 +161,44 @@ def _check_column_identifiers(payload: dict, errors: list[str]) -> None:
             f"guard: endpoint_schema.order_column = {oc!r} must be a column name "
             "optionally followed by ASC or DESC — the server rejects this with 422."
         )
+
+
+def _check_declared_defaults(payload: dict, errors: list[str], notes: list[str]) -> None:
+    """Mirror of _apply_declared_defaults (payload-level parts).
+
+    Defaults apply to partition/filter hive levels only, so a key naming the
+    entity, time, or hash-bucket column is a guaranteed 422. Whether a key is
+    an actual hive level and its value exists on disk is only knowable
+    server-side (levels are auto-discovered) — noted, not checked here.
+    """
+    tr = payload.get("transform") or {}
+    if not isinstance(tr, dict):
+        return
+    declared = tr.get("defaults") or {}
+    if not isinstance(declared, dict) or not declared:
+        return
+
+    em = payload.get("entity_mapping") or {}
+    reserved = {
+        tr.get("time_dimension"): "transform.time_dimension",
+        tr.get("hash_bucket") if isinstance(tr.get("hash_bucket"), str) else None: "transform.hash_bucket",
+        em.get("local_id_column") if isinstance(em, dict) else None: "entity_mapping.local_id_column",
+    }
+    for tp in tr.get("time_partitions") or []:
+        reserved[tp] = "transform.time_partitions"
+    for col in declared:
+        role = reserved.get(col)
+        if role:
+            errors.append(
+                f"guard: transform.defaults['{col}'] names the {role} column — "
+                "defaults apply to partition/filter hive levels only; the server "
+                "rejects this with 422."
+            )
+    notes.append(
+        "transform.defaults: keys must be auto-discovered partition/filter hive "
+        "levels and values must exist on disk — the server validates both at "
+        "registration against the introspected filter_values."
+    )
 
 
 def _check_endpoint_type_requirements(payload: dict, errors: list[str]) -> None:

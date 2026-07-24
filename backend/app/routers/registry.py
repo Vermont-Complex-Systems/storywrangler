@@ -5,6 +5,7 @@ Registry endpoints — discover and inspect registered file-based datasets.
 import logging
 import re
 from typing import Any, Dict, List, Optional
+from urllib.parse import quote
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
@@ -310,6 +311,56 @@ def _coerce_derived(derived: Dict[str, Any]) -> None:
             lv["default_value"] = _coerce(lv["default_value"], col_type)
 
 
+def _apply_declared_defaults(dataset: DatasetCreate, derived: Dict[str, Any]) -> None:
+    """Override auto-discovered level_order defaults with transform.defaults.
+
+    Auto-discovery stores the first on-disk value alphabetically — right for
+    ngram_size=1 or granularity=daily, wrong for language levels ('af' wins
+    the alphabet). A declared default must name an actual partition/filter
+    level and a value present in the introspected filter_values, so a typo
+    fails here with a teaching 422 instead of silently at query time.
+    Runs after _coerce_derived so comparisons see typed values. Mutates the
+    level_order entries in place (raw_value follows, re-quoted to the on-disk
+    directory form build_hive_path produces).
+    """
+    declared = (dataset.transform.defaults if dataset.transform else None) or {}
+    if not declared:
+        return
+
+    by_col = {lv["column"]: lv for lv in derived.get("level_order") or []}
+    queryable = sorted(c for c, lv in by_col.items() if lv["type"] in ("partition", "filter"))
+    fv = derived.get("filter_values") or {}
+    schema = derived.get("data_schema") or {}
+
+    for col, val in declared.items():
+        lv = by_col.get(col)
+        if lv is None or lv["type"] not in ("partition", "filter"):
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"transform.defaults: '{col}' is not a queryable hive level of "
+                    f"this dataset (queryable levels: {queryable or 'none'}). Defaults "
+                    "apply to partition/filter hive levels only — non-hive "
+                    "filter_dimensions aggregate when omitted, and mongodb routing "
+                    "defaults live in the domain router."
+                ),
+            )
+        coerced = _coerce(val, schema.get(col, "")) if isinstance(val, str) else val
+        valid = fv.get(col)
+        if valid and coerced not in valid:
+            shown = sorted(map(str, valid))
+            shown = shown[:20] + ["..."] if len(shown) > 20 else shown
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"transform.defaults: {col}={val!r} is not among the on-disk "
+                    f"values {shown}."
+                ),
+            )
+        lv["default_value"] = coerced
+        lv["raw_value"] = quote(str(coerced), safe="")
+
+
 # ── Public write endpoints ─────────────────────────────────────────────────────
 
 @router.post(
@@ -499,6 +550,10 @@ async def register_dataset(
 
     # 3. Type-coerce filter_values and level_order default_values using data_schema.
     _coerce_derived(derived)
+
+    # 3b. Declared defaults override the auto-discovered (first-alphabetical)
+    #     ones — validated against the introspected levels and values.
+    _apply_declared_defaults(dataset, derived)
 
     # 4. Endpoint-type validation suites.
     if dataset.endpoint_schema and dataset.endpoint_schema.type == "types-counts":

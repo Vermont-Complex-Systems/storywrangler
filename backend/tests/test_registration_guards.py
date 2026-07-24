@@ -144,3 +144,72 @@ class TestRunBlocking:
 
         timings = asyncio.run(main())
         assert [t[0] for t in timings] == ["seg"]
+
+
+# ── _apply_declared_defaults ──────────────────────────────────────────────────
+
+class TestDeclaredDefaults:
+    """transform.defaults overrides the auto-discovered (first-alphabetical)
+    level_order defaults — validated so a typo fails at registration with a
+    teaching 422, not silently at query time."""
+
+    def _derived(self):
+        return {
+            "level_order": [
+                {"column": "n", "type": "filter", "default_value": 1, "raw_value": "1"},
+                {"column": "lang", "type": "filter", "default_value": "af", "raw_value": "af"},
+                {"column": "year", "type": "time_partition", "default_value": 2006, "raw_value": "2006"},
+                {"column": "ngram_bucket", "type": "hash_bucket", "default_value": 0, "raw_value": "0"},
+            ],
+            "filter_values": {"n": [1, 2], "lang": ["af", "de", "en"]},
+            "data_schema": {"n": "BIGINT", "lang": "VARCHAR"},
+        }
+
+    def _apply(self, defaults, derived=None):
+        from app.routers.registry import _apply_declared_defaults
+        ds = make_dataset(transform={"time_dimension": "date",
+                                     "filter_dimensions": ["lang", "n"],
+                                     "defaults": defaults})
+        derived = derived if derived is not None else self._derived()
+        _apply_declared_defaults(ds, derived)
+        return derived
+
+    def test_override_applied_with_raw_value(self):
+        derived = self._apply({"lang": "en", "n": 1})
+        by_col = {lv["column"]: lv for lv in derived["level_order"]}
+        assert by_col["lang"]["default_value"] == "en"
+        assert by_col["lang"]["raw_value"] == "en"
+        assert by_col["n"]["default_value"] == 1
+
+    def test_string_value_coerced_via_schema(self):
+        # Submitters may write "1"; data_schema says BIGINT → int 1.
+        derived = self._apply({"n": "1"})
+        by_col = {lv["column"]: lv for lv in derived["level_order"]}
+        assert by_col["n"]["default_value"] == 1
+
+    def test_unknown_column_teaches_422(self):
+        with pytest.raises(HTTPException) as exc:
+            self._apply({"language": "en"})
+        assert exc.value.status_code == 422
+        assert "queryable hive level" in exc.value.detail
+
+    def test_non_queryable_level_teaches_422(self):
+        # hash_bucket / time_partition levels are routing, not query axes.
+        with pytest.raises(HTTPException) as exc:
+            self._apply({"ngram_bucket": 3})
+        assert exc.value.status_code == 422
+
+    def test_value_not_on_disk_teaches_422(self):
+        with pytest.raises(HTTPException) as exc:
+            self._apply({"lang": "eng"})
+        assert exc.value.status_code == 422
+        assert "not among the on-disk values" in exc.value.detail
+
+    def test_no_defaults_is_noop(self):
+        derived = self._apply(None)
+        assert {lv["column"]: lv["default_value"] for lv in derived["level_order"]}["lang"] == "af"
+
+    def test_flat_dataset_has_no_levels_teaches_422(self):
+        with pytest.raises(HTTPException) as exc:
+            self._apply({"sex": "M"}, derived={"level_order": [], "filter_values": {}})
+        assert exc.value.status_code == 422
