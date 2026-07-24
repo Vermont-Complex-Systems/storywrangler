@@ -42,9 +42,22 @@ _TIMEOUT_MS = QUERY_TIMEOUT_S * 1000
 # routers for host-form datasets; literal and template forms need no hook.
 MONGO_ROUTING: Dict[str, Callable[[dict], Tuple[str, str]]] = {}
 
+# domain → fn(client, dataset) -> derived dict (availability / filter_values).
+# The registration-time analogue of the routing hook: a host-form router owns
+# its collection layout, so it also owns how to walk it for manifest fields
+# that mongo_introspect can't derive generically (twitter: per-(ngram_size,
+# lang) min/max across its {n}grams collections). read by mongo_introspect.
+MONGO_INTROSPECT: Dict[str, Callable] = {}
 
-def register_mongo_routing(domain: str, fn: Callable[[dict], Tuple[str, str]]) -> None:
+
+def register_mongo_routing(
+    domain: str,
+    fn: Callable[[dict], Tuple[str, str]],
+    introspect: Optional[Callable] = None,
+) -> None:
     MONGO_ROUTING[domain] = fn
+    if introspect is not None:
+        MONGO_INTROSPECT[domain] = introspect
 
 
 def resolve_collection(dataset_obj, domain: str, filter_vals: dict):

@@ -224,6 +224,18 @@ def mongo_introspect(dataset) -> Dict[str, Any]:
         else:
             log.warning(
                 "mongo_introspect: data_location %r is a host or template — requires explicit data_schema.", loc)
+        # A host-form router may register an introspection hook that walks its
+        # own collection layout for availability / filter_values (twitter: per
+        # (ngram_size, lang) min/max). Local import avoids a mongo_query cycle.
+        from .mongo_query import MONGO_INTROSPECT
+        hook = MONGO_INTROSPECT.get(getattr(dataset, "domain", None))
+        client = get_mongo_client()
+        if hook and client is not None:
+            try:
+                derived.update(hook(client, dataset))
+            except PyMongoError as e:
+                log.warning("mongo_introspect: %s host-form hook failed: %s",
+                            getattr(dataset, "domain", "?"), e)
         return derived
 
     client = get_mongo_client()
