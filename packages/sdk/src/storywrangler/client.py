@@ -135,6 +135,92 @@ def _wrap(payload):
     return payload
 
 
+def _availability_span(node) -> tuple:
+    """(min, max) across every leaf of a manifest.availability tree.
+
+    The tree nests differently per dataset (entity-first, n/lang, flat);
+    the overall span is what a summary needs — per-slice bounds stay in
+    ``.availability``.
+    """
+    los: List[str] = []
+    his: List[str] = []
+
+    def scalar(v):
+        return v is not None and not isinstance(v, (dict, list))
+
+    def walk(n):
+        if not isinstance(n, dict):
+            return
+        # A leaf carries SCALAR min/max. The key test alone is not enough:
+        # a level value can be literally named "min" (bluesky's lang=min,
+        # Minangkabau), making an inner node look leaf-shaped.
+        if scalar(n.get("min")) or scalar(n.get("max")):
+            if scalar(n.get("min")):
+                los.append(str(n["min"]))
+            if scalar(n.get("max")):
+                his.append(str(n["max"]))
+            return
+        for v in n.values():
+            walk(v)
+
+    walk(node or {})
+    return (min(los) if los else None, max(his) if his else None)
+
+
+def _preview(values, limit: int = 8) -> str:
+    """Human preview of a value list: short lists in full, long ones counted."""
+    vals = [str(v) for v in values]
+    if len(vals) <= limit:
+        return ", ".join(vals)
+    return f"{len(vals)} values: " + ", ".join(vals[:limit]) + ", …"
+
+
+def _dataset_summary_rows(meta: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """One tidy row per way to slice the dataset — the ``.summary`` table.
+
+    Columns: dimension, kind, default, values, min, max. Filter rows carry
+    the registered default and the valid values; the time row carries the
+    dates contract ('range' | 'single') and the overall availability span;
+    entity and measure rows point at ``.adapter`` and ``?weight=``.
+    """
+    rows: List[Dict[str, Any]] = []
+
+    def row(dimension, kind, default=None, values=None, lo=None, hi=None):
+        rows.append({"dimension": dimension, "kind": kind, "default": default,
+                     "values": values, "min": lo, "max": hi})
+
+    em = meta.get("entity_mapping") or {}
+    if em.get("local_id_column"):
+        row(em["local_id_column"], "entity", values="entity IDs — resolve via .adapter")
+
+    tr = meta.get("transform") or {}
+    if tr.get("time_dimension"):
+        lo, hi = _availability_span((meta.get("manifest") or {}).get("availability"))
+        row(tr["time_dimension"], "time", values=f"dates: {meta.get('dates', 'range')}",
+            lo=lo, hi=hi)
+
+    fv = meta.get("filter_values") or {}
+    level_order = meta.get("level_order") or []
+    if level_order:
+        for lv in level_order:
+            if lv.get("type") in ("partition", "filter"):
+                col = lv["column"]
+                row(col, "filter", default=lv.get("default_value"),
+                    values=_preview(fv.get(col, [])))
+    else:
+        # Flat parquet: dims come from filter_values; omitting one aggregates.
+        for col, vals in fv.items():
+            row(col, "filter", values=_preview(vals))
+
+    ep = meta.get("endpoint_schema") or {}
+    menu = ep.get("count_column")
+    menu = menu if isinstance(menu, list) else [menu] if menu else []
+    if len(menu) > 1:
+        row("weight", "measure", default=menu[0], values=_preview(menu))
+
+    return rows
+
+
 def _raise_with_detail(resp) -> None:
     """raise_for_status, but keep the server's error detail in the message.
 
@@ -809,6 +895,16 @@ class DatasetClient(_SubClient):
         return (self._ensure_meta().get("manifest") or {}).get("availability", {})
 
     @property
+    def summary(self) -> "RecordList":
+        """One row per way to slice this dataset — ``.summary.df()`` for a table.
+
+        Columns: dimension, kind (entity | time | filter | measure), default,
+        values, min, max. The explorable view of the registration: the full
+        (nested) record stays on ``.meta``, which does not cast to a DataFrame.
+        """
+        return RecordList(_dataset_summary_rows(self._ensure_meta()))
+
+    @property
     def adapter(self) -> List[Dict[str, Any]]:
         """Entity mapping rows (local_id ↔ entity_id ↔ entity_name), cached.
 
@@ -1219,10 +1315,16 @@ class DatasetClient(_SubClient):
         return self._registry.validate_sources(self.domain, self.dataset_id)
 
     def __repr__(self) -> str:
+        # Displaying the object answers the question you'd otherwise dig for:
+        # dataset mode shows the dataset card (mirrors .meta), domain mode the
+        # endpoint list (mirrors GET /{domain}). Best-effort — falls back to a
+        # bare identifier when offline.
         if self.dataset_id is not None:
-            return f"DatasetClient('{self.domain}/{self.dataset_id}')"
-        # Domain mode: displaying the object answers "what can I call here?"
-        # (mirrors GET /{domain}). Best-effort — falls back when offline.
+            try:
+                meta = self._ensure_meta()
+            except Exception:
+                return f"DatasetClient('{self.domain}/{self.dataset_id}')"
+            return self._dataset_card(meta)
         try:
             info = self._domain_root()
         except Exception:
@@ -1235,6 +1337,30 @@ class DatasetClient(_SubClient):
         datasets = info.get("datasets", [])
         lines.append(
             f"datasets: {datasets} — client.dataset('{self.domain}', <id>) for metadata"
+        )
+        return "\n".join(lines)
+
+    def _dataset_card(self, meta: Dict[str, Any]) -> str:
+        """Human summary of one dataset — what repr shows in dataset mode."""
+        head = f"Dataset '{self.domain}/{self.dataset_id}' — {meta.get('data_format')}"
+        if meta.get("version") and meta["version"] != "latest":
+            head += f" (v{meta['version']})"
+        lines = [head]
+        desc = (meta.get("description") or "").strip()
+        if desc:
+            lines.append("  " + (desc[:100] + "…" if len(desc) > 100 else desc))
+        for r in _dataset_summary_rows(meta):
+            if r["kind"] == "time":
+                span = f" ({r['min']} → {r['max']})" if r["min"] or r["max"] else ""
+                lines.append(f"  {r['dimension']:12} {r['values']}{span}")
+            elif r["kind"] == "filter" and r["default"] is not None:
+                lines.append(f"  {r['dimension']:12} default {r['default']!r} — {r['values']}")
+            else:
+                default = f"default {r['default']!r} — " if r["default"] is not None else ""
+                lines.append(f"  {r['dimension']:12} {default}{r['values']}")
+        lines.append(
+            ".summary.df() → this as a table · .meta → full registration · "
+            ".filters / .availability / .adapter"
         )
         return "\n".join(lines)
 
