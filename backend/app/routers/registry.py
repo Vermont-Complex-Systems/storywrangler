@@ -16,7 +16,7 @@ from sqlmodel import select
 from storywrangler_schemas.registry import DatasetCreate, EntityRow
 
 from ..core.database import get_session
-from ..core.duckdb_client import get_admin_duckdb_client
+from ..core.duckdb_client import REGISTRATION_TIMEOUT_S, get_admin_duckdb_client
 from ..core.mongo_client import mongo_introspect, run_blocking_mongo
 from ..core.openapi_menus import refresh_weight_menus
 from ..core.parquet_introspect import (
@@ -502,7 +502,13 @@ async def register_dataset(
             )
     else:
         try:
-            with get_admin_duckdb_client().timed_connect() as conn:
+            # Registration introspection gets a generous timeout — the hive
+            # availability walk is hundreds of per-slice MIN/MAX reads that are
+            # fast warm but minutes cold over NFS. Health probes keep the short
+            # default (see REGISTRATION_TIMEOUT_S).
+            with get_admin_duckdb_client().timed_connect(
+                timeout_s=REGISTRATION_TIMEOUT_S
+            ) as conn:
                 derived.update(
                     introspect(conn, dataset, provided_schema=dataset.data_schema,
                                level_order=derived.get("level_order"))

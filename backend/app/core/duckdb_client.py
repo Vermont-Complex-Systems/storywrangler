@@ -62,7 +62,13 @@ QUERY_TIMEOUT_S = 120  # 2 minutes — user-facing queries
 
 ADMIN_MEMORY = "512MB"
 ADMIN_THREADS = 1
-ADMIN_TIMEOUT_S = 30  # 30 seconds — introspection / health probes
+ADMIN_TIMEOUT_S = 30  # 30 seconds — health probes (must stay snappy)
+# Registration introspection walks the whole hive tree (e.g. bluesky's ~700
+# per-slice MIN/MAX reads over NFS) — cold-cache latency needs minutes, not
+# the health-probe budget. A rare, deliberate admin write, so a long ceiling
+# is safe. Passed per-connection at the registration call site; health checks
+# keep ADMIN_TIMEOUT_S.
+REGISTRATION_TIMEOUT_S = 300
 
 
 class DuckDBClient:
