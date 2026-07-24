@@ -47,7 +47,7 @@ Usage::
 from __future__ import annotations
 
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 import requests
 from dotenv import load_dotenv
@@ -637,6 +637,8 @@ class InstrumentClient(_SubClient):
         weight: str | None = None,
         ngram_limit: int = 10000,
         wordshift_limit: int = 200,
+        stop_lens: tuple[float, float] | str | None = None,
+        stop_words: Iterable[str] | str | None = None,
         **filter_dims,
     ) -> Dict[str, Any]:
         """Weighted-average sentiment word shift between two systems.
@@ -661,6 +663,11 @@ class InstrumentClient(_SubClient):
                 labMT's neutral midpoint).
             ngram_limit: Max types to load per system.
             wordshift_limit: Truncate output to the top N words by |shift|.
+            stop_lens: Shifterator's neutral-word filter — a ``(lo, hi)`` tuple
+                (e.g. ``(4, 6)``) or ``'lo,hi'`` string. Drops words scored
+                inside ``[lo, hi]`` before the shift. None keeps every word.
+            stop_words: Words to exclude from the shift entirely, regardless of
+                score — an iterable of words or a comma-separated string.
             **filter_dims: Dataset-specific filter dimensions passed as query
                 params (dim / dim2 suffix convention), e.g.
                 ``ngram_size=1, granularity="daily"``.
@@ -674,9 +681,18 @@ class InstrumentClient(_SubClient):
             "lexicon": lexicon,
             "ngram_limit": ngram_limit, "wordshift_limit": wordshift_limit,
         }
+        stop_lens_param = (
+            stop_lens if stop_lens is None or isinstance(stop_lens, str)
+            else f"{stop_lens[0]},{stop_lens[1]}"
+        )
+        stop_words_param = (
+            stop_words if stop_words is None or isinstance(stop_words, str)
+            else ",".join(stop_words)
+        )
         optional = {
             "entity": entity, "entity2": entity2, "dates": dates, "dates2": dates2,
             "reference_value": reference_value, "weight": weight,
+            "stop_lens": stop_lens_param, "stop_words": stop_words_param,
         }
         params.update({k: v for k, v in optional.items() if v is not None})
         params.update(filter_dims)
@@ -1087,6 +1103,8 @@ class DatasetClient(_SubClient):
         weight: str | None = None,
         ngram_limit: int = 10000,
         wordshift_limit: int = 200,
+        stop_lens: tuple[float, float] | str | None = None,
+        stop_words: Iterable[str] | str | None = None,
         **filter_dims,
     ) -> Dict[str, Any]:
         """Weighted-average sentiment word shift on this dataset.
@@ -1103,6 +1121,10 @@ class DatasetClient(_SubClient):
                 float (5.0 is labMT's neutral midpoint).
             ngram_limit: Max types to load per system.
             wordshift_limit: Truncate output to the top N words by |shift|.
+            stop_lens: Neutral-word filter — a ``(lo, hi)`` tuple (e.g.
+                ``(4, 6)``) or ``'lo,hi'`` string. None keeps every word.
+            stop_words: Words to exclude entirely regardless of score — an
+                iterable of words or a comma-separated string.
             **filter_dims: Dataset-specific filters (e.g. ngram_size=1).
 
         Raises:
@@ -1116,6 +1138,7 @@ class DatasetClient(_SubClient):
             entity=entity, entity2=entity2, dates=dates, dates2=dates2,
             lexicon=lexicon, reference_value=reference_value, weight=weight,
             ngram_limit=ngram_limit, wordshift_limit=wordshift_limit,
+            stop_lens=stop_lens, stop_words=stop_words,
             **filter_dims,
         )
 
