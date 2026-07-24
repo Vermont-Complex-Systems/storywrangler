@@ -115,13 +115,19 @@ def _format_tp_value(val, level: dict):
     """Format a time-partition value to match its on-disk directory naming.
 
     Uses the level's raw on-disk sample (``raw_value``, captured at
-    registration) to decide zero-padding: a ``month=03`` directory yields
-    '03', a ``month=3`` directory yields '3'. Falls back to the conventional
-    zero-padded form for datasets registered before raw_value was stored.
+    registration) as the field WIDTH: a two-char sample means two-wide
+    directories, so month 1 → '01' whether the sample was '03' or '12'. The
+    earlier "pad only when the sample starts with 0" rule misfired whenever the
+    sampled directory happened to be a value ≥ 10 (e.g. a corpus whose first
+    month on disk is December → raw_value '12' → January wrongly rendered '1',
+    a path that matches no 'month=01' directory). A one-wide sample zero-fills
+    to width 1 (a no-op), so genuinely unpadded layouts are still respected.
+    Falls back to the conventional zero-padded width for datasets registered
+    before raw_value was stored.
     """
     raw = level.get("raw_value")
     if isinstance(raw, str) and raw.isdigit():
-        return str(val).zfill(len(raw)) if raw.startswith("0") else str(val)
+        return str(val).zfill(len(raw))
     pad = _TEMPORAL_PAD_WIDTH.get(level["column"].lower())
     return str(val).zfill(pad) if pad else val
 
