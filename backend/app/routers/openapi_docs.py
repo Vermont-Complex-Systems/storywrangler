@@ -274,3 +274,106 @@ STORYWRANGLER_ALLOTAXONOMETER = {
         }
     },
 }
+
+
+STORYWRANGLER_WORDSHIFT = {
+    "x-powered-by": "rust",
+    "x-frontend-notes": (
+        "Filters are off by default. The conventional labMT neutral lens is "
+        "applied client-side by passing stop_lens=4,6 — the endpoint does not "
+        "bake in a default so callers stay in control. meta.stop_lens / "
+        "meta.stop_words echo whatever was applied, for reproducible captions."
+    ),
+    "responses": {
+        "200": {
+            "description": "Successful response",
+            "content": {
+                "application/json": {
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "entries": {
+                                "type": "array",
+                                "description": "Per-word contributions, sorted by absolute shift score descending. Truncated to wordshift_limit; component sums are always over the full vocabulary.",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "type": {"type": "string", "description": "The word (labMT-scored type)"},
+                                        "p_diff": {"type": "number", "description": "Change in relative frequency, p_2 - p_1 (over the surviving scored vocabulary)"},
+                                        "s_diff": {"type": "number", "description": "Change in score, s_2 - s_1 — always 0 for a single lexicon"},
+                                        "p_avg": {"type": "number", "description": "Mean relative frequency, 0.5 * (p_1 + p_2)"},
+                                        "s_ref_diff": {"type": "number", "description": "Deviation of the word's score from the reference, s - s_ref"},
+                                        "shift_score": {"type": "number", "description": "Normalized signed contribution (positive = pushed system 2's average sentiment up)"},
+                                    },
+                                },
+                            },
+                            "component_sums": {
+                                "type": "object",
+                                "description": "Cumulative sign-quadrant contributions for the stacked total bars (Shifterator's component sums, normalized). pos_s/neg_s carry the s_diff term and are 0 for a single lexicon.",
+                                "properties": {
+                                    "pos_s_pos_p": {"type": "number"},
+                                    "pos_s_neg_p": {"type": "number"},
+                                    "neg_s_pos_p": {"type": "number"},
+                                    "neg_s_neg_p": {"type": "number"},
+                                    "pos_s": {"type": "number"},
+                                    "neg_s": {"type": "number"},
+                                },
+                            },
+                            "total_diff": {"type": "number", "description": "Unnormalized sum of raw shift scores (s_avg_2 - s_avg_1)"},
+                            "norm": {"type": "number", "description": "Normalization denominator (Σ|shift|) applied to all scores"},
+                            "s_avg_1": {"type": "number", "description": "Frequency-weighted mean labMT score of system 1 (Φ_avg)"},
+                            "s_avg_2": {"type": "number", "description": "Frequency-weighted mean labMT score of system 2"},
+                            "reference_value": {"type": "number", "description": "Reference score partitioning positive/negative regimes (system 1's weighted mean unless overridden)"},
+                            "normalization": {"type": "string", "description": "Normalization scheme; always 'variation'"},
+                            "meta": {
+                                "type": "object",
+                                "description": "Request metadata echoed back",
+                                "properties": {
+                                    "system1": {"type": "object", "description": "System 1 parameters: entity, dates, filters, type count"},
+                                    "system2": {"type": "object", "description": "System 2 parameters: entity, dates, filters, type count"},
+                                    "lexicon": {"type": "string", "description": "labMT language lexicon used to score both systems"},
+                                    "weight": {"type": "string", "description": "Count column used"},
+                                    "stop_lens": {"type": "array", "nullable": True, "description": "Neutral-word lens applied as [lo, hi], or null. Words scored inside [lo, hi] were dropped before computing the shift.", "items": {"type": "number"}},
+                                    "stop_words": {"type": "array", "nullable": True, "description": "Words excluded from the shift (sorted), or null.", "items": {"type": "string"}},
+                                    "domain": {"type": "string", "description": "Dataset domain"},
+                                    "dataset": {"type": "string", "description": "Dataset ID"},
+                                    "dataset_version": {"type": "string", "description": "Registered dataset version served"},
+                                    "wordshift_version": {"type": "string", "description": "wordshift package version that computed the shift"},
+                                },
+                            },
+                        },
+                    },
+                    "example": {
+                        "entries": [
+                            {"type": "happy", "p_diff": 0.00042, "s_diff": 0.0, "p_avg": 0.0011, "s_ref_diff": 3.32, "shift_score": 0.0184},
+                            {"type": "crisis", "p_diff": -0.00031, "s_diff": 0.0, "p_avg": 0.0008, "s_ref_diff": -2.67, "shift_score": 0.0121},
+                        ],
+                        "component_sums": {
+                            "pos_s_pos_p": 0.31, "pos_s_neg_p": -0.12,
+                            "neg_s_pos_p": -0.09, "neg_s_neg_p": 0.24,
+                            "pos_s": 0.0, "neg_s": 0.0,
+                        },
+                        "total_diff": 0.043,
+                        "norm": 1.87,
+                        "s_avg_1": 5.42,
+                        "s_avg_2": 5.46,
+                        "reference_value": 5.42,
+                        "normalization": "variation",
+                        "meta": {
+                            "system1": {"entity": "Australia", "dates": "2026-07-18", "filters": {"ngram_size": 1, "granularity": "daily"}, "types": 4540},
+                            "system2": {"entity": "Canada", "dates": "2026-07-18", "filters": {"ngram_size": 1, "granularity": "daily"}, "types": 4531},
+                            "lexicon": "labMT_English",
+                            "weight": "count",
+                            "stop_lens": [4.0, 6.0],
+                            "stop_words": None,
+                            "domain": "wikimedia",
+                            "dataset": "ngrams",
+                            "dataset_version": "1.0.0",
+                            "wordshift_version": "0.1.1",
+                        },
+                    },
+                }
+            },
+        }
+    },
+}
