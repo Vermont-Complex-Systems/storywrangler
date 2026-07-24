@@ -4,9 +4,13 @@ Register the Twitter n-grams dataset (MongoDB pass-through).
 Prereqs:
   - API_KEY (and optionally API_URL) in the environment / .env — the admin key
     the SDK authenticates with.
-  - Server-side MONGODB_URI must point at wranglerdb01a for the endpoints to
-    *serve*. Registration itself does NOT need Mongo reachable: the host-form
-    data_location carries an explicit data_schema, so nothing is sampled.
+  - Server-side MONGODB_URI must point at wranglerdb01a. The API server (not
+    this script) reaches Mongo to *serve* endpoints AND, at registration time,
+    to derive manifest.availability + filter_values by walking the {n}grams
+    collections (the twitter router's introspection hook). If the API server
+    can't reach Mongo, registration still succeeds — data_schema is declared
+    explicitly here — but availability/filter_values come back null. Re-run
+    once Mongo is reachable to populate them.
 
 Run:  uv run python backend/scripts/register_twitter.py
 """
