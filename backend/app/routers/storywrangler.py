@@ -597,7 +597,7 @@ async def rank_turbulence_divergence(
     return await (run_blocking_mongo(_sync) if is_mongo else run_blocking(_sync))
 
 
-@router.get("/wordshift")
+@router.get("/wordshift", openapi_extra=docs.STORYWRANGLER_WORDSHIFT)
 async def weighted_avg_wordshift(
     request: Request,
     domain: str = Query("wikimedia", description="Domain owning the dataset"),
