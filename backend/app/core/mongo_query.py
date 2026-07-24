@@ -112,24 +112,6 @@ def _stores_datetimes(dataset_obj, time_col: str) -> bool:
     return (dataset_obj.data_schema or {}).get(time_col, "").upper() in ("TIMESTAMP", "DATE")
 
 
-def range_filter(dataset_obj, time_col: str, date_str: str, window: int) -> dict:
-    """Time sub-filter for a date + look-back window (window=0 → full history).
-
-    Matches the stored BSON type: datetime bounds when introspection saw
-    TIMESTAMP/DATE, ISO strings otherwise.
-    """
-    end = parse_day(date_str)
-    if _stores_datetimes(dataset_obj, time_col):
-        cond = {"$lt": end + timedelta(days=1)}
-        if window > 0:
-            cond["$gte"] = end - timedelta(days=window)
-        return cond
-    cond = {"$lte": date_str}
-    if window > 0:
-        cond["$gte"] = (end - timedelta(days=window)).strftime("%Y-%m-%d")
-    return cond
-
-
 def day_filter(dataset_obj, time_col: str, date_str: str):
     """Exact-day sub-filter. Single days only — summing counts over a range
     needs an aggregation pipeline, which pass-through datasets do not get."""
@@ -137,6 +119,23 @@ def day_filter(dataset_obj, time_col: str, date_str: str):
     if _stores_datetimes(dataset_obj, time_col):
         return {"$gte": day, "$lt": day + timedelta(days=1)}
     return date_str
+
+
+def date_range_filter(dataset_obj, time_col: str, date_range) -> Optional[dict]:
+    """Time sub-filter for a [start, end] range — the generic term-series form.
+
+    *date_range* is ``[start, end]`` (parse_dates) or None for full history
+    (no time bound). Matches the stored BSON type: datetime bounds when
+    introspection saw TIMESTAMP/DATE (end padded to the day's end), ISO
+    strings otherwise. It is a plain range read, not an aggregation, so the
+    pass-through guardrail holds.
+    """
+    if not date_range:
+        return None
+    start, end = date_range[0], date_range[1]
+    if _stores_datetimes(dataset_obj, time_col):
+        return {"$gte": parse_day(start), "$lt": parse_day(end) + timedelta(days=1)}
+    return {"$gte": start, "$lte": end}
 
 
 def require_single_dates(pairs, required: bool = True) -> None:

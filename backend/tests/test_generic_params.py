@@ -18,9 +18,41 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.core.mongo_query import require_single_dates
 from app.core.query_utils import (
-    dates_mode, extract_filter_vals, require_dates_supported, require_types_counts,
+    dates_mode, extract_filter_pair, extract_filter_vals, latest_available_for,
+    require_dates_supported, require_types_counts,
 )
 from tests.conftest import make_dataset_obj
+
+
+def _with_availability(availability):
+    ds = make_dataset_obj("/data")
+    ds.manifest = {"availability": availability}
+    return ds
+
+
+class TestLatestAvailableFor:
+    def test_reddit_style_nlang(self):
+        # {n: {lang: {min, max}}} — navigate by filter values.
+        ds = _with_availability({"1": {"en": {"min": "2010-01-01", "max": "2022-12-31"},
+                                       "es": {"min": "2011-01-01", "max": "2023-06-30"}}})
+        assert latest_available_for(ds, None, {"n": 1, "lang": "es"}) == "2023-06-30"
+        assert latest_available_for(ds, None, {"n": 1, "lang": "en"}) == "2022-12-31"
+
+    def test_wikimedia_style_entity_first(self):
+        # {country: {ngram_size: {granularity: {min, max}}}} — entity + filters.
+        ds = _with_availability({
+            "United States": {"1": {"daily": {"min": "2015-01-01", "max": "2026-04-20"}}}})
+        assert latest_available_for(
+            ds, "United States", {"ngram_size": 1, "granularity": "daily"}) == "2026-04-20"
+
+    def test_no_match_falls_back_to_first_branch(self):
+        ds = _with_availability({"1": {"en": {"min": "2010-01-01", "max": "2022-12-31"}}})
+        # lang not present → first branch
+        assert latest_available_for(ds, None, {"n": 1, "lang": "zz"}) == "2022-12-31"
+
+    def test_empty_availability(self):
+        ds = _with_availability({})
+        assert latest_available_for(ds, None, {}) is None
 
 
 LEVEL_ORDER = [
@@ -87,6 +119,40 @@ class TestExtractFilterVals:
         assert extract_filter_vals(ds, {"sex": "M"}) == {"sex": "M"}
 
 
+class TestExtractFilterPair:
+    """System 2 inherits system 1's filters per dimension unless overridden with
+    ?dim2= — the single convention behind allotax / rtd / wordshift."""
+
+    def _flat(self):
+        return make_dataset_obj(
+            "/data/flat.parquet",
+            transform={"time_dimension": "year", "filter_dimensions": ["sex"]},
+            filter_values={"sex": ["F", "M"]},
+        )
+
+    def test_flat_bare_filter_applies_to_both(self):
+        # The trap fix: ?sex=M with no sex2 filters BOTH systems, not just sys1.
+        fv1, fv2 = extract_filter_pair(self._flat(), {"sex": "M"})
+        assert fv1 == {"sex": "M"} and fv2 == {"sex": "M"}
+
+    def test_flat_suffix_overrides_system2(self):
+        fv1, fv2 = extract_filter_pair(self._flat(), {"sex": "M", "sex2": "F"})
+        assert fv1 == {"sex": "M"} and fv2 == {"sex": "F"}
+
+    def test_hive_bare_filter_inherited_not_defaulted(self):
+        # Regression: system 2 must inherit granularity=weekly, not snap to the
+        # daily default — else bare ?granularity=weekly compares weekly vs daily.
+        fv1, fv2 = extract_filter_pair(hive_dataset(), {"granularity": "weekly"})
+        assert fv1 == {"ngram_size": 1, "granularity": "weekly"}
+        assert fv2 == {"ngram_size": 1, "granularity": "weekly"}
+
+    def test_hive_partial_override_inherits_rest(self):
+        fv1, fv2 = extract_filter_pair(
+            hive_dataset(), {"granularity": "weekly", "ngram_size2": "2"})
+        assert fv1 == {"ngram_size": 1, "granularity": "weekly"}
+        assert fv2 == {"ngram_size": 2, "granularity": "weekly"}
+
+
 class TestRequireTypesCounts:
     def test_types_counts_passes(self):
         ds = make_dataset_obj(
@@ -147,3 +213,52 @@ class TestRequireSingleDates:
 
     def test_missing_optional_passes(self):
         require_single_dates([("dates2", None)], required=False)
+
+
+class TestAvailabilityRangeFor:
+    """availability_range_for backs the undated-request clamp: (min, max) for a
+    slice so the fallback scan is bounded instead of walking the whole tree."""
+
+    def _ds(self, availability):
+        from tests.conftest import make_dataset_obj
+        ds = make_dataset_obj("/data")
+        ds.manifest = {"availability": availability}
+        return ds
+
+    def test_reddit_style_nlang(self):
+        from app.core.query_utils import availability_range_for
+        ds = self._ds({"1": {"en": {"min": "2010-01-01", "max": "2022-12-31"}}})
+        assert availability_range_for(ds, None, {"n": 1, "lang": "en"}) == (
+            "2010-01-01", "2022-12-31")
+
+    def test_wikimedia_style_entity_first(self):
+        from app.core.query_utils import availability_range_for
+        ds = self._ds({"United States": {"1": {"daily": {"min": "2015-01-01", "max": "2026-04-20"}}}})
+        assert availability_range_for(
+            ds, "United States", {"ngram_size": 1, "granularity": "daily"}) == (
+            "2015-01-01", "2026-04-20")
+
+    def test_absent_is_none_pair(self):
+        from app.core.query_utils import availability_range_for
+        assert availability_range_for(self._ds({}), None, {}) == (None, None)
+
+
+class TestWidestAvailability:
+    """_widest_availability spans primary + type-first form (independent
+    pipelines), so a fresh sparkline never truncates the clamp range."""
+
+    def _obj(self, lo, hi):
+        from types import SimpleNamespace
+        return SimpleNamespace(manifest={"availability": {"min": lo, "max": hi}})
+
+    def test_widest_across_both(self):
+        from app.core.term_series import _widest_availability
+        primary = self._obj("2015-01-01", "2026-01-01")   # lags
+        sparkline = self._obj("2015-06-01", "2026-04-20")  # fresher max
+        assert _widest_availability(primary, sparkline, None, {}) == (
+            "2015-01-01", "2026-04-20")
+
+    def test_primary_only(self):
+        from app.core.term_series import _widest_availability
+        assert _widest_availability(self._obj("2015-01-01", "2026-01-01"), None, None, {}) == (
+            "2015-01-01", "2026-01-01")

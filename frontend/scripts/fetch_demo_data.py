@@ -50,8 +50,8 @@ def main() -> None:
     (OUT / "demo-registry.json").write_text(json.dumps(datasets, indent=2) + "\n")
 
     batch = get(
-        f"/wikimedia/term-series/batch?entity={ENTITY}"
-        f"&types={','.join(TERMS)}&granularity=daily&n=1&include_articles=false"
+        f"/storywrangler/term-series/batch?domain=wikimedia&dataset=ngrams&entity={ENTITY}"
+        f"&types={','.join(TERMS)}&granularity=daily&ngram_size=1"
     )
     results = batch["results"]
     terms = [

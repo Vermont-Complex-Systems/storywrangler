@@ -21,7 +21,8 @@
 		domain: string;
 		dataset_id: string;
 		description?: string;
-		endpoint_schema?: { type?: string };
+		endpoint_schema?: { type?: string; orientation?: string };
+		lineage?: { derived_from?: string[] };
 		level_order?: LevelOrderEntry[];
 		filter_values?: Record<string, unknown[]>;
 	}
@@ -221,9 +222,19 @@
 			: false
 	);
 
+	// Only the caller-facing primaries. Exclude type-first *companions*
+	// (sparklines derived from a primary via lineage): they're registered
+	// types-counts for lineage resolution, but are internal fast-path datasets
+	// you never query directly. A type-first dataset with no derived_from is a
+	// self-serving primary (bluesky-style term-bucketed tree) and stays listed.
 	const typesCountsDatasets = $derived(
 		(data.datasets as Dataset[]).filter(
-			(d) => d.endpoint_schema?.type === 'types-counts'
+			(d) =>
+				d.endpoint_schema?.type === 'types-counts' &&
+				!(
+					d.endpoint_schema?.orientation === 'type-first' &&
+					(d.lineage?.derived_from?.length ?? 0) > 0
+				)
 		)
 	);
 

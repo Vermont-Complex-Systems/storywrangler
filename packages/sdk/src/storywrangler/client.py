@@ -14,7 +14,7 @@ Usage::
 
     # Data endpoints — every response has a .df() accessor (pandas extra)
     wiki.top_ngrams(dates="2026-05-01", granularity="daily", ngram_size=1)
-    wiki.term_series("hello", entity="wikidata:Q30", window=30).df()
+    wiki.term_series("hello", entity="wikidata:Q30", dates="2026-05-01,2026-05-31").df()
     wiki.term_series_batch(["hello", "world"], entity="wikidata:Q30").df()
 
     result = wiki.allotax(
@@ -374,6 +374,85 @@ class InstrumentClient(_SubClient):
         params.update({k: v for k, v in optional.items() if v is not None})
         params.update(filter_dims)
         return self._get_json("/storywrangler/top-ngrams", params)
+
+    def term_series(
+        self,
+        domain: str = "wikimedia",
+        dataset: str = "ngrams",
+        *,
+        type: str,
+        entity: str | None = None,
+        dates: str | None = None,
+        weight: str | None = None,
+        sparkline_dataset: str | None = None,
+        include: str | None = None,
+        include_dates: str | None = None,
+        **filter_dims,
+    ) -> Dict[str, Any]:
+        """One type's series over time — GET /storywrangler/term-series.
+
+        Works for any registered types-counts dataset with a time dimension,
+        including mongodb (twitter) — served through this same endpoint as a
+        range read. Returns counts, and rank/freq when the dataset declares them.
+
+        Args:
+            domain/dataset: The date-first types-counts dataset.
+            type: The term to look up (case-sensitive).
+            entity: Global entity ID or local ID; omit when the dataset has no
+                entity_mapping.
+            dates: A single date ('2024-06-01') or 'start,end' range
+                ('2024-01-01,2024-12-31'); omit for full history.
+            weight: Count measure — one of the registered count_column entries.
+            sparkline_dataset: Deprecated. The type-first fast-path companion is
+                resolved from lineage; pass a dataset_id only to override, or ''
+                to force the dist-tree scan.
+            include: Comma-separated provenance role(s) to attach per date (e.g.
+                'articles'), or 'all' for every declared companion. Roles resolve
+                from the primary's lineage; a raw type-documents dataset id also
+                works (deprecated). Each is added to every entry under its key.
+            include_dates: Comma-separated exact dates to attach provenance
+                for (e.g. the two comparison dates); narrows the include=
+                documents only, not the series range.
+            **filter_dims: Dataset-specific filters by registered column name
+                (``n=1, lang="en"`` for reddit, ``ngram_size=1, granularity=
+                "daily"`` for wikimedia).
+        """
+        params: Dict[str, Any] = {"domain": domain, "dataset": dataset, "type": type}
+        optional = {"entity": entity, "dates": dates, "weight": weight,
+                    "sparkline_dataset": sparkline_dataset, "include": include,
+                    "include_dates": include_dates}
+        params.update({k: v for k, v in optional.items() if v is not None})
+        params.update(filter_dims)
+        return self._get_json("/storywrangler/term-series", params)
+
+    def term_series_batch(
+        self,
+        domain: str = "wikimedia",
+        dataset: str = "ngrams",
+        *,
+        types: "str | List[str]",
+        entity: str | None = None,
+        dates: str | None = None,
+        weight: str | None = None,
+        sparkline_dataset: str | None = None,
+        include: str | None = None,
+        include_dates: str | None = None,
+        **filter_dims,
+    ) -> Dict[str, Any]:
+        """Several types' series in one request — GET /storywrangler/term-series/batch.
+
+        Returns a map of type → series. ``types`` is a list or comma-separated
+        string; remaining args as in :meth:`term_series`.
+        """
+        if isinstance(types, (list, tuple)):
+            types = ",".join(types)
+        params: Dict[str, Any] = {"domain": domain, "dataset": dataset, "types": types}
+        optional = {"entity": entity, "dates": dates, "weight": weight,
+                    "sparkline_dataset": sparkline_dataset, "include": include,
+                    "include_dates": include_dates}
+        params.update({k: v for k, v in optional.items() if v is not None})
+        params.update(filter_dims)
+        return self._get_json("/storywrangler/term-series/batch", params)
 
     def allotax(
         self,
@@ -944,13 +1023,16 @@ class DatasetClient(_SubClient):
             **filter_dims,
         )
 
-    def _validate_dates(self, dates, dates2) -> None:
-        """Pre-flight the dates contract against registry metadata.
+    def _validate_dates(self, dates, dates2, *, mongo_single: bool = True) -> None:
+        """Pre-flight the dates contract against the registry's derived `dates`
+        field ('range' | 'single' | 'none') rather than re-deriving the rule —
+        so the SDK can't drift from the server's own classification.
 
-        Derived the same way as the registry's `dates` field: no
-        transform.time_dimension → dateless (omit dates entirely); mongodb
-        pass-through → single days only. Best-effort — skipped when metadata
-        can't be fetched, letting the server's 400 teach instead.
+        Best-effort — skipped when metadata can't be fetched (or predates the
+        derived field), letting the server's 400 teach instead. *mongo_single*
+        enforces the single-day rule for the instruments (a range there would
+        aggregate a per-day distribution across days); term_series passes False,
+        since a per-term range is a plain range read the pass-through serves.
         """
         if dates is None and dates2 is None:
             return
@@ -959,12 +1041,13 @@ class DatasetClient(_SubClient):
         except Exception:
             return
         label = f"{self.domain}/{self.dataset_id}"
-        if not (meta.get("transform") or {}).get("time_dimension"):
+        mode = meta.get("dates")  # server-derived: 'range' | 'single' | 'none'
+        if mode == "none":
             raise ValueError(
                 f"{label} has no time dimension — omit dates to load the "
                 f"full dataset. (.meta['dates'] shows each dataset's contract.)"
             )
-        if meta.get("data_format") == "mongodb":
+        if mongo_single and mode == "single":
             for name, val in (("dates", dates), ("dates2", dates2)):
                 if val and "," in str(val):
                     raise ValueError(
@@ -1020,71 +1103,73 @@ class DatasetClient(_SubClient):
         type: str,
         *,
         entity: str | None = None,
-        date: str | None = None,
-        window: int | None = None,
+        dates: str | None = None,
         weight: str | None = None,
-        include_articles: bool | None = None,
+        include: str | None = None,
+        include_dates: str | None = None,
         sparkline_dataset: str | None = None,
         **filter_dims,
     ) -> Dict[str, Any]:
-        """One term's counts over time — GET /{domain}/term-series.
+        """One term's series over time — GET /storywrangler/term-series with
+        this dataset bound.
+
+        Same as ``client.instrument.term_series()`` but ``domain`` and
+        ``dataset`` are already bound — the generic platform endpoint, so it
+        works for any registered types-counts dataset (like the instruments).
 
         Args:
-            type: The term to look up (e.g. 'hello').
-            entity: Global entity ID, where the domain supports entity resolution.
-            date: Anchor date; defaults to the latest available.
-            window: Days of history around the anchor date (0 = full history).
-            include_articles: Attach top articles per date (wikimedia only).
-            sparkline_dataset: Override the sparkline source (wikimedia only).
-            **filter_dims: Dataset-specific filters (e.g. ``granularity="daily"``).
+            type: The term to look up (case-sensitive).
+            entity: Entity ID (e.g. 'wikidata:Q30') or local ID, where the
+                dataset declares an entity_mapping.
+            dates: A single date ('2024-06-01') or 'start,end' range
+                ('2024-01-01,2024-12-31'); omit for full history.
+            weight: Count measure — one of the registered count_column entries.
+            include: Provenance role(s) to attach per date (e.g. 'articles'), or
+                'all'; resolved from the dataset's lineage.
+            include_dates: Exact dates to attach provenance for (comma-
+                separated); narrows include= documents only.
+            sparkline_dataset: Deprecated — the type-first sparkline is resolved
+                from lineage; pass an id only to override.
+            **filter_dims: Dataset-specific filters (e.g. ``granularity="daily",
+                ngram_size=1``). Use ``.filters`` to discover them.
         """
-        params: Dict[str, Any] = {"type": type}
-        params.update({
-            k: v for k, v in
-            {"entity": entity, "date": date, "window": window, "weight": weight,
-             "include_articles": include_articles, "sparkline_dataset": sparkline_dataset}.items()
-            if v is not None
-        })
-        params.update(filter_dims)
-        path = f"/{self.domain}/term-series"
-        self._check_route(path)
-        self._validate_filters(filter_dims, path=path)
-        return self._get_json(path, params)
+        self._resolve_dataset_id()
+        self._validate_filters(filter_dims)
+        self._validate_dates(dates, None, mongo_single=False)
+        return self._instrument.term_series(
+            self.domain, self.dataset_id,
+            type=type, entity=entity, dates=dates, weight=weight,
+            include=include, include_dates=include_dates,
+            sparkline_dataset=sparkline_dataset, **filter_dims,
+        )
 
     def term_series_batch(
         self,
         types: "str | List[str]",
         *,
         entity: str | None = None,
-        date: str | None = None,
-        window: int | None = None,
+        dates: str | None = None,
         weight: str | None = None,
-        include_articles: bool | None = None,
-        articles_dates: str | None = None,
+        include: str | None = None,
+        include_dates: str | None = None,
         sparkline_dataset: str | None = None,
         **filter_dims,
     ) -> Dict[str, Any]:
-        """Several terms' counts over time — GET /{domain}/term-series/batch.
+        """Several terms' series in one request — GET /storywrangler/term-series/batch
+        with this dataset bound.
 
-        Args:
-            types: Terms to look up — a list or a comma-separated string.
-            (remaining args as in :meth:`term_series`)
+        Returns a map of type → series. ``types`` is a list or comma-separated
+        string; remaining args as in :meth:`term_series`.
         """
-        if isinstance(types, (list, tuple)):
-            types = ",".join(types)
-        params: Dict[str, Any] = {"types": types}
-        params.update({
-            k: v for k, v in
-            {"entity": entity, "date": date, "window": window, "weight": weight,
-             "include_articles": include_articles, "articles_dates": articles_dates,
-             "sparkline_dataset": sparkline_dataset}.items()
-            if v is not None
-        })
-        params.update(filter_dims)
-        path = f"/{self.domain}/term-series/batch"
-        self._check_route(path)
-        self._validate_filters(filter_dims, path=path)
-        return self._get_json(path, params)
+        self._resolve_dataset_id()
+        self._validate_filters(filter_dims)
+        self._validate_dates(dates, None, mongo_single=False)
+        return self._instrument.term_series_batch(
+            self.domain, self.dataset_id,
+            types=types, entity=entity, dates=dates, weight=weight,
+            include=include, include_dates=include_dates,
+            sparkline_dataset=sparkline_dataset, **filter_dims,
+        )
 
     def __getattr__(self, name: str):
         """Unknown attributes become domain-route calls (route mirror).
@@ -1222,10 +1307,10 @@ class Storywrangler:
 
             wiki = client.dataset("wikimedia")        # domain-scoped
             wiki                                       # shows the endpoint list
-            wiki.term_series("hello", entity="wikidata:Q30", window=30)
-            wiki = client.dataset("wikimedia", "ngrams")   # dataset-scoped
-            wiki.filters   # see available filter dimensions
-            wiki.allotax(entity="wikidata:Q30", dates="2026-05-01", ngram_size=1)
+            ng = client.dataset("wikimedia", "ngrams")     # dataset-scoped
+            ng.filters   # see available filter dimensions
+            ng.term_series("hello", entity="wikidata:Q30", dates="2026-05-01,2026-05-31")
+            ng.allotax(entity="wikidata:Q30", dates="2026-05-01", ngram_size=1)
         """
         return DatasetClient(self._session, self._base_url, self._timeout, domain, dataset_id)
 

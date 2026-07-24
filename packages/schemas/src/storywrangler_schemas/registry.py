@@ -228,6 +228,20 @@ class EndpointSchemaConfig(BaseModel):
         type_column is not used.
         Requires transform.time_dimension and at least one filter_dimension.
 
+    ``type-documents``
+        Provenance: ``(type, date) → ranked [(document, score)]``. Not queried
+        on its own — attached to a term-series response via ``?include=<role>``
+        (or ``?include=all``), resolved through ``lineage.derived_from``.
+        Declares doc_column / score_column / order_column (and type_column for
+        the type it is keyed by), plus an optional ``role`` name.
+
+    Physical orientation
+        A ``types-counts`` corpus is often served by two physical forms with
+        independent lifecycles: a **time-first** (date-partitioned) tree and a
+        **type-first** (hash-bucketed) sparkline. ``orientation`` declares which
+        one this registration is; the platform pairs them via
+        ``lineage.derived_from`` (see the field docs).
+
     See [endpoint schema spec](/docs/specification#endpoint-schemas).
     """
 
@@ -257,6 +271,117 @@ class EndpointSchemaConfig(BaseModel):
             "unweighted columns)."
         ),
     )
+    rank_column: Optional[Union[str, List[str]]] = Field(
+        None,
+        description=(
+            "Companion rank column(s) a per-type time series returns alongside "
+            "the count. A scalar is one canonical rank used for every `weight` "
+            "(e.g. reddit's pipeline-side `rank`, which does not track the "
+            "selected measure). A list must be parallel to `count_column` — the "
+            "rank for each measure, indexed by the chosen `weight` (e.g. "
+            "bluesky's `rank`/`rank_all`). Omit when the dataset has no "
+            "precomputed rank; the series then carries counts only."
+        ),
+    )
+    freq_column: Optional[Union[str, List[str]]] = Field(
+        None,
+        description=(
+            "Companion normalized-frequency column(s), same scalar-or-parallel-"
+            "list rule as `rank_column`. A list is indexed by the chosen "
+            "`weight`. Omit when the dataset has no precomputed frequency."
+        ),
+    )
+    orientation: Optional[Literal["time-first", "type-first"]] = Field(
+        None,
+        description=(
+            "types-counts only. Physical layout of this form of the corpus. "
+            "`time-first` (the default when omitted) is date-partitioned — it "
+            "feeds top-ngrams / allotax / rtd / wordshift and the term-series "
+            "slow fallback. `type-first` is hash-bucketed by type — the "
+            "term-series fast-path (sparkline) companion. Declare `type-first` "
+            "on a sparkline dataset whose `lineage.derived_from` names the "
+            "primary time-first dataset, so term-series resolves it without a "
+            "query param."
+        ),
+    )
+    role: Optional[str] = Field(
+        None,
+        description=(
+            "type-documents only. Short name for this provenance companion "
+            "(e.g. 'articles', 'subreddits'). A term-series request attaches it "
+            "with `?include=<role>` (or `?include=all`), resolved through "
+            "`lineage.derived_from` — no raw dataset id in the query surface. "
+            "Omit to be addressable only by dataset id (deprecated)."
+        ),
+    )
+    doc_column: Optional[str] = Field(
+        None,
+        description=(
+            "type-documents only. Column holding the source-document identifier "
+            "(e.g. 'article_url'). A type-documents dataset maps (type, date) → a "
+            "ranked list of these documents; a term-series request attaches them "
+            "via `?include=<role>` (falling back to `?include=<dataset_id>`)."
+        ),
+    )
+    score_column: Optional[str] = Field(
+        None,
+        description=(
+            "type-documents only. Column holding each document's contribution "
+            "score (e.g. 'score')."
+        ),
+    )
+    order_column: Optional[str] = Field(
+        None,
+        description=(
+            "type-documents only. Column the ranked documents are ordered by "
+            "within a (type, date) (e.g. 'article_rank'). Defaults to "
+            "`score_column` descending when omitted."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def validate_companion_columns(self) -> "EndpointSchemaConfig":
+        """List-form rank/freq must be parallel to a list count_column.
+
+        A scalar companion is always allowed (one canonical column for every
+        weight). A list companion only makes sense per-measure, so it requires
+        count_column to be a list of the same length.
+        """
+        menu_len = len(self.count_column) if isinstance(self.count_column, list) else None
+        for name in ("rank_column", "freq_column"):
+            val = getattr(self, name)
+            if not isinstance(val, list):
+                continue
+            if menu_len is None:
+                raise ValueError(
+                    f"{name} is a list but count_column is not; a per-measure "
+                    f"{name} requires count_column to be a parallel list. Use a "
+                    "scalar for a single canonical column."
+                )
+            if len(val) != menu_len:
+                raise ValueError(
+                    f"{name} has {len(val)} entries but count_column has "
+                    f"{menu_len}; a list companion must be parallel to count_column."
+                )
+        return self
+
+    @model_validator(mode="after")
+    def validate_orientation_and_role(self) -> "EndpointSchemaConfig":
+        """Scope orientation to types-counts and role to type-documents.
+
+        Orientation describes a types-counts form's physical layout (time-first
+        vs type-first); type-documents is inherently type-first, so it takes no
+        orientation. `role` names a type-documents provenance companion for
+        `?include=`, so it is meaningless on any other type.
+        """
+        if self.orientation is not None and self.type != "types-counts":
+            raise ValueError(
+                "orientation applies only to types-counts datasets "
+                "(type-documents is inherently type-first)."
+            )
+        if self.role is not None and self.type != "type-documents":
+            raise ValueError("role applies only to type-documents datasets.")
+        return self
 
 
 class TransformConfig(BaseModel):

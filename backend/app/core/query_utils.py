@@ -14,6 +14,7 @@ from typing import List, Optional
 from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
+from sqlalchemy.orm import defer
 
 from storywrangler_schemas.coercion import coerce_scalar
 from storywrangler_schemas.standards import Standards
@@ -59,7 +60,8 @@ def get_queryable_dims(dataset_obj) -> list:
     ]
 
 
-def extract_filter_vals(dataset_obj, query_params, suffix: str = "") -> dict:
+def extract_filter_vals(dataset_obj, query_params, suffix: str = "",
+                        inject_defaults: bool = True) -> dict:
     """Filter-dimension values for one system, from raw request query params.
 
     The generic-endpoint convention (/storywrangler/*): any queryable
@@ -69,14 +71,20 @@ def extract_filter_vals(dataset_obj, query_params, suffix: str = "") -> dict:
     validated against the introspected filter_values with type coercion
     (query params arrive as strings; filter_values stores typed values).
     Raises 400 on a value not in the valid set.
+
+    ``inject_defaults=False`` returns only the explicitly-passed dims (no
+    level_order defaults) — used by extract_filter_pair to distinguish "system 2
+    said nothing about this dim" (inherit system 1) from "system 2 wants the
+    default".
     """
     vals = {
         dim: query_params[f"{dim}{suffix}"]
         for dim in get_queryable_dims(dataset_obj)
         if f"{dim}{suffix}" in query_params
     }
-    for dim, default_val in get_partition_defaults(dataset_obj).items():
-        vals.setdefault(dim, default_val)
+    if inject_defaults:
+        for dim, default_val in get_partition_defaults(dataset_obj).items():
+            vals.setdefault(dim, default_val)
 
     fv = dataset_obj.filter_values or {}
     for dim, val in list(vals.items()):
@@ -91,6 +99,29 @@ def extract_filter_vals(dataset_obj, query_params, suffix: str = "") -> dict:
             )
         vals[dim] = coerced
     return vals
+
+
+def extract_filter_pair(dataset_obj, query_params) -> tuple:
+    """(system-1 filters, system-2 filters) for the two-system instruments.
+
+    System 2 inherits system 1's filters per dimension, overridden by any
+    explicit ``?dim2=`` param — so bare ``?sex=M`` filters *both* systems, while
+    ``?sex=M&sex2=F`` compares them. This is the single source of the
+    convention: allotax / rtd / wordshift all use it, so the behaviour is
+    identical across endpoints and storage formats. (Previously the merge was
+    inlined per-endpoint and had drifted — parquet allotax/wordshift silently
+    left system 2 unfiltered, a comparison-skewing trap.)
+
+    System 2 takes only its *explicit* ``?dim2=`` overrides (no default
+    injection) merged over system 1 — otherwise a hive dataset's level_order
+    defaults would snap unspecified system-2 dims to the default instead of
+    inheriting system 1 (e.g. bare ``?granularity=weekly`` would compare weekly
+    vs the default daily).
+    """
+    fv1 = extract_filter_vals(dataset_obj, query_params)
+    explicit2 = extract_filter_vals(
+        dataset_obj, query_params, suffix="2", inject_defaults=False)
+    return fv1, {**fv1, **explicit2}
 
 
 # ── Count-column menu ────────────────────────────────────────────────────────
@@ -173,6 +204,50 @@ def resolve_count_column(dataset_obj, weight: Optional[str] = None, default: str
     return weight
 
 
+def _pick_companion(companion, index: int) -> Optional[str]:
+    """Resolve a scalar-or-parallel-list companion column for one weight.
+
+    Scalar → the same column for every weight (a canonical rank/freq).
+    List → the entry parallel to the chosen count column (per-measure).
+    None → no companion declared.
+    """
+    if companion is None:
+        return None
+    if isinstance(companion, list):
+        return companion[index] if index < len(companion) else None
+    return companion
+
+
+def resolve_series_columns(dataset_obj, weight: Optional[str] = None) -> Optional[dict]:
+    """Resolve the per-type time-series measure columns for a request.
+
+    Returns ``{"count": ..., "rank": ... | None, "freq": ... | None}`` from the
+    registered ``endpoint_schema`` — the count via ``resolve_count_column`` (so
+    the ``weight`` allowlist still applies), and the rank/freq companions via
+    the declared ``rank_column`` / ``freq_column`` (scalar = canonical, list =
+    parallel to ``count_column``; see EndpointSchemaConfig).
+
+    Returns ``None`` when neither companion is declared — the signal that this
+    dataset predates the contract, so the caller should fall back to its legacy
+    per-router derivation. Once a dataset is (re-)registered with the columns,
+    the declared path takes over with no behaviour change.
+    """
+    ep = dataset_obj.endpoint_schema or {}
+    rank_decl = ep.get("rank_column")
+    freq_decl = ep.get("freq_column")
+    if rank_decl is None and freq_decl is None:
+        return None
+
+    count_col = resolve_count_column(dataset_obj, weight)
+    menu = get_count_columns(dataset_obj)
+    index = menu.index(count_col) if count_col in menu else 0
+    return {
+        "count": count_col,
+        "rank": _pick_companion(rank_decl, index),
+        "freq": _pick_companion(freq_decl, index),
+    }
+
+
 def _derive_local_id(namespace: Optional[str], canonical_id: str) -> Optional[str]:
     """Derive the stored local_id from a canonical entity_id.
 
@@ -249,6 +324,67 @@ async def resolve_entity(
     )
 
 
+async def _domain_latest_entries(db: AsyncSession, domain: str) -> List[RegistryEntry]:
+    """All datasets in a domain, each resolved to its latest entry.
+
+    One row per dataset_id, using the same precedence as get_latest_entry
+    (the mutable 'latest' slot wins, else the newest snapshot). A domain holds
+    a handful of datasets, so this is a cheap scan.
+    """
+    result = await db.execute(
+        select(RegistryEntry)
+        # The returned entries are reused downstream (sparkline routing, the
+        # availability probe, provenance reads), so we can only defer the one
+        # deliberately-large column that is never read here or downstream —
+        # partition_index (registry.py excludes it from responses for the same
+        # reason). Deferring anything else triggers an async lazy-load.
+        .options(defer(RegistryEntry.partition_index))
+        .where(RegistryEntry.domain == domain)
+        .order_by(
+            RegistryEntry.dataset_id,
+            (RegistryEntry.version != "latest"),
+            RegistryEntry.created_at.desc(),
+        )
+    )
+    latest: dict = {}
+    for entry in result.scalars().all():
+        latest.setdefault(entry.dataset_id, entry)  # first per id wins (ordered)
+    return list(latest.values())
+
+
+async def resolve_companions(db: AsyncSession, domain: str, dataset: str) -> dict:
+    """Resolve a primary dataset's declared companions via lineage + orientation.
+
+    Returns ``{"type_first": entry | None, "documents": {role: entry, ...}}``.
+    A companion is any latest dataset in the domain whose
+    ``lineage.derived_from`` includes ``"<domain>/<dataset>"`` — so the pairing
+    is deduced from *declared provenance*, never sniffed from structure. Among
+    those companions:
+
+      - the ``types-counts`` dataset with ``orientation: type-first`` is the
+        term-series fast-path (sparkline);
+      - each ``type-documents`` dataset is an ``?include=`` source, keyed by its
+        declared ``role`` (or its dataset_id when no role is declared).
+
+    Decoupled: a sparkline or provenance set is added later by registering it
+    with ``derived_from``, with no change to the primary.
+    """
+    ref = f"{domain}/{dataset}"
+    type_first = None
+    documents: dict = {}
+    for entry in await _domain_latest_entries(db, domain):
+        derived = (entry.lineage or {}).get("derived_from") or []
+        if ref not in derived:
+            continue
+        ep = entry.endpoint_schema or {}
+        etype = ep.get("type")
+        if etype == "types-counts" and ep.get("orientation") == "type-first":
+            type_first = type_first or entry
+        elif etype == "type-documents":
+            documents[ep.get("role") or entry.dataset_id] = entry
+    return {"type_first": type_first, "documents": documents}
+
+
 def parse_dates(s: Optional[str]) -> Optional[List[str]]:
     """Split a 'start' or 'start,end' date string into a two-element list.
 
@@ -303,3 +439,40 @@ def latest_from_manifest(dataset_obj, local_id, granularity=None):
         return None
 
     return _find_max(entry, granularity)
+
+
+def _availability_leaf_for(dataset_obj, local_id, filter_vals: Optional[dict] = None):
+    """The availability leaf (``{"min", "max", ...}``) for a request's slice.
+
+    The availability tree nests differently per dataset (reddit `{n: {lang:
+    ...}}`, wikimedia `{country: {ngram_size: {granularity: ...}}}`), so rather
+    than matching a single key, descend preferring any level key that equals the
+    entity local_id or one of the request's filter values, falling back to the
+    first branch when nothing matches. Returns the leaf dict, or None.
+    """
+    node = (dataset_obj.manifest or {}).get("availability", {})
+    targets = {str(local_id)} if local_id is not None else set()
+    targets.update(str(v) for v in (filter_vals or {}).values())
+    while isinstance(node, dict):
+        if "max" in node:
+            return node
+        match = next((node[k] for k in node if str(k) in targets), None)
+        node = match if match is not None else (next(iter(node.values()), None) if node else None)
+    return None
+
+
+def latest_available_for(dataset_obj, local_id, filter_vals: Optional[dict] = None):
+    """Latest available date for a request's slice (the leaf `max`), or None."""
+    leaf = _availability_leaf_for(dataset_obj, local_id, filter_vals)
+    return leaf.get("max") if leaf else None
+
+
+def availability_range_for(dataset_obj, local_id, filter_vals: Optional[dict] = None):
+    """(min, max) available dates for a request's slice — (None, None) if absent.
+
+    The generic term-series endpoint clamps an undated request to this range so
+    the fallback scan is always bounded (and directory-pruned) instead of
+    walking the whole date-first tree.
+    """
+    leaf = _availability_leaf_for(dataset_obj, local_id, filter_vals)
+    return (leaf.get("min"), leaf.get("max")) if leaf else (None, None)

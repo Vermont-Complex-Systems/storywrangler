@@ -8,6 +8,7 @@ Currently includes:
          Designed for on-the-fly date-vs-date comparisons within a single entity.
 """
 
+import logging
 import math
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -20,19 +21,42 @@ from ..core.allotax_utils import (
 from ..core.database import get_session
 from ..core.duckdb_client import get_duckdb_client, run_blocking
 from ..core.mongo_client import run_blocking_mongo
-from ..core.mongo_query import load_instrument_system, require_single_dates
-from ..core.duckdb_query import handle_query_error, load_system
+from ..core.mongo_query import (
+    load_instrument_system, require_single_dates,
+)
+from ..core.duckdb_query import (
+    handle_query_error, load_system,
+)
 from ..core.query_utils import (
-    extract_filter_vals, latest_from_manifest, parse_dates,
-    require_dates_supported, require_types_counts, resolve_count_column,
-    resolve_entity,
+    extract_filter_pair, extract_filter_vals, latest_from_manifest, parse_dates,
+    require_dates_supported, require_types_counts, resolve_count_column, resolve_entity,
 )
 from ..core.registry_utils import get_latest_entry
-from ..core.term_series import run_top_ngrams
+from ..core.term_series import (
+    fetch_includes, prepare_term_series, series_row, term_series_rows,
+)
 from . import openapi_docs as docs
 from ..core.timing import timed
 
+log = logging.getLogger(__name__)
+
 router = APIRouter()
+
+
+async def _resolve_types_counts(db, domain: str, dataset: str, dates=None, dates2=None):
+    """Shared instrument/endpoint preamble: resolve a dataset and gate it.
+
+    Every generic endpoint here (top-ngrams, allotax, rtd, wordshift,
+    term-series) begins the same way: fetch the latest registry entry, 404 if
+    absent, require the types-counts endpoint family, and reject dates on a
+    dateless dataset.
+    """
+    dataset_obj = await get_latest_entry(db, domain, dataset)
+    if not dataset_obj:
+        raise HTTPException(status_code=404, detail=f"Dataset '{domain}/{dataset}' not found")
+    require_types_counts(dataset_obj)
+    require_dates_supported(dataset_obj, f"{domain}/{dataset}", dates, dates2)
+    return dataset_obj
 
 
 def _parse_reference_value(rv: Optional[str]):
@@ -58,6 +82,54 @@ def _parse_reference_value(rv: Optional[str]):
 
 
 # ── top-ngrams (generic) ──────────────────────────────────────────────────────
+
+async def run_top_ngrams(
+    dataset_obj,
+    label: str,
+    local_id: Optional[str],
+    dates: Optional[str],
+    dates2: Optional[str],
+    filter_vals: dict,
+    limit: int,
+    metadata: dict,
+    count_col: Optional[str] = None,
+) -> dict:
+    """The parquet top-ngrams endpoint body, executed off the event loop.
+
+    Loads one types-counts system (or two for a temporal comparison keyed by
+    date range, start/end joined with "_") and formats the response. *dates*
+    may be None for all-time / dateless datasets. *count_col* selects a
+    measure from the registered count-column menu; None uses the default.
+    The mongodb variant lives inline in the endpoint below.
+    """
+    if dates2 and parse_dates(dates) == parse_dates(dates2):
+        # Identical ranges collide into one JSON key and silently drop system 1
+        # — reject rather than return half the comparison with HTTP 200.
+        raise HTTPException(
+            status_code=400,
+            detail="dates and dates2 resolve to the same range; "
+                   "use different dates to compare two systems.",
+        )
+
+    def _query():
+        with handle_query_error(label):
+            with get_duckdb_client().timed_connect() as conn:
+                dr1 = parse_dates(dates)
+                sys1 = load_system(conn, dataset_obj, local_id, dr1, filter_vals, limit, count_col=count_col)
+                formatted1 = [{"types": t, "counts": c} for t, c in zip(sys1["types"], sys1["counts"])]
+
+                if dates2:
+                    dr2 = parse_dates(dates2)
+                    sys2 = load_system(conn, dataset_obj, local_id, dr2, filter_vals, limit, count_col=count_col)
+                    formatted2 = [{"types": t, "counts": c} for t, c in zip(sys2["types"], sys2["counts"])]
+                    key1 = dr1[0] if dr1[0] == dr1[1] else f"{dr1[0]}_{dr1[1]}"
+                    key2 = dr2[0] if dr2[0] == dr2[1] else f"{dr2[0]}_{dr2[1]}"
+                    return {key1: formatted1, key2: formatted2, "metadata": metadata}
+
+                return {"data": formatted1, "metadata": metadata}
+
+    return await run_blocking(_query)
+
 
 @router.get(
     "/top-ngrams",
@@ -90,12 +162,7 @@ async def top_ngrams(
     if dates2 and not dates:
         raise HTTPException(status_code=400, detail="dates is required when dates2 is provided.")
 
-    dataset_obj = await get_latest_entry(db, domain, dataset)
-    if not dataset_obj:
-        raise HTTPException(status_code=404, detail=f"Dataset '{domain}/{dataset}' not found")
-
-    require_types_counts(dataset_obj)
-    require_dates_supported(dataset_obj, f"{domain}/{dataset}", dates, dates2)
+    dataset_obj = await _resolve_types_counts(db, domain, dataset, dates, dates2)
 
     filter_vals = extract_filter_vals(dataset_obj, request.query_params)
     count_col = resolve_count_column(dataset_obj, weight)
@@ -145,6 +212,74 @@ async def top_ngrams(
     )
 
 
+# ── term-series (generic) ──────────────────────────────────────────────────────
+
+@router.get("/term-series", openapi_extra=docs.STORYWRANGLER_TERM_SERIES)
+async def term_series(
+    request: Request,
+    domain: str = Query("wikimedia", description="Domain owning the dataset"),
+    dataset: str = Query("ngrams", description="Dataset ID within the domain"),
+    type: str = Query(..., description="The type/term to look up. Case-sensitive."),
+    entity: Optional[str] = Query(None, description="Global entity ID (e.g. 'wikidata:Q30') or local ID. Omit for datasets without entity_mapping."),
+    dates: Optional[str] = Query(None, description="Date range: a single date '2024-06-01' or 'start,end' like '2024-01-01,2024-12-31'. Omit for full history."),
+    weight: Optional[str] = Query(None, description="Count measure — one of the dataset's endpoint_schema.count_column entries. Defaults to the first."),
+    sparkline_dataset: Optional[str] = Query(None, description="Deprecated. The type-first sparkline companion is resolved from lineage; pass a dataset_id only to override, or '' to disable the fast path (dist-tree scan only)."),
+    include: Optional[str] = Query(None, description="Comma-separated provenance role(s) to attach per date (e.g. 'articles'), or 'all' for every declared companion. Roles are resolved from the primary's lineage; a raw type-documents dataset id also works (deprecated)."),
+    include_dates: Optional[str] = Query(None, description="Comma-separated exact dates to attach provenance for (e.g. the two comparison dates '2026-01-20,2026-01-21'). Narrows the ?include= documents only; the series itself keeps its dates range. Omit to attach documents for every date in range."),
+    db: AsyncSession = Depends(get_session),
+):
+    """Per-date time series for a single type in any registered types-counts dataset.
+
+    Returns counts, and rank/freq when the dataset declares `rank_column`/
+    `freq_column`. Fast path: hash-bucket lookup on the type-first sparkline
+    companion (resolved from lineage); slow fallback: a scan of the date-first
+    tree for types outside the precomputed vocabulary. mongodb datasets are
+    served through the same endpoint (find + range, no aggregation).
+
+    `include=<role>` (or `include=all`) attaches a type-documents companion's
+    ranked source documents per date (the provenance behind each entry).
+    """
+    ctx = await prepare_term_series(
+        request, db, domain, dataset, entity, weight, dates, sparkline_dataset)
+    rows = await term_series_rows(domain, ctx, [type])
+    includes = await fetch_includes(db, domain, include, ctx, {r[0] for r in rows},
+                                    include_dates=include_dates)
+    return {
+        "type": type,
+        "latest_available_date": ctx.latest_date,
+        "series": [series_row(r, ctx.cols, includes) for r in rows],
+    }
+
+
+@router.get("/term-series/batch", openapi_extra={"x-dataset": "ngrams"})
+async def term_series_batch(
+    request: Request,
+    domain: str = Query("wikimedia", description="Domain owning the dataset"),
+    dataset: str = Query("ngrams", description="Dataset ID within the domain"),
+    types: str = Query(..., description="Comma-separated types, e.g. 'trump,covid,the'. Case-sensitive."),
+    entity: Optional[str] = Query(None, description="Global entity ID or local ID. Omit for datasets without entity_mapping."),
+    dates: Optional[str] = Query(None, description="Date range: a single date or 'start,end'. Omit for full history."),
+    weight: Optional[str] = Query(None, description="Count measure — defaults to the first registered."),
+    sparkline_dataset: Optional[str] = Query(None, description="Deprecated. The type-first sparkline companion is resolved from lineage; pass a dataset_id only to override, or '' to disable the fast path."),
+    include: Optional[str] = Query(None, description="Comma-separated provenance role(s) to attach per date, or 'all'. Resolved from the primary's lineage; a raw type-documents dataset id also works (deprecated)."),
+    include_dates: Optional[str] = Query(None, description="Comma-separated exact dates to attach provenance for (e.g. the two comparison dates '2026-01-20,2026-01-21'). Narrows the ?include= documents only; the series itself keeps its dates range. Omit to attach documents for every date in range."),
+    db: AsyncSession = Depends(get_session),
+):
+    """Batch term-series — a map of type → series in one request."""
+    type_list = [t.strip() for t in types.split(",") if t.strip()]
+    if not type_list:
+        raise HTTPException(status_code=400, detail="types parameter must contain at least one term")
+    ctx = await prepare_term_series(
+        request, db, domain, dataset, entity, weight, dates, sparkline_dataset)
+    rows = await term_series_rows(domain, ctx, type_list)
+    includes = await fetch_includes(db, domain, include, ctx, {r[0] for r in rows},
+                                    include_dates=include_dates)
+    results = {t: [] for t in type_list}
+    for r in rows:
+        results[r[0]].append(series_row(r, ctx.cols, includes))
+    return {"results": results, "latest_available_date": ctx.latest_date}
+
+
 # ── instruments ───────────────────────────────────────────────────────────────
 
 @router.get(
@@ -186,27 +321,21 @@ async def allotaxonometer(
     except ValueError:
         raise HTTPException(status_code=400, detail=f"Invalid alpha: {alpha!r}. Must be a number or 'inf'.")
 
-    dataset_obj = await get_latest_entry(db, domain, dataset)
-    if not dataset_obj:
-        raise HTTPException(status_code=404, detail=f"Dataset '{domain}/{dataset}' not found")
-
-    require_types_counts(dataset_obj)
-    require_dates_supported(dataset_obj, f"{domain}/{dataset}", dates, dates2)
+    dataset_obj = await _resolve_types_counts(db, domain, dataset, dates, dates2)
 
     # Any level_order column (partition/filter type) can be passed as
     # ?dim=val (system 1) or ?dim2=val (system 2), using actual column names
     # from the dataset — e.g. ?ngram_size=1 for wikimedia, ?n=1 for reddit.
-    filter_vals1 = extract_filter_vals(dataset_obj, request.query_params)
-    filter_vals2 = extract_filter_vals(dataset_obj, request.query_params, suffix="2")
+    # System 2 inherits system 1's filters per dimension unless overridden
+    # (?lang2=...) — bare ?dim= filters both systems. Same convention everywhere.
+    filter_vals1, filter_vals2 = extract_filter_pair(dataset_obj, request.query_params)
 
-    # mongodb pass-through datasets load systems via the router-registered
-    # hook (host-form data_location keeps db/collection routing in the bespoke
+    # mongodb pass-through datasets load systems via the router-registered hook
+    # (host-form data_location keeps db/collection routing in the bespoke
     # router). Single dates only: range aggregation is parquet territory.
     is_mongo = dataset_obj.data_format == "mongodb"
     if is_mongo:
         require_single_dates([("dates", dates), ("dates2", dates2)])
-        # System 2 inherits system 1's routing/filters unless overridden (?lang2=...)
-        filter_vals2 = {**filter_vals1, **filter_vals2}
 
     count_col = resolve_count_column(dataset_obj, weight)
 
@@ -314,12 +443,7 @@ async def rank_turbulence_divergence(
         raise HTTPException(status_code=400, detail=f"Invalid alpha: {alpha!r}. Must be a number or 'inf'.")
 
     with timed("registry", "Registry lookup"):
-        dataset_obj = await get_latest_entry(db, domain, dataset)
-        if not dataset_obj:
-            raise HTTPException(status_code=404, detail=f"Dataset '{domain}/{dataset}' not found")
-
-    require_types_counts(dataset_obj)
-    require_dates_supported(dataset_obj, f"{domain}/{dataset}", dates, dates2)
+        dataset_obj = await _resolve_types_counts(db, domain, dataset, dates, dates2)
 
     if dates and not dates2:
         raise HTTPException(
@@ -327,18 +451,13 @@ async def rank_turbulence_divergence(
             detail="dates2 is required when dates is provided.",
         )
 
-    # Build filter vals from query params (same pattern as /allotax)
-    filter_vals = extract_filter_vals(dataset_obj, request.query_params)
-    filter_vals2 = extract_filter_vals(dataset_obj, request.query_params, suffix="2")
+    # Build filter vals from query params (same convention as /allotax): system
+    # 2 inherits system 1's filters per dimension unless overridden with ?dim2=.
+    filter_vals, filter_vals2 = extract_filter_pair(dataset_obj, request.query_params)
 
     is_mongo = dataset_obj.data_format == "mongodb"
     if is_mongo:
         require_single_dates([("dates", dates), ("dates2", dates2)])
-        filter_vals2 = {**filter_vals, **filter_vals2}
-
-    # Same entity for both systems (date-vs-date comparison)
-    if not filter_vals2:
-        filter_vals2 = dict(filter_vals)
 
     count_col = resolve_count_column(dataset_obj, weight)
 
@@ -469,24 +588,17 @@ async def weighted_avg_wordshift(
     > `GET /registry/{domain}/{dataset_id}` (`transform.filter_dimensions`) and
     > pass them with the `dim` / `dim2` suffix convention.
     """
-    dataset_obj = await get_latest_entry(db, domain, dataset)
-    if not dataset_obj:
-        raise HTTPException(status_code=404, detail=f"Dataset '{domain}/{dataset}' not found")
-
-    require_types_counts(dataset_obj)
-    require_dates_supported(dataset_obj, f"{domain}/{dataset}", dates, dates2)
+    dataset_obj = await _resolve_types_counts(db, domain, dataset, dates, dates2)
 
     ref_val = _parse_reference_value(reference_value)
 
-    # ?dim=val → system 1, ?dim2=val → system 2 (same convention as /allotax).
-    filter_vals1 = extract_filter_vals(dataset_obj, request.query_params)
-    filter_vals2 = extract_filter_vals(dataset_obj, request.query_params, suffix="2")
+    # ?dim=val → system 1, ?dim2=val → system 2 (same convention as /allotax):
+    # system 2 inherits system 1's filters per dimension unless overridden.
+    filter_vals1, filter_vals2 = extract_filter_pair(dataset_obj, request.query_params)
 
     is_mongo = dataset_obj.data_format == "mongodb"
     if is_mongo:
         require_single_dates([("dates", dates), ("dates2", dates2)])
-        # System 2 inherits system 1's routing/filters unless overridden (?lang2=...)
-        filter_vals2 = {**filter_vals1, **filter_vals2}
 
     count_col = resolve_count_column(dataset_obj, weight)
 

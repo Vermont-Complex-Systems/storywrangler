@@ -31,8 +31,9 @@ from typing import Any
 from pydantic import ValidationError
 from storywrangler_schemas.registry import DatasetCreate
 
-# Mirrors backend/app/routers/registry.py::_IDENT_RE
+# Mirrors backend/app/routers/registry.py::_IDENT_RE / _ORDER_RE
 _IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_ORDER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*( +(ASC|DESC))?$", re.IGNORECASE)
 _SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+$")
 
 _ENDPOINT_SCHEMA_KEYS = {"type", "type_column", "count_column"}
@@ -115,6 +116,14 @@ def _check_column_identifiers(payload: dict, errors: list[str]) -> None:
                 declared[f"endpoint_schema.count_column[{col!r}]"] = col
         else:
             declared["endpoint_schema.count_column"] = cc
+        # rank/freq (term-series SELECT) and doc/score (type-documents SELECT).
+        for field in ("rank_column", "freq_column"):
+            val = ep.get(field)
+            for col in (val if isinstance(val, list) else [val] if val else []):
+                declared[f"endpoint_schema.{field}[{col!r}]"] = col
+        for field in ("doc_column", "score_column"):
+            if ep.get(field):
+                declared[f"endpoint_schema.{field}"] = ep[field]
     tr = payload.get("transform") or {}
     if isinstance(tr, dict):
         declared["transform.time_dimension"] = tr.get("time_dimension")
@@ -136,6 +145,14 @@ def _check_column_identifiers(payload: dict, errors: list[str]) -> None:
                 f"guard: {where} = {name!r} is not a plain identifier "
                 "(letters, digits, underscore; not starting with a digit) — the server rejects this with 422."
             )
+
+    # order_column reaches ORDER BY verbatim and may carry a sort direction.
+    oc = ep.get("order_column") if isinstance(ep, dict) else None
+    if oc is not None and not _ORDER_RE.match(str(oc)):
+        errors.append(
+            f"guard: endpoint_schema.order_column = {oc!r} must be a column name "
+            "optionally followed by ASC or DESC — the server rejects this with 422."
+        )
 
 
 def _check_endpoint_type_requirements(payload: dict, errors: list[str]) -> None:
@@ -191,6 +208,9 @@ def _check_declared_columns_against_schema(payload: dict, errors: list[str]) -> 
     expected: list[str] = []
     if ep.get("type") == "types-counts":
         expected += [ep.get("type_column") or "types", *_count_cols("counts")]
+        for field in ("rank_column", "freq_column"):
+            val = ep.get(field)
+            expected += (val if isinstance(val, list) else [val] if val else [])
     elif ep.get("type") == "time-series":
         expected += _count_cols("count")
     if tr.get("time_dimension"):

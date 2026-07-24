@@ -100,6 +100,8 @@ async def _upsert_entities(
 # boundary that keeps a submitter-provided data_schema from becoming SQL
 # injection.
 _IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+# order_column reaches ORDER BY verbatim and may carry a sort direction.
+_ORDER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*( +(ASC|DESC))?$", re.IGNORECASE)
 
 
 def _validate_column_identifiers(dataset: DatasetCreate) -> None:
@@ -113,6 +115,16 @@ def _validate_column_identifiers(dataset: DatasetCreate) -> None:
                 declared[f"endpoint_schema.count_column[{col!r}]"] = col
         else:
             declared["endpoint_schema.count_column"] = cc
+        # rank/freq (term-series SELECT) and doc/score (type-documents SELECT)
+        # are interpolated into SQL unparameterized too — same trust boundary.
+        for field in ("rank_column", "freq_column"):
+            val = getattr(dataset.endpoint_schema, field)
+            for col in (val if isinstance(val, list) else [val] if val else []):
+                declared[f"endpoint_schema.{field}[{col!r}]"] = col
+        for field in ("doc_column", "score_column"):
+            val = getattr(dataset.endpoint_schema, field)
+            if val:
+                declared[f"endpoint_schema.{field}"] = val
     if dataset.transform:
         declared["transform.time_dimension"] = dataset.transform.time_dimension
         for fd in dataset.transform.filter_dimensions or []:
@@ -139,6 +151,18 @@ def _validate_column_identifiers(dataset: DatasetCreate) -> None:
                 "Column names must be plain identifiers "
                 "(letters, digits, underscore; not starting with a digit). "
                 f"Invalid: {bad}"
+            ),
+        )
+
+    # order_column reaches ORDER BY verbatim and may carry a sort direction, so
+    # it is validated separately: a column name optionally followed by ASC/DESC.
+    oc = dataset.endpoint_schema.order_column if dataset.endpoint_schema else None
+    if oc is not None and not _ORDER_RE.match(str(oc)):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "endpoint_schema.order_column must be a column name optionally "
+                f"followed by ASC or DESC. Invalid: {oc!r}"
             ),
         )
 
@@ -178,6 +202,11 @@ def _validate_types_counts(dataset: DatasetCreate, derived: Dict[str, Any]) -> N
         count_cols = ep.count_column or "counts"
         count_cols = count_cols if isinstance(count_cols, list) else [count_cols]
         expected = [type_col, *count_cols]
+        # rank/freq companions (scalar or parallel list) reach the term-series
+        # SELECT too — every declared one must exist on disk.
+        for field in ("rank_column", "freq_column"):
+            val = getattr(ep, field, None)
+            expected += (val if isinstance(val, list) else [val] if val else [])
         if dataset.transform and dataset.transform.time_dimension:
             expected.append(dataset.transform.time_dimension)
         missing = [c for c in expected if c not in data_schema]
@@ -678,6 +707,9 @@ async def list_registered_datasets(db: AsyncSession = Depends(get_session)):
                 "data_format": ds.data_format,
                 "description": ds.description,
                 "endpoint_schema": ds.endpoint_schema,
+                # lineage distinguishes companion datasets (derived_from set)
+                # from self-serving type-first primaries in consumer listings.
+                "lineage": ds.lineage,
                 "level_order": ds.level_order,
                 "filter_values": ds.filter_values,
                 "created_at": ds.created_at,

@@ -189,6 +189,8 @@ class TestRouteCoverage:
         "/admin/auth/users": ("UsersClient", "list"),  # + create() for POST
         "/admin/auth/users/{user_id}/role": ("UsersClient", "set_role"),
         "/storywrangler/top-ngrams": ("InstrumentClient", "top_ngrams"),
+        "/storywrangler/term-series": ("InstrumentClient", "term_series"),
+        "/storywrangler/term-series/batch": ("InstrumentClient", "term_series_batch"),
         "/storywrangler/allotax": ("InstrumentClient", "allotax"),
         "/storywrangler/rtd": ("InstrumentClient", "rtd"),
         "/storywrangler/wordshift": ("InstrumentClient", "wordshift"),
@@ -201,23 +203,14 @@ class TestRouteCoverage:
         "/scisciDB": ("DatasetClient", "endpoints"),
         "/twitter": ("DatasetClient", "endpoints"),
         "/vt-zoning-atlas": ("DatasetClient", "endpoints"),
-        # Twitter (mongodb pass-through, bespoke router mirroring the generic shapes)
-        "/twitter/term-series": ("DatasetClient", "term_series"),
-        "/twitter/term-series/batch": ("DatasetClient", "term_series_batch"),
         # Platform
         "/version": ("Storywrangler", "version"),
         "/health/status": ("HealthClient", "status"),
         "/health/status/history": ("HealthClient", "history"),
         "/health/status/{domain}/{dataset_id}": ("HealthClient", "dataset"),
-        # Data endpoints — generic DatasetClient methods, domain-bound
-        # (top-ngrams is served by the generic /storywrangler/top-ngrams for
-        # every domain; babynames and vt-zoning-atlas have no bespoke routes)
-        "/wikimedia/term-series": ("DatasetClient", "term_series"),
-        "/wikimedia/term-series/batch": ("DatasetClient", "term_series_batch"),
-        "/reddit/term-series": ("DatasetClient", "term_series"),
-        "/reddit/term-series/batch": ("DatasetClient", "term_series_batch"),
-        "/bluesky/term-series": ("DatasetClient", "term_series"),
-        "/bluesky/term-series/batch": ("DatasetClient", "term_series_batch"),
+        # term-series is served by the generic /storywrangler/term-series for
+        # every domain (bespoke /{domain}/term-series routes retired); top-ngrams
+        # likewise. babynames and vt-zoning-atlas have no bespoke routes at all.
         # Bespoke routes — served via the escape hatch for now
         "/wikimedia/precomputed-rtd": ("Storywrangler", "get"),
         "/wikimedia/revisions": ("Storywrangler", "get"),
