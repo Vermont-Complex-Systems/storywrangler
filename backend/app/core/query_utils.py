@@ -476,3 +476,31 @@ def availability_range_for(dataset_obj, local_id, filter_vals: Optional[dict] = 
     """
     leaf = _availability_leaf_for(dataset_obj, local_id, filter_vals)
     return (leaf.get("min"), leaf.get("max")) if leaf else (None, None)
+
+
+def require_dates_within(lo, hi, label: str, *date_strs) -> None:
+    """400 when a requested range falls entirely outside [lo, hi] availability.
+
+    Teaches the slice's actual bounds instead of returning a bare empty result
+    the caller has to debug against the registry. Partial overlap passes (the
+    query serves the overlap); best-effort — skipped when the slice has no
+    introspected bounds. Values compare as strings: ISO dates and 4-digit
+    years both order lexicographically.
+    """
+    if not (lo and hi):
+        return
+    for ds in date_strs:
+        dr = parse_dates(ds)
+        if dr is None:
+            continue
+        start, end = str(dr[0]), str(dr[1])
+        if end < str(lo) or start > str(hi):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"dates={ds} is outside the available range for '{label}' "
+                    f"with the requested parameters — available: {lo}..{hi}. "
+                    "Per-slice bounds are in manifest.availability "
+                    "(GET /registry/{domain}/{dataset_id})."
+                ),
+            )

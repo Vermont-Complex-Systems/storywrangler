@@ -57,8 +57,8 @@ from .mongo_query import (
 )
 from .query_utils import (
     availability_range_for, dates_mode, extract_filter_vals, parse_dates,
-    require_dates_supported, require_types_counts, resolve_companions,
-    resolve_count_column, resolve_entity, resolve_series_columns,
+    require_dates_supported, require_dates_within, require_types_counts,
+    resolve_companions, resolve_count_column, resolve_entity, resolve_series_columns,
 )
 from .registry_utils import get_latest_entry
 from .timing import timed
@@ -178,6 +178,9 @@ async def prepare_term_series(request, db, domain, dataset, entity, weight, date
     # independently). latest_date defaults the UI's date picker; the [min, max]
     # range clamps an undated request so its fallback scan stays bounded.
     lo, hi = _widest_availability(dataset_obj, type_first_obj, local_id, filter_vals)
+    # Teach the slice's availability rather than returning a bare empty series
+    # when an explicit range lies entirely outside it.
+    require_dates_within(lo, hi, f"{domain}/{dataset}", dates)
     latest_date = hi
     if date_range is None:
         if not hi:

@@ -28,8 +28,9 @@ from ..core.duckdb_query import (
     handle_query_error, load_system,
 )
 from ..core.query_utils import (
-    extract_filter_pair, extract_filter_vals, latest_from_manifest, parse_dates,
-    require_dates_supported, require_types_counts, resolve_count_column, resolve_entity,
+    availability_range_for, extract_filter_pair, extract_filter_vals,
+    latest_from_manifest, parse_dates, require_dates_supported, require_dates_within,
+    require_types_counts, resolve_count_column, resolve_entity,
 )
 from ..core.registry_utils import get_latest_entry
 from ..core.term_series import (
@@ -172,6 +173,11 @@ async def top_ngrams(
         local_id = (await resolve_entity(db, domain, dataset, entity)).local_id
     else:
         local_id = None
+
+    # Teach the slice's availability instead of returning a bare empty result
+    # when the requested range lies entirely outside it.
+    lo, hi = availability_range_for(dataset_obj, local_id, filter_vals)
+    require_dates_within(lo, hi, f"{domain}/{dataset}", dates, dates2)
 
     metadata = {
         "domain": domain,

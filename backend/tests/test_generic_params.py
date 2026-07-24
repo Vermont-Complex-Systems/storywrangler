@@ -262,3 +262,54 @@ class TestWidestAvailability:
         from app.core.term_series import _widest_availability
         assert _widest_availability(self._obj("2015-01-01", "2026-01-01"), None, None, {}) == (
             "2015-01-01", "2026-01-01")
+
+
+class TestRequireDatesWithin:
+    """The out-of-range teaching guard: a range entirely outside the slice's
+    availability is a 400 naming the actual bounds, not a bare empty result."""
+
+    def _check(self, *dates, lo="2024-09-30", hi="2026-07-18"):
+        from app.core.query_utils import require_dates_within
+        require_dates_within(lo, hi, "wikimedia/ngrams", *dates)
+
+    def test_in_range_passes(self):
+        self._check("2026-01-01,2026-01-31")
+        self._check("2026-01-01")  # single date
+
+    def test_partial_overlap_passes(self):
+        # The query serves the overlap — only fully-disjoint ranges are refused.
+        self._check("2024-01-01,2024-10-15")
+        self._check("2026-07-01,2026-12-31")
+
+    def test_disjoint_range_teaches_400(self):
+        import pytest
+        from fastapi import HTTPException
+        with pytest.raises(HTTPException) as exc:
+            self._check("2010-01-01,2010-12-31")
+        assert exc.value.status_code == 400
+        assert "2024-09-30..2026-07-18" in exc.value.detail
+
+    def test_future_date_teaches_400(self):
+        import pytest
+        from fastapi import HTTPException
+        with pytest.raises(HTTPException) as exc:
+            self._check("2030-06-01")
+        assert exc.value.status_code == 400
+
+    def test_second_range_checked_too(self):
+        import pytest
+        from fastapi import HTTPException
+        with pytest.raises(HTTPException):
+            self._check("2026-01-01", "1999-01-01")  # dates ok, dates2 outside
+
+    def test_none_dates_and_missing_bounds_skip(self):
+        self._check(None)                       # dateless request
+        self._check("2010-01-01", lo=None, hi=None)  # never introspected
+
+    def test_year_values_compare_lexicographically(self):
+        # babynames-style: year strings/ints, 4 digits order as strings
+        import pytest
+        from fastapi import HTTPException
+        self._check("1991,1993", lo=1880, hi=2018)
+        with pytest.raises(HTTPException):
+            self._check("2020,2024", lo=1880, hi=2018)

@@ -140,6 +140,7 @@ STORYWRANGLER_TOP_NGRAMS = {
     "x-frontend-notes": {
         "filters": "Filter dimensions are dataset-specific query params using registered column names (?ngram_size=1&granularity=daily for wikimedia, ?n=1&lang=en for reddit, ?sex=M for babynames). Discover them via GET /registry/{domain}/{dataset_id} (level_order / transform.filter_dimensions).",
         "comparison": "Pass dates2 for a two-system temporal comparison; the response keys the two arrays by their date ranges instead of 'data'. mongodb pass-through datasets (twitter) accept single dates only.",
+        "dates_range": "A range entirely outside the slice's availability is a 400 naming the actual bounds (from manifest.availability) — no need to look them up before querying.",
     },
 }
 
